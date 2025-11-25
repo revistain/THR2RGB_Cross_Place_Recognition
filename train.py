@@ -172,7 +172,7 @@ for epoch_num in range(start_epoch_num, args.epochs_num):
     logging.info(f"epoch {epoch_num:02d} time: {str(datetime.now() - epoch_start_time)[:-7]}, ")
 
     # Compute recalls
-    recalls, recalls_str = inference.inference(args, train_ds, model)
+    recalls, recalls_str = inference.inference(args, test_ds, model)
     logging.info(f"Recalls: {recalls_str}")
 
     is_best = recalls[0] > best_r1
