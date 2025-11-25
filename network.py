@@ -149,7 +149,7 @@ class CrossModalVPR_Net(nn.Module):
         
         self.output_dim = 768
 
-    def forward_backbone(self, x, modality='rgb'):
+    def forward_model(self, x, modality='rgb'):
         """단일 모달리티에 대한 Forward"""
         if modality == 'rgb':
             out = self.rgb_backbone(x)
@@ -165,8 +165,7 @@ class CrossModalVPR_Net(nn.Module):
         patch_tokens = out["x_norm_patchtokens"]
         B, N, D = patch_tokens.shape
         
-        # (B, N, D) -> (B, D, N) -> (B, D, H, W) 형태로 변환 (GeM 입력을 위해)
-        # 여기서 H, W는 patch 개수에 따라 계산 필요 (예: 14x14=196 patches)
+        # 224,224 정방 이미지 입력 가정
         H_feat = W_feat = int(math.sqrt(N)) 
         
         x_feat = patch_tokens.permute(0, 2, 1).view(B, D, H_feat, W_feat)
@@ -179,9 +178,9 @@ class CrossModalVPR_Net(nn.Module):
     def forward(self, x, flags):
         is_rgb = torch.tensor([f == 'rgb' for f in flags], device=x.device)
         final_emb = torch.zeros((x.size(0), self.output_dim), device=x.device)
-
-        if is_rgb.any():  final_emb[is_rgb] = self.forward_backbone(x[is_rgb], 'rgb')
-        if (~is_rgb).any(): final_emb[~is_rgb] = self.forward_backbone(x[~is_rgb], 'thermal')
+        
+        if is_rgb.any():  final_emb[is_rgb] = self.forward_model(x[is_rgb], 'rgb')
+        if (~is_rgb).any(): final_emb[~is_rgb] = self.forward_model(x[~is_rgb], 'thermal')
         
         return final_emb
 

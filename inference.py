@@ -86,29 +86,21 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
     pre_num = eval_ds.queries_num
     for query_index, pred in enumerate(predictions):
         for i, n in enumerate(args.recall_values):
-            # 如果没有正样本
-            # print("type(positives_per_query[query_index]): ", type(positives_per_query[query_index]))
-            # if positives_per_query[query_index].size == 0:
-            #     eval_ds.queries_num -= 1
-            #     continue
             if np.any(np.in1d(pred[:n], positives_per_query[query_index])):
                 recalls[i:] += 1
-                print(f"pred[:{n}]: {pred[:n]}")
-                print(f"positives_per_query[{query_index}]: {positives_per_query[query_index]}")
-                print(f"recalls: {recalls}")
-                break
-            elif i == 3:
-                print(f"failed query_index: {query_index}")
-                print(f"pred[:{n}]: {pred[:n]}")
-                print(f"positives_per_query[{query_index}]: {positives_per_query[query_index]}")
+                # print(f"pred[:{n}]: {pred[:n]}")
+                # print(f"positives_per_query[{query_index}]: {positives_per_query[query_index]}")
                 # print(f"recalls: {recalls}")
-    # Divide by the number of queries*100, so the recalls are in percentages
+                break
+            # elif i == 3:
+            #     print(f"failed query_index: {query_index}")
+            #     print(f"pred[:{n}]: {pred[:n]}")
+            #     print(f"positives_per_query[{query_index}]: {positives_per_query[query_index]}")
     recalls = recalls / eval_ds.queries_num * 100
-    # 以列表的形式打印，要用逗号隔开
+    
     logging.info(f"recalls: {','.join(map(str, recalls))}")
     recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, recalls)])
     print(pre_num, eval_ds.queries_num)
-    # logging.info(f"Finished calculating recalls in {time.time() - start_time:.2f} s")
     
     return recalls, recalls_str
 

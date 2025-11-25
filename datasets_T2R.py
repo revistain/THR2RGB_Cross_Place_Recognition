@@ -275,7 +275,7 @@ class TripletsSTheReODual(BaseSTheReODual):
         # negatives = [torch.cat((rgb, t), dim=0) for rgb, t in zip(rgb_negatives, t_negatives)]
         negatives = [self.resized_transform(self.get_rgb_img(self.rgb_database_paths[i])) for i in neg_indexes]
         
-        images = torch.stack((positive, *negatives, query), 0)
+        images = torch.stack((query, positive, *negatives), 0)
         
         triplets_local_indexes = torch.tensor([([0, 1, neg_num + 2]) for neg_num in range(len(neg_indexes))])
         return images, triplets_local_indexes, self.triplets_global_indexes[index]

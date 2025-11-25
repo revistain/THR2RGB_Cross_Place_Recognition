@@ -79,6 +79,8 @@ class Parser():
         self.parser.add_argument("--resume", type=str, default=None, nargs='*',
                             help="Path to load checkpoint from, for resuming training or testing.")
         self.parser.add_argument("--save_all", type=bool, default=False)
+        
+        self.parser.add_argument("--num_trainable_blocks", type=int, default=0, help="number of trainable blocks")
     
     def parse_arguments(self):
         args = self.parser.parse_args()

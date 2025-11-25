@@ -55,9 +55,17 @@ model = torch.nn.DataParallel(model)
 for name, param in model.module.rgb_backbone.named_parameters():
     if "adapter" not in name:
         param.requires_grad = False
+    # channge last args.num_trainable_blocks trainable
+    for i in range(args.num_trainable_blocks):
+        num_blocks = len(model.module.rgb_backbone.blocks)
+        model.module.rgb_backbone.blocks[num_blocks - i - 1].requires_grad_(True)
+
 for name, param in model.module.thermal_backbone.named_parameters():
     if "adapter" not in name:
         param.requires_grad = False
+    for i in range(args.num_trainable_blocks):
+        num_blocks = len(model.module.thermal_backbone.blocks)
+        model.module.thermal_backbone.blocks[num_blocks - i - 1].requires_grad_(True)
 
 ## initialize Adapter
 for n, m in model.named_modules():
@@ -90,7 +98,7 @@ if args.resume:
 else:
     best_r1 = start_epoch_num = not_improved_num = 0
 
-bundle_flags = ['rgb'] * (1 + args.negs_num_per_query) + ['thermal'] # ['rgb', 'rgb', 'rgb', 'rgb', 'rgb', 'rgb', 'rgb', 'rgb', 'rgb', 'rgb', 'rgb', 'thermal']
+bundle_flags =  ['thermal'] + ['rgb'] * (1 + args.negs_num_per_query) # ['thermal', 'rgb', 'rgb', 'rgb', 'rgb', 'rgb', 'rgb', 'rgb', 'rgb', 'rgb', 'rgb']
 num_bundle_flags = len(bundle_flags)
 
 '''Training'''
@@ -127,7 +135,7 @@ for epoch_num in range(start_epoch_num, args.epochs_num):
             
             global_features = model(images.to(args.device), flags=flags)
             overall_loss = 0
-
+            
             triplets_local_indexes = torch.transpose(
                 triplets_local_indexes.view(args.train_batch_size, args.negs_num_per_query, 3), 1, 0)
             for triplets in triplets_local_indexes:
