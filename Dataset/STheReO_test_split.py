@@ -11,8 +11,8 @@ import cv2
 
 np.random.seed(42)
 
-dataset_dir = '../STheReO'
-seq = 'Valley'
+dataset_dir = '/DATA1/datasets/PR/STheReO'
+seq = 'SNU'
 sequence_key = {'KAIST': ['sthereo_01_kaist_morning', 'sthereo_02_kaist_afternoon', 'sthereo_03_kaist_evening'], 
                 'SNU': ['sthereo_04_snu_morning', 'sthereo_05_snu_afternoon', 'sthereo_06_snu_evening'], 
                 'Valley': ['sthereo_07_valley_morning', 'sthereo_08_valley_afternoon', 'sthereo_09_valley_evening']}
