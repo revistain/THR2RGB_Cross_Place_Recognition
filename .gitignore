@@ -3,8 +3,8 @@ __pycache__/
 ._*
 .DS_Store
 
-./logs
-./STheReO
+logs/
+STheReO/
 
 *.pth
 *.png
@@ -12,3 +12,4 @@ __pycache__/
 *.pcd
 *.ply
 *.mat
+*.yaml
