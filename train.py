@@ -15,7 +15,8 @@ import torchvision.models as models
 from Parser import Parser
 import commons
 import utils
-import datasets_dual
+# import datasets_dual
+import datasets_T2R
 import inference
 import network
 import random
@@ -24,7 +25,6 @@ import random
 parser = Parser()
 args = parser.parse_arguments()
 
-os.environ["CUDA_VISIBLE_DEVICES"] = '0,1'
 commons.setup_logging(args.save_dir)
 commons.seed_everything(args.seed)
 
@@ -37,22 +37,25 @@ logging.info(f"Use {torch.cuda.device_count()} GPUs and {multiprocessing.cpu_cou
 
 '''Datasets'''
 args.sequences = ['KAIST']  # Use KAIST sequence for training
-DATASET_FOLDER = "./STHEREO_Mat"
+DATASET_FOLDER = "./Dataset/save_mat"
 
-triplets_ds = datasets_dual.TripletsSTheReODual(args, DATASET_FOLDER)
-train_ds = datasets_dual.BaseSTheReODual(args, DATASET_FOLDER, split='train')
+triplets_ds = datasets_T2R.TripletsSTheReODual(args, DATASET_FOLDER)
+train_ds = datasets_T2R.BaseSTheReODual(args, DATASET_FOLDER, split='train')
 args.sequences = ['SNU', 'Valley']
 args.soft_positives_dist_threshold = 10
-test_ds = datasets_dual.BaseSTheReODual(args, DATASET_FOLDER, split='test')
+test_ds = datasets_T2R.BaseSTheReODual(args, DATASET_FOLDER, split='test')
 
 
 '''Model'''
-model = network.RGBTVPR_Net(pretrained_foundation = True, foundation_model_path = args.foundation_model_path)
+model = network.CrossModalVPR_Net(pretrained_foundation = True, foundation_model_path = args.foundation_model_path)
 model = model.to(args.device)
 model = torch.nn.DataParallel(model)
 
 ## Freeze parameters except adapter
-for name, param in model.module.backbone.named_parameters():
+for name, param in model.module.rgb_backbone.named_parameters():
+    if "adapter" not in name:
+        param.requires_grad = False
+for name, param in model.module.thermal_backbone.named_parameters():
     if "adapter" not in name:
         param.requires_grad = False
 
@@ -87,6 +90,9 @@ if args.resume:
 else:
     best_r1 = start_epoch_num = not_improved_num = 0
 
+bundle_flags = ['rgb'] * (1 + args.negs_num_per_query) + ['thermal'] # ['rgb', 'rgb', 'rgb', 'rgb', 'rgb', 'rgb', 'rgb', 'rgb', 'rgb', 'rgb', 'rgb', 'thermal']
+num_bundle_flags = len(bundle_flags)
+
 '''Training'''
 for epoch_num in range(start_epoch_num, args.epochs_num):
     logging.info(f"Start training epoch: {epoch_num:02d}")
@@ -108,7 +114,7 @@ for epoch_num in range(start_epoch_num, args.epochs_num):
 
         triplets_dl = DataLoader(dataset=triplets_ds, num_workers=args.num_workers,
                                  batch_size=args.train_batch_size,
-                                 collate_fn=datasets_dual.collate_fn,
+                                 collate_fn=datasets_T2R.collate_fn,
                                  pin_memory=(args.device == "cuda"),
                                  drop_last=True)
         model = model.train()
@@ -116,29 +122,40 @@ for epoch_num in range(start_epoch_num, args.epochs_num):
         logging.debug(f"Start loading {len(triplets_ds)} triplets as {len(triplets_dl)} batches")
 
         for images, triplets_local_indexes, _ in tqdm(triplets_dl, ncols=100):
-            global_features = model(images.to(args.device))
-            global_loss = 0
+            curr_batch_len = len(images) // num_bundle_flags
+            flags = bundle_flags * curr_batch_len
+            
+            global_features = model(images.to(args.device), flags=flags)
+            overall_loss = 0
 
             triplets_local_indexes = torch.transpose(
                 triplets_local_indexes.view(args.train_batch_size, args.negs_num_per_query, 3), 1, 0)
             for triplets in triplets_local_indexes:
                 queries_indexes, positives_indexes, negatives_indexes = triplets.T
+                
+                query_features = global_features[queries_indexes]      # (query)    thermal descriptor
+                positive_features = global_features[positives_indexes] # (positive) rgb descriptor
+                negative_features = global_features[negatives_indexes] # (negative) rgb descriptor
 
-                global_loss += GlobalTriplet(global_features[queries_indexes],
-                                             global_features[positives_indexes],
-                                             global_features[negatives_indexes])
+                triplet_loss = GlobalTriplet(query_features,
+                                             positive_features,
+                                             negative_features)
+                
+                RT_alignment_loss = 0 # TODO: RGB-Thermal alignment 향상을 위한 loss 설계 필요
+                
+                overall_loss += (triplet_loss + RT_alignment_loss)
 
-            global_loss /= (args.train_batch_size * args.negs_num_per_query)
+            overall_loss /= (args.train_batch_size * args.negs_num_per_query)
 
-            del global_features
+            del global_features, query_features, positive_features, negative_features
 
             optimizer.zero_grad()
-            global_loss.backward()
+            overall_loss.backward()
             optimizer.step()
 
-            batch_loss = global_loss.item()
+            batch_loss = overall_loss.item()
             epoch_losses = np.append(epoch_losses, batch_loss)
-            del global_loss
+            del overall_loss, triplet_loss, RT_alignment_loss
 
         logging.info(f"Epoch[{epoch_num:02d}]({loop_num + 1}/{loops_num}): " +
                      f"current batch triplet loss = {batch_loss:.8f}, " +

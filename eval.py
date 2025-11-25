@@ -9,7 +9,8 @@ import numpy as np
 import commons
 import utils
 import inference
-import datasets_dual
+# import datasets_dual
+import datasets_T2R
 import network
 
 '''Setup'''
@@ -26,7 +27,7 @@ logging.debug(f"The outputs are being saved in {args.save_dir}")
 args.recall_values = list(range(1, 26))
 
 '''Model'''
-model = network.RGBTVPR_Net(pretrained_foundation = True, foundation_model_path = args.foundation_model_path)
+model = network.CrossModalVPR_Net(pretrained_foundation = True, foundation_model_path = args.foundation_model_path)
 model = model.to(args.device)
 
 resume_path= args.resume[0]
@@ -34,8 +35,8 @@ print(resume_path)
 model = utils.resume_model(resume_path, model)
 
 '''Dataset'''
-DATASET_FOLDER = "./STHEREO_Mat"
-test_ds = datasets_dual.BaseSTheReODual(args, DATASET_FOLDER, split='test')
+DATASET_FOLDER = "./Dataset/save_mat"
+test_ds = datasets_T2R.BaseSTheReODual(args, DATASET_FOLDER, split='test')
 
 recalls, recalls_str = inference.inference(args, test_ds, model)
 logging.info(f"Recalls on {test_ds}: {recalls_str}")

@@ -6,7 +6,6 @@ from backbone.vision_transformer import vit_small, vit_base, vit_large, vit_gian
 import math
 import numpy as np
 from sklearn.neighbors import NearestNeighbors
-from models import helper
 import torchvision.models as models
 
 class GeM(nn.Module):
@@ -125,6 +124,66 @@ class RGBTVPR_Net(nn.Module):
         x = self.aggregation(x) # [B, 768]
         
         return x
+
+class CrossModalVPR_Net(nn.Module):
+    def __init__(self, pretrained_foundation=False, foundation_model_path=None):
+        super().__init__()
+
+        # 1. 두 개의 독립적인 Backbone 생성 (Weights Unshared)
+        # Cross-modal에서는 모달리티 간 특성이 다르므로 가중치를 공유하지 않는 것이 일반적입니다.
+        self.rgb_backbone = get_backbone(pretrained_foundation, foundation_model_path)
+        self.thermal_backbone = get_backbone(pretrained_foundation, foundation_model_path)
+
+        # 2. Aggregation Layer (각각 따로 두는 것을 추천)
+        # GeM의 파라미터 p가 모달리티별로 다르게 학습될 수 있도록 분리합니다.
+        self.rgb_aggregation = nn.Sequential(
+            L2Norm(), 
+            GeM(work_with_tokens=None), 
+            Flatten()
+        )
+        self.thermal_aggregation = nn.Sequential(
+            L2Norm(), 
+            GeM(work_with_tokens=None), 
+            Flatten()
+        )
+        
+        self.output_dim = 768
+
+    def forward_backbone(self, x, modality='rgb'):
+        """단일 모달리티에 대한 Forward"""
+        if modality == 'rgb':
+            out = self.rgb_backbone(x)
+            agg_layer = self.rgb_aggregation
+        elif modality == 'thermal':
+            out = self.thermal_backbone(x)
+            agg_layer = self.thermal_aggregation
+        else:
+            raise ValueError("Modality must be 'rgb' or 'thermal'")
+            
+        # Backbone 출력 처리 (ViT 기준)
+        # x['x_norm_patchtokens']: (B, num_patchs, D)
+        patch_tokens = out["x_norm_patchtokens"]
+        B, N, D = patch_tokens.shape
+        
+        # (B, N, D) -> (B, D, N) -> (B, D, H, W) 형태로 변환 (GeM 입력을 위해)
+        # 여기서 H, W는 patch 개수에 따라 계산 필요 (예: 14x14=196 patches)
+        H_feat = W_feat = int(math.sqrt(N)) 
+        
+        x_feat = patch_tokens.permute(0, 2, 1).view(B, D, H_feat, W_feat)
+        
+        # Aggregation -> Descriptor
+        global_desc = agg_layer(x_feat) # [B, D]
+        
+        return global_desc
+
+    def forward(self, x, flags):
+        is_rgb = torch.tensor([f == 'rgb' for f in flags], device=x.device)
+        final_emb = torch.zeros((x.size(0), self.output_dim), device=x.device)
+
+        if is_rgb.any():  final_emb[is_rgb] = self.forward_backbone(x[is_rgb], 'rgb')
+        if (~is_rgb).any(): final_emb[~is_rgb] = self.forward_backbone(x[~is_rgb], 'thermal')
+        
+        return final_emb
 
 def get_backbone(pretrained_foundation, foundation_model_path):
     backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0)

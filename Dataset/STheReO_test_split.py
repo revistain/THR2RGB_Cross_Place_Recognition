@@ -11,9 +11,11 @@ import cv2
 
 np.random.seed(42)
 
-dataset_dir = '/hdd/public_datasets/STHEREO'
-seq = 'SNU'
-sequence_key = {'KAIST': ['01', '02', '03'], 'SNU': ['06', '05', '04'], 'Valley': ['09', '08', '07']}
+dataset_dir = '../STheReO'
+seq = 'Valley'
+sequence_key = {'KAIST': ['sthereo_01_kaist_morning', 'sthereo_02_kaist_afternoon', 'sthereo_03_kaist_evening'], 
+                'SNU': ['sthereo_04_snu_morning', 'sthereo_05_snu_afternoon', 'sthereo_06_snu_evening'], 
+                'Valley': ['sthereo_07_valley_morning', 'sthereo_08_valley_afternoon', 'sthereo_09_valley_evening']}
 
 dataset_path = [os.path.join(dataset_dir, index) for index in sequence_key[seq]]   
 pose_path = [path + '/pose/local_pose.csv' for path in dataset_path]  
@@ -26,7 +28,7 @@ evening_pose_pd = pd.read_csv(pose_path[2], header=None)
 DB_DIS_TH = 5
 EXP1_DATA_DIST = 1
 
-save_path = os.path.join('Your_Save_Path', seq)
+save_path = os.path.join('save_mat', seq)
 if not os.path.exists(save_path):
     os.makedirs(save_path)
     print(f"create {save_path} ")

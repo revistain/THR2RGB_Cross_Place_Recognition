@@ -1,0 +1,343 @@
+2025-11-25 06:28:00   Use 2 GPUs and 128 CPUs
+2025-11-25 06:28:00   There are 0 queries without any positives
+2025-11-25 06:28:00   using MLP layer as FFN
+2025-11-25 06:28:03   using MLP layer as FFN
+2025-11-25 06:28:05   
+Traceback (most recent call last):
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/train.py", line 56, in <module>
+    for name, param in model.module.backbone.named_parameters():
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1931, in __getattr__
+    raise AttributeError(
+AttributeError: 'CrossModalVPR_Net' object has no attribute 'backbone'
+
+2025-11-25 06:28:29   Use 2 GPUs and 128 CPUs
+2025-11-25 06:28:29   There are 0 queries without any positives
+2025-11-25 06:28:29   using MLP layer as FFN
+2025-11-25 06:28:31   using MLP layer as FFN
+2025-11-25 06:28:34   Start training epoch: 00
+2025-11-25 06:28:35   
+Traceback (most recent call last):
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/train.py", line 108, in <module>
+    triplets_ds.compute_triplets(args, model)
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 292, in compute_triplets
+    self.compute_triplets_partial(args, model)
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 367, in compute_triplets_partial
+    cache = self.compute_cache(args, model, subset_ds, cache_shape=(len(self), args.features_dim))
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 313, in compute_cache
+    for images, indexes, flags in tqdm(subset_dl, ncols=100):
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/tqdm/std.py", line 1181, in __iter__
+    for obj in iterable:
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 701, in __next__
+    data = self._next_data()
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 1465, in _next_data
+    return self._process_data(data)
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 1491, in _process_data
+    data.reraise()
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/_utils.py", line 715, in reraise
+    raise exception
+cv2.error: Caught error in DataLoader worker process 0.
+Original Traceback (most recent call last):
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/_utils/worker.py", line 351, in _worker_loop
+    data = fetcher.fetch(index)  # type: ignore[possibly-undefined]
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/_utils/fetch.py", line 50, in fetch
+    data = self.dataset.__getitems__(possibly_batched_index)
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/dataset.py", line 420, in __getitems__
+    return [self.dataset[self.indices[idx]] for idx in indices]
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/dataset.py", line 420, in <listcomp>
+    return [self.dataset[self.indices[idx]] for idx in indices]
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 258, in __getitem__
+    return super().__getitem__(index)
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 156, in __getitem__
+    img = self.get_rgb_img(self.rgb_img_paths[index])
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 145, in get_rgb_img
+    img = cv2.cvtColor(img, cv2.COLOR_BAYER_BG2RGB)
+cv2.error: OpenCV(4.11.0) /io/opencv/modules/imgproc/src/color.cpp:199: error: (-215:Assertion failed) !_src.empty() in function 'cvtColor'
+
+
+
+2025-11-25 06:32:46   Use 2 GPUs and 128 CPUs
+2025-11-25 06:32:46   There are 0 queries without any positives
+2025-11-25 06:32:47   using MLP layer as FFN
+2025-11-25 06:32:48   using MLP layer as FFN
+2025-11-25 06:32:51   Start training epoch: 00
+2025-11-25 06:33:20   
+Traceback (most recent call last):
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/train.py", line 108, in <module>
+    triplets_ds.compute_triplets(args, model)
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 292, in compute_triplets
+    self.compute_triplets_partial(args, model)
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 367, in compute_triplets_partial
+    cache = self.compute_cache(args, model, subset_ds, cache_shape=(len(self), args.features_dim))
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 313, in compute_cache
+    for images, indexes, flags in tqdm(subset_dl, ncols=100):
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/tqdm/std.py", line 1181, in __iter__
+    for obj in iterable:
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 701, in __next__
+    data = self._next_data()
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 1465, in _next_data
+    return self._process_data(data)
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 1491, in _process_data
+    data.reraise()
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/_utils.py", line 715, in reraise
+    raise exception
+TypeError: Caught TypeError in DataLoader worker process 0.
+Original Traceback (most recent call last):
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/_utils/worker.py", line 351, in _worker_loop
+    data = fetcher.fetch(index)  # type: ignore[possibly-undefined]
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/_utils/fetch.py", line 55, in fetch
+    return self.collate_fn(data)
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/_utils/collate.py", line 398, in default_collate
+    return collate(batch, collate_fn_map=default_collate_fn_map)
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/_utils/collate.py", line 211, in collate
+    return [
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/_utils/collate.py", line 212, in <listcomp>
+    collate(samples, collate_fn_map=collate_fn_map)
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/_utils/collate.py", line 240, in collate
+    raise TypeError(default_collate_err_msg_format.format(elem_type))
+TypeError: default_collate: batch must contain tensors, numpy arrays, numbers, dicts or lists; found <class 'NoneType'>
+
+
+2025-11-25 06:41:14   Use 2 GPUs and 128 CPUs
+2025-11-25 06:41:14   There are 0 queries without any positives
+2025-11-25 06:41:14   using MLP layer as FFN
+2025-11-25 06:41:16   using MLP layer as FFN
+2025-11-25 06:41:21   Start training epoch: 00
+2025-11-25 06:44:55   
+Traceback (most recent call last):
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/train.py", line 108, in <module>
+    triplets_ds.compute_triplets(args, model)
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 293, in compute_triplets
+    self.compute_triplets_partial(args, model)
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 368, in compute_triplets_partial
+    cache = self.compute_cache(args, model, subset_ds, cache_shape=(len(self), args.features_dim))
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 314, in compute_cache
+    for images, indexes, flags in tqdm(subset_dl, ncols=100):
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/tqdm/std.py", line 1181, in __iter__
+    for obj in iterable:
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 701, in __next__
+    data = self._next_data()
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 757, in _next_data
+    data = self._dataset_fetcher.fetch(index)  # may raise StopIteration
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/_utils/fetch.py", line 50, in fetch
+    data = self.dataset.__getitems__(possibly_batched_index)
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/dataset.py", line 420, in __getitems__
+    return [self.dataset[self.indices[idx]] for idx in indices]
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/dataset.py", line 420, in <listcomp>
+    return [self.dataset[self.indices[idx]] for idx in indices]
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 259, in __getitem__
+    return super().__getitem__(index)
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 167, in __getitem__
+    return img, index, flag
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 167, in __getitem__
+    return img, index, flag
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/bdb.py", line 90, in trace_dispatch
+    return self.dispatch_line(frame)
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/bdb.py", line 115, in dispatch_line
+    if self.quitting: raise BdbQuit
+bdb.BdbQuit
+
+2025-11-25 06:45:01   Use 2 GPUs and 128 CPUs
+2025-11-25 06:45:01   There are 0 queries without any positives
+2025-11-25 06:45:01   using MLP layer as FFN
+2025-11-25 06:45:03   using MLP layer as FFN
+2025-11-25 06:45:07   Start training epoch: 00
+2025-11-25 06:45:36   
+Traceback (most recent call last):
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/train.py", line 108, in <module>
+    triplets_ds.compute_triplets(args, model)
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 293, in compute_triplets
+    self.compute_triplets_partial(args, model)
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 368, in compute_triplets_partial
+    cache = self.compute_cache(args, model, subset_ds, cache_shape=(len(self), args.features_dim))
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 317, in compute_cache
+    global_features = model(images, flags)
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/nn/parallel/data_parallel.py", line 193, in forward
+    outputs = self.parallel_apply(replicas, inputs, module_kwargs)
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/nn/parallel/data_parallel.py", line 212, in parallel_apply
+    return parallel_apply(
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/nn/parallel/parallel_apply.py", line 118, in parallel_apply
+    thread.join()
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/threading.py", line 1096, in join
+    self._wait_for_tstate_lock()
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/threading.py", line 1116, in _wait_for_tstate_lock
+    if lock.acquire(block, timeout):
+KeyboardInterrupt
+
+2025-11-25 06:46:13   Use 1 GPUs and 128 CPUs
+2025-11-25 06:46:13   There are 0 queries without any positives
+2025-11-25 06:46:13   using MLP layer as FFN
+2025-11-25 06:46:15   using MLP layer as FFN
+2025-11-25 06:46:17   Start training epoch: 00
+2025-11-25 06:47:21   
+Traceback (most recent call last):
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/train.py", line 107, in <module>
+    triplets_ds.compute_triplets(args, model)
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 293, in compute_triplets
+    self.compute_triplets_partial(args, model)
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 368, in compute_triplets_partial
+    cache = self.compute_cache(args, model, subset_ds, cache_shape=(len(self), args.features_dim))
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 314, in compute_cache
+    for images, indexes, flags in tqdm(subset_dl, ncols=100):
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/tqdm/std.py", line 1181, in __iter__
+    for obj in iterable:
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 701, in __next__
+    data = self._next_data()
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 1448, in _next_data
+    idx, data = self._get_data()
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 1402, in _get_data
+    success, data = self._try_get_data()
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 1243, in _try_get_data
+    data = self._data_queue.get(timeout=timeout)
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/queue.py", line 180, in get
+    self.not_empty.wait(remaining)
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/threading.py", line 324, in wait
+    gotit = waiter.acquire(True, timeout)
+KeyboardInterrupt
+
+2025-11-25 06:48:10   Use 1 GPUs and 128 CPUs
+2025-11-25 06:48:10   There are 0 queries without any positives
+2025-11-25 06:48:11   using MLP layer as FFN
+2025-11-25 06:48:11   
+Traceback (most recent call last):
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/train.py", line 50, in <module>
+    model = network.CrossModalVPR_Net(pretrained_foundation = True, foundation_model_path = args.foundation_model_path)
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/network.py", line 134, in __init__
+    self.rgb_backbone = get_backbone(pretrained_foundation, foundation_model_path)
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/network.py", line 198, in get_backbone
+    backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0)
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/backbone/vision_transformer.py", line 329, in vit_base
+    model = DinoVisionTransformer(
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/backbone/vision_transformer.py", line 124, in __init__
+    blocks_list = [
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/backbone/vision_transformer.py", line 125, in <listcomp>
+    block_fn(
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/backbone/dinov2/block.py", line 107, in __init__
+    self.mlp = ffn_layer(
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/backbone/dinov2/mlp.py", line 32, in __init__
+    self.fc2 = nn.Linear(hidden_features, out_features, bias=bias)
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/nn/modules/linear.py", line 112, in __init__
+    self.reset_parameters()
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/nn/modules/linear.py", line 118, in reset_parameters
+    init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/nn/init.py", line 518, in kaiming_uniform_
+    return tensor.uniform_(-bound, bound, generator=generator)
+KeyboardInterrupt
+
+2025-11-25 06:48:29   Use 1 GPUs and 128 CPUs
+2025-11-25 06:48:29   There are 0 queries without any positives
+2025-11-25 06:48:30   using MLP layer as FFN
+2025-11-25 06:48:31   using MLP layer as FFN
+2025-11-25 06:48:34   Start training epoch: 00
+2025-11-25 06:52:44   
+Traceback (most recent call last):
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/train.py", line 107, in <module>
+    triplets_ds.compute_triplets(args, model)
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 293, in compute_triplets
+    self.compute_triplets_partial(args, model)
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 369, in compute_triplets_partial
+    cache = self.compute_cache(args, model, subset_ds, cache_shape=(len(self), args.features_dim))
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 316, in compute_cache
+    images = images.to(args.device)
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 316, in compute_cache
+    images = images.to(args.device)
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/bdb.py", line 90, in trace_dispatch
+    return self.dispatch_line(frame)
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/bdb.py", line 115, in dispatch_line
+    if self.quitting: raise BdbQuit
+bdb.BdbQuit
+
+2025-11-25 06:52:58   Use 1 GPUs and 128 CPUs
+2025-11-25 06:52:58   There are 0 queries without any positives
+2025-11-25 06:52:59   using MLP layer as FFN
+2025-11-25 06:53:01   using MLP layer as FFN
+2025-11-25 06:53:03   Start training epoch: 00
+2025-11-25 06:57:57   
+Traceback (most recent call last):
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/train.py", line 107, in <module>
+    triplets_ds.compute_triplets(args, model)
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 293, in compute_triplets
+    self.compute_triplets_partial(args, model)
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 370, in compute_triplets_partial
+    import pdb; pdb.set_trace()
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 370, in compute_triplets_partial
+    import pdb; pdb.set_trace()
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/bdb.py", line 90, in trace_dispatch
+    return self.dispatch_line(frame)
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/bdb.py", line 115, in dispatch_line
+    if self.quitting: raise BdbQuit
+bdb.BdbQuit
+
+2025-11-25 06:58:05   Use 1 GPUs and 128 CPUs
+2025-11-25 06:58:05   There are 0 queries without any positives
+2025-11-25 06:58:05   using MLP layer as FFN
+2025-11-25 06:58:07   using MLP layer as FFN
+2025-11-25 06:58:09   Start training epoch: 00
+2025-11-25 07:02:24   
+Traceback (most recent call last):
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/train.py", line 107, in <module>
+    triplets_ds.compute_triplets(args, model)
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 293, in compute_triplets
+    self.compute_triplets_partial(args, model)
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 369, in compute_triplets_partial
+    for query_index in tqdm(sampled_queries_indexes, ncols=100):
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 316, in compute_cache
+    # local_features, global_features = model(images)
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 316, in compute_cache
+    # local_features, global_features = model(images)
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/bdb.py", line 90, in trace_dispatch
+    return self.dispatch_line(frame)
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/bdb.py", line 115, in dispatch_line
+    if self.quitting: raise BdbQuit
+bdb.BdbQuit
+
+2025-11-25 07:02:43   Use 1 GPUs and 128 CPUs
+2025-11-25 07:02:43   There are 0 queries without any positives
+2025-11-25 07:02:43   using MLP layer as FFN
+2025-11-25 07:02:45   using MLP layer as FFN
+2025-11-25 07:02:47   Start training epoch: 00
+2025-11-25 07:03:07   
+Traceback (most recent call last):
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/train.py", line 123, in <module>
+    global_loss = 0
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/nn/parallel/data_parallel.py", line 191, in forward
+    return self.module(*inputs[0], **module_kwargs[0])
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/network.py", line 189, in forward
+    is_rgb = torch.tensor([f == 'rgb' for f in flags], device=x.device)
+TypeError: 'NoneType' object is not iterable
+
+2025-11-25 07:03:22   Use 1 GPUs and 128 CPUs
+2025-11-25 07:03:23   There are 0 queries without any positives
+2025-11-25 07:03:23   using MLP layer as FFN
+2025-11-25 07:03:25   using MLP layer as FFN
+2025-11-25 07:03:27   Start training epoch: 00
+2025-11-25 07:17:46   
+Traceback (most recent call last):
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/train.py", line 123, in <module>
+  File "/home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/train.py", line 123, in <module>
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/bdb.py", line 90, in trace_dispatch
+    return self.dispatch_line(frame)
+  File "/home/sjkwon/.conda/envs/exp/lib/python3.10/bdb.py", line 115, in dispatch_line
+    if self.quitting: raise BdbQuit
+bdb.BdbQuit
+
+2025-11-25 07:17:51   Use 1 GPUs and 128 CPUs
+2025-11-25 07:17:51   There are 0 queries without any positives
+2025-11-25 07:17:51   using MLP layer as FFN
+2025-11-25 07:17:53   using MLP layer as FFN
+2025-11-25 07:17:55   Start training epoch: 00
+2025-11-25 07:19:50   Epoch[00](1/5): current batch triplet loss = 0.07715737, average epoch triplet loss = 0.07233621
+2025-11-25 07:21:47   Epoch[00](2/5): current batch triplet loss = 0.03426675, average epoch triplet loss = 0.04926921
+2025-11-25 07:23:44   Epoch[00](3/5): current batch triplet loss = 0.01287662, average epoch triplet loss = 0.03802611
+2025-11-25 07:25:39   Epoch[00](4/5): current batch triplet loss = 0.00000000, average epoch triplet loss = 0.03026749

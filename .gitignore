@@ -2,3 +2,13 @@
 __pycache__/
 ._*
 .DS_Store
+
+./logs
+./STheReO
+
+*.pth
+*.png
+*.jpg
+*.pcd
+*.ply
+*.mat
