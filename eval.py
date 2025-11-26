@@ -14,7 +14,6 @@ import datasets_T2R
 import network
 
 '''Setup'''
-os.environ["CUDA_VISIBLE_DEVICES"] = '0,1'
 parser = Parser()
 args = parser.parse_arguments()
 
@@ -36,8 +35,11 @@ model = utils.resume_model(resume_path, model)
 
 '''Dataset'''
 DATASET_FOLDER = "./Dataset/save_mat"
-test_ds = datasets_T2R.BaseSTheReODual(args, DATASET_FOLDER, split='test')
-
-recalls, recalls_str = inference.inference(args, test_ds, model)
-logging.info(f"Recalls on {test_ds}: {recalls_str}")
+for seq in args.sequences:
+    logging.info(f"===== Evaluating Sequence: {seq} =====")
+    args.sequences = [seq]
+    test_ds = datasets_T2R.BaseSTheReODual(args, DATASET_FOLDER, split='test')
+    recalls, recalls_str = inference.inference(args, test_ds, model)
+    logging.info(f"Recalls on {seq}: {recalls_str}")
+    logging.info(f"================================================")
 

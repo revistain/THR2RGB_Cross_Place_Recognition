@@ -35,15 +35,21 @@ logging.debug(f"The outputs are being saved in {args.save_dir}")
 
 logging.info(f"Use {torch.cuda.device_count()} GPUs and {multiprocessing.cpu_count()} CPUs")
 
-'''Datasets'''
-args.sequences = ['KAIST']  # Use KAIST sequence for training
 DATASET_FOLDER = "./Dataset/save_mat"
 
+'''Datasets'''
+args.sequences = ['KAIST']  # Use KAIST sequence for training
 triplets_ds = datasets_T2R.TripletsSTheReODual(args, DATASET_FOLDER)
 train_ds = datasets_T2R.BaseSTheReODual(args, DATASET_FOLDER, split='train')
+
 args.sequences = ['SNU', 'Valley']
-args.soft_positives_dist_threshold = 10
-test_ds = datasets_T2R.BaseSTheReODual(args, DATASET_FOLDER, split='test')
+test_sequences = args.sequences
+# test_ds = datasets_T2R.BaseSTheReODual(args, DATASET_FOLDER, split='test')
+test_ds_list = []
+for seq in test_sequences:
+    args.sequences = [seq]
+    test_ds = datasets_T2R.BaseSTheReODual(args, DATASET_FOLDER, split='test')
+    test_ds_list.append(test_ds)
 
 
 '''Model'''
@@ -172,10 +178,16 @@ for epoch_num in range(start_epoch_num, args.epochs_num):
     logging.info(f"epoch {epoch_num:02d} time: {str(datetime.now() - epoch_start_time)[:-7]}, ")
 
     # Compute recalls
-    recalls, recalls_str = inference.inference(args, test_ds, model)
-    logging.info(f"Recalls: {recalls_str}")
+    current_epoch_r1_list = []
+    for seq, test_ds in zip(test_sequences, test_ds_list):
+        logging.info(f"===== Evaluating Sequence: {seq} =====")
+        recalls, recalls_str = inference.inference(args, test_ds, model)
+        logging.info(f"Recalls for {seq}: {recalls_str}")
+        logging.info(f"================================================")
+        current_epoch_r1_list.append(recalls[0])
 
-    is_best = recalls[0] > best_r1
+    current_avg_r1 = np.mean(current_epoch_r1_list)
+    is_best = current_avg_r1 > best_r1
 
     # Save latest checkpoint, which contains all training parameters
     utils.save_checkpoint(args, {"epoch_num": epoch_num, "model_state_dict": model.state_dict(),
@@ -191,13 +203,13 @@ for epoch_num in range(start_epoch_num, args.epochs_num):
 
     # If recall@1 did not improve for "many" epochs, stop training
     if is_best:
-        logging.info(f"Improved: previous best R@1 = {best_r1:.1f}, current R@1 = {(recalls[0]):.1f}")
-        best_r1 = recalls[0]
+        logging.info(f"Improved: previous best R@1 = {best_r1:.1f}, current R@1 = {(current_avg_r1):.1f}")
+        best_r1 = current_avg_r1
         not_improved_num = 0
     else:
         not_improved_num += 1
         logging.info(
-            f"Not improved: {not_improved_num} / {args.patience}: best R@1 = {best_r1:.1f}, current R@1 = {(recalls[0]):.1f}")
+            f"Not improved: {not_improved_num} / {args.patience}: best R@1 = {best_r1:.1f}, current R@1 = {(current_avg_r1):.1f}")
         if not_improved_num >= args.patience:
             logging.info(f"Performance did not improve for {not_improved_num} epochs. Stop training.")
             break
@@ -205,5 +217,9 @@ for epoch_num in range(start_epoch_num, args.epochs_num):
 logging.info(f"Best R@1: {best_r1:.2f}")
 logging.info(f"Trained for {epoch_num + 1:02d} epochs, in total in {str(datetime.now() - start_time)[:-7]}")
 
-recalls, recalls_str = inference.inference(args, test_ds, model)
-logging.info(f"Recalls on {test_ds}: {recalls_str}")
+
+for seq, test_ds in zip(test_sequences, test_ds_list):
+    logging.info(f"===== Evaluating Sequence: {seq} =====")
+    recalls, recalls_str = inference.inference(args, test_ds, model)
+    logging.info(f"Recalls for {seq}: {recalls_str}")
+    logging.info(f"================================================")
