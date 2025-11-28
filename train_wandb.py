@@ -73,6 +73,25 @@ def patch_alignment_loss(thermal_patches, rgb_patches):
     loss = 1 - cos_sim.mean()
     return loss
 
+def attended_patch_alignment_loss(thermal_patches, rgb_patches, cls_attn, temperature=0.07):
+    """
+    thermal_patches: (B, 256, 768)
+    rgb_patches: (B, 256, 768)
+    cls_attn: (B, 256) - attention weight
+    """
+    # Normalize
+    thermal_norm = F.normalize(thermal_patches, dim=-1)
+    rgb_norm = F.normalize(rgb_patches, dim=-1)
+    
+    # Patch-wise cosine similarity
+    cos_sim = (thermal_norm * rgb_norm).sum(dim=-1)  # (B, 256)
+    
+    # Attention-weighted mean
+    weighted_sim = (cos_sim * cls_attn).sum(dim=1) / cls_attn.sum(dim=1)  # (B,)
+    
+    loss = 1 - weighted_sim.mean()
+    return loss
+
 def set_seed(seed=42):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -170,12 +189,12 @@ if __name__ == "__main__":
         '''Seperate Optimizer'''
         if args.optim == "adam":
             optimizer = torch.optim.Adam([
-                {'params': backbone_params, 'lr': args.lr * 0.1},  # backbone은 10배 작은 lr
+                {'params': backbone_params, 'lr': args.backbone_lr},
                 {'params': other_params, 'lr': args.lr}
             ])
         elif args.optim == "sgd":
             optimizer = torch.optim.SGD([
-                {'params': backbone_params, 'lr': args.lr * 0.1, 'momentum': 0.9, 'weight_decay': 0.001},
+                {'params': backbone_params, 'lr': args.backbone_lr, 'momentum': 0.9, 'weight_decay': 0.001},
                 {'params': other_params, 'lr': args.lr, 'momentum': 0.9, 'weight_decay': 0.001}
             ])
     else:

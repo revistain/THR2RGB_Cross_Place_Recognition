@@ -153,6 +153,7 @@ class CrossModalVPR_Net(nn.Module):
         # Cross-modal에서는 모달리티 간 특성이 다르므로 가중치를 공유하지 않는 것이 일반적입니다.
         self.rgb_backbone = get_backbone(pretrained_foundation, foundation_model_path)
         self.thermal_backbone = get_backbone(pretrained_foundation, foundation_model_path)
+        self.output_dim = 768
 
         # 2. Aggregation Layer (각각 따로 두는 것을 추천)
         # GeM의 파라미터 p가 모달리티별로 다르게 학습될 수 있도록 분리합니다.
@@ -174,16 +175,6 @@ class CrossModalVPR_Net(nn.Module):
                 Flatten()
             )
 
-        
-        self.output_dim = 768
-        
-        # 3. Optional: Alignment Projection Layers
-        self.use_alignment_proj = use_alignment_proj
-        if use_alignment_proj:
-            embed_dim = 768  # DINOv2 ViT-B 기준
-            self.thermal_proj = nn.Linear(embed_dim, embed_dim)
-            self.rgb_proj = nn.Linear(embed_dim, embed_dim)
-
 
     def forward_model(self, x, modality='rgb', return_embedding=False):
         """단일 모달리티에 대한 Forward"""
@@ -200,6 +191,7 @@ class CrossModalVPR_Net(nn.Module):
         # x['x_norm_patchtokens']: (B, num_patchs, D)
         patch_tokens = out["x_norm_patchtokens"]
         cls_token = out["x_norm_clstoken"]
+        # attnetion_dict_keys(['x_norm_clstoken', 'x_norm_patchtokens', 'x_prenorm', 'masks'])
         B, N, D = patch_tokens.shape
         
         # 224,224 정방 이미지 입력 가정(patch 2D 복원)

@@ -1,4 +1,4 @@
-OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=2 python3 train_wandb.py \
+OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=0 python3 train_wandb.py \
     --save_dir './logs' \
     --features_dim 768 \
     --sequences KAIST \
@@ -7,7 +7,7 @@ OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=2 python3 train_wandb.py \
     --num_trainable_blocks 4 \
     --lr 1e-4 \
     --backbone_lr 1e-5 \
-    --comment "baseline_clip_cls_al0.5_GeMLinear[784,ReLU,784]_seperateLR[1e-5,1e-4]" \
+    --comment "baseline_clip-cls-loss_al0.5_GeMLinear[784,ReLU,784]_seperateLR[1e-5,1e-4]" \
     --use_alignment_loss \
     --use_sepearte_backbone_lr \
     --use_GeMAdditionalLayer
@@ -16,6 +16,7 @@ OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=2 python3 train_wandb.py \
 #    --backbone_lr 1e-5
 #    --use_alignment_loss
 #    --use_GeMAdditionalLayer
+#    --comment "baseline_clip-cls-loss_al0.5_GeMLinear[784,ReLU,784]_seperateLR[1e-5,1e-4]" \
 
 ######### 설명 #########
 # comment: wandb 기록명
