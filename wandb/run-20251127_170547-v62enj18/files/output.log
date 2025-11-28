@@ -1,0 +1,43 @@
+2025-11-27 17:05:48   Use 1 GPUs and 128 CPUs
+use_alignment_loss:  True
+load dataset: KAIST
+2025-11-27 17:05:49   There are 0 queries without any positives
+load dataset: KAIST
+load dataset: SNU
+load dataset: Valley
+2025-11-27 17:05:49   using MLP layer as FFN
+/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/network.py:222: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state_dict = torch.load(foundation_model_path)
+2025-11-27 17:05:51   using MLP layer as FFN
+2025-11-27 17:05:53   Start training epoch: 00
+- Computing triplets...
+  0%|                                                                        | 0/34 [00:01<?, ?it/s]
+dict_keys(['x_norm_clstoken', 'x_norm_patchtokens', 'x_prenorm', 'masks'])
+x_norm_clstoken: torch.Size([64, 768])
+x_norm_patchtokens: torch.Size([64, 256, 768])
+x_prenorm: torch.Size([64, 257, 768])
+2025-11-27 17:05:55
+Traceback (most recent call last):
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/train_wandb.py", line 187, in <module>
+    triplets_ds.compute_triplets(args, model)
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 295, in compute_triplets
+    self.compute_triplets_partial(args, model)
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 370, in compute_triplets_partial
+    cache = self.compute_cache(args, model, subset_ds, cache_shape=(len(self), args.features_dim))
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 319, in compute_cache
+    global_features = model(images, flags)
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/nn/parallel/data_parallel.py", line 191, in forward
+    return self.module(*inputs[0], **module_kwargs[0])
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/network.py", line 211, in forward
+    final_emb[is_rgb], _ = self.forward_model(x[is_rgb], 'rgb', return_embedding=False)
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/network.py", line 167, in forward_model
+    print(f"{k}: {v.shape}")
+AttributeError: 'NoneType' object has no attribute 'shape'

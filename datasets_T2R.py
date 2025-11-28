@@ -32,13 +32,21 @@ def collate_fn(batch):
         images: torch tensor of shape (batch_size*12, 3, h, w).
         triplets_local_indexes: torch tensor of shape (batch_size*10, 3).
         triplets_global_indexes: torch tensor of shape (batch_size, 12).
+        # added
     """
     images                  = torch.cat([e[0] for e in batch])
     triplets_local_indexes  = torch.cat([e[1][None] for e in batch])
     triplets_global_indexes = torch.cat([e[2][None] for e in batch])
     for i, (local_indexes, global_indexes) in enumerate(zip(triplets_local_indexes, triplets_global_indexes)):
-        local_indexes += len(global_indexes) * i  
-    return images, torch.cat(tuple(triplets_local_indexes)), triplets_global_indexes
+        local_indexes += len(global_indexes) * i 
+    
+    # aligned_rgb 처리
+    if batch[0][3] is not None:
+        aligned_rgbs = torch.stack([e[3] for e in batch], 0)
+    else:
+        aligned_rgbs = None
+         
+    return images, torch.cat(tuple(triplets_local_indexes)), triplets_global_indexes, aligned_rgbs
 
 
 class BaseSTheReODual(data.Dataset):
@@ -191,7 +199,7 @@ class BaseSTheReODual(data.Dataset):
             assert processed_img.shape == torch.Size([5, 3, shorter_side, shorter_side]), \
                 f"{processed_img.shape} {torch.Size([5, 3, shorter_side, shorter_side])}"
 
-
+# train dataloader
 class TripletsSTheReODual(BaseSTheReODual):
     """Dataset used for training, it is used to compute the triplets
     with TripletsDataset.compute_triplets() with various mining methods.
@@ -200,7 +208,7 @@ class TripletsSTheReODual(BaseSTheReODual):
     of each image, not triplets.
     """
 
-    def __init__(self, args, datasets_folder):
+    def __init__(self, args, datasets_folder, use_align_rgb=False):
         super().__init__(args, datasets_folder, split='train')
 
         self.mining = args.mining
@@ -251,34 +259,28 @@ class TripletsSTheReODual(BaseSTheReODual):
         self.t_queries_paths = np.delete(self.t_queries_paths, queries_without_any_hard_positive)
 
         self.queries_num = len(self.rgb_queries_paths)
-
+        self.use_align_rgb = use_align_rgb
 
     def __getitem__(self, index):
         if self.is_inference:
-            # At inference time return the single image. This is used for caching or computing NetVLAD's clusters
             return super().__getitem__(index)
-
+        
         query_index, best_positive_index, neg_indexes = torch.split(self.triplets_global_indexes[index],
                                                                     (1, 1, self.negs_num_per_query))
-        # rgb_query = self.query_transform(self.get_rgb_img(self.rgb_queries_paths[query_index]))
-        # t_query = self.query_transform(self.get_thermal_img(self.t_queries_paths[query_index]))
-        # query = torch.cat((rgb_query, t_query), dim=0)
+        
         query = self.query_transform(self.get_thermal_img(self.t_queries_paths[query_index]))
-
-        # rgb_positive = self.resized_transform(self.get_rgb_img(self.rgb_database_paths[best_positive_index]))
-        # t_positive = self.resized_transform(self.get_thermal_img(self.t_database_paths[best_positive_index]))
-        # positive = torch.cat((rgb_positive, t_positive), dim=0)
         positive = self.resized_transform(self.get_rgb_img(self.rgb_database_paths[best_positive_index]))
-
-        # rgb_negatives = [self.resized_transform(self.get_rgb_img(self.rgb_database_paths[i])) for i in neg_indexes]
-        # t_negatives = [self.resized_transform(self.get_thermal_img(self.t_database_paths[i])) for i in neg_indexes]
-        # negatives = [torch.cat((rgb, t), dim=0) for rgb, t in zip(rgb_negatives, t_negatives)]
         negatives = [self.resized_transform(self.get_rgb_img(self.rgb_database_paths[i])) for i in neg_indexes]
         
-        images = torch.stack((query, positive, *negatives), 0)
-        
-        triplets_local_indexes = torch.tensor([([0, 1, neg_num + 2]) for neg_num in range(len(neg_indexes))])
-        return images, triplets_local_indexes, self.triplets_global_indexes[index]
+        if self.use_align_rgb:
+            aligned_rgb = self.resized_transform(self.get_rgb_img(self.rgb_queries_paths[query_index]))
+            images = torch.stack((query, positive, *negatives), 0)
+            triplets_local_indexes = torch.tensor([[0, 1, neg_num + 2] for neg_num in range(len(neg_indexes))])
+            return images, triplets_local_indexes, self.triplets_global_indexes[index], aligned_rgb
+        else:
+            images = torch.stack((query, positive, *negatives), 0)
+            triplets_local_indexes = torch.tensor([[0, 1, neg_num + 2] for neg_num in range(len(neg_indexes))])
+            return images, triplets_local_indexes, self.triplets_global_indexes[index], None
 
     def __len__(self):
         if self.is_inference:

@@ -1,0 +1,29 @@
+2025-11-27 07:02:25   Use 1 GPUs and 128 CPUs
+load dataset: KAIST
+2025-11-27 07:02:25   There are 0 queries without any positives
+load dataset: KAIST
+load dataset: SNU
+load dataset: Valley
+2025-11-27 07:02:26   using MLP layer as FFN
+/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/network.py:209: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state_dict = torch.load(foundation_model_path)
+2025-11-27 07:02:27   using MLP layer as FFN
+2025-11-27 07:02:29   Start training epoch: 00
+100%|███████████████████████████████████████████████████████████████| 34/34 [00:09<00:00,  3.47it/s]
+100%|█████████████████████████████████████████████████████████| 1000/1000 [00:00<00:00, 1027.18it/s]
+  1%|▊                                                              | 3/250 [00:03<04:24,  1.07s/it]
+Using alignment loss...
+Using alignment loss...
+Using alignment loss...
+Using alignment loss...
+2025-11-27 07:02:43
+Traceback (most recent call last):
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/train_wandb.py", line 219, in <module>
+    overall_loss.backward()
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/_tensor.py", line 581, in backward
+    torch.autograd.backward(
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/autograd/__init__.py", line 347, in backward
+    _engine_run_backward(
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/autograd/graph.py", line 825, in _engine_run_backward
+    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+KeyboardInterrupt

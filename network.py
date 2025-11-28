@@ -126,7 +126,7 @@ class RGBTVPR_Net(nn.Module):
         return x
 
 class CrossModalVPR_Net(nn.Module):
-    def __init__(self, pretrained_foundation=False, foundation_model_path=None):
+    def __init__(self, pretrained_foundation=False, foundation_model_path=None, use_alignment_proj=False):
         super().__init__()
 
         # 1. 두 개의 독립적인 Backbone 생성 (Weights Unshared)
@@ -148,8 +148,16 @@ class CrossModalVPR_Net(nn.Module):
         )
         
         self.output_dim = 768
+        
+        # 3. Optional: Alignment Projection Layers
+        self.use_alignment_proj = use_alignment_proj
+        if use_alignment_proj:
+            embed_dim = 768  # DINOv2 ViT-B 기준
+            self.thermal_proj = nn.Linear(embed_dim, embed_dim)
+            self.rgb_proj = nn.Linear(embed_dim, embed_dim)
 
-    def forward_model(self, x, modality='rgb'):
+
+    def forward_model(self, x, modality='rgb', return_embedding=False):
         """단일 모달리티에 대한 Forward"""
         if modality == 'rgb':
             out = self.rgb_backbone(x)
@@ -163,6 +171,7 @@ class CrossModalVPR_Net(nn.Module):
         # Backbone 출력 처리 (ViT 기준)
         # x['x_norm_patchtokens']: (B, num_patchs, D)
         patch_tokens = out["x_norm_patchtokens"]
+        cls_token = out["x_norm_clstoken"]
         B, N, D = patch_tokens.shape
         
         # 224,224 정방 이미지 입력 가정
@@ -173,16 +182,36 @@ class CrossModalVPR_Net(nn.Module):
         # Aggregation -> Descriptor
         global_desc = agg_layer(x_feat) # [B, D]
         
-        return global_desc
+        if return_embedding:
+            return global_desc, patch_tokens, cls_token
+        else:
+            return global_desc, None, None
 
-    def forward(self, x, flags):
+    def forward(self, x, flags, return_embedding=False):
         is_rgb = torch.tensor([f == 'rgb' for f in flags], device=x.device)
         final_emb = torch.zeros((x.size(0), self.output_dim), device=x.device)
         
-        if is_rgb.any():  final_emb[is_rgb] = self.forward_model(x[is_rgb], 'rgb')
-        if (~is_rgb).any(): final_emb[~is_rgb] = self.forward_model(x[~is_rgb], 'thermal')
-        
-        return final_emb
+        if return_embedding:
+            patch_emb = torch.zeros((x.size(0), 256, 768), device=x.device)
+            cls_emb = torch.zeros((x.size(0), 768), device=x.device)  
+            
+            if is_rgb.any():
+                final_emb[is_rgb], patch_rgb, cls_rgb = self.forward_model(x[is_rgb], 'rgb', return_embedding=True)
+                patch_emb[is_rgb] = patch_rgb
+                cls_emb[is_rgb] = cls_rgb
+            if (~is_rgb).any():
+                final_emb[~is_rgb], patch_thermal, cls_thermal = self.forward_model(x[~is_rgb], 'thermal', return_embedding=True)
+                patch_emb[~is_rgb] = patch_thermal
+                cls_emb[~is_rgb] = cls_thermal
+            
+            return final_emb, patch_emb, cls_emb
+        else:
+            if is_rgb.any():
+                final_emb[is_rgb], _, _ = self.forward_model(x[is_rgb], 'rgb', return_embedding=False)
+            if (~is_rgb).any():
+                final_emb[~is_rgb], _ , _= self.forward_model(x[~is_rgb], 'thermal', return_embedding=False)
+            
+            return final_emb
 
 def get_backbone(pretrained_foundation, foundation_model_path):
     backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0)

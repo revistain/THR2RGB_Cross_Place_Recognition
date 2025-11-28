@@ -1,0 +1,50 @@
+2025-11-28 05:51:31   Use 1 GPUs and 128 CPUs
+use_alignment_loss:  True
+load dataset: KAIST
+2025-11-28 05:51:31   There are 0 queries without any positives
+load dataset: KAIST
+load dataset: SNU
+load dataset: Valley
+2025-11-28 05:51:31   using MLP layer as FFN
+/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/network.py:221: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state_dict = torch.load(foundation_model_path)
+2025-11-28 05:51:33   using MLP layer as FFN
+2025-11-28 05:51:35   Start training epoch: 00
+- Computing triplets...
+100%|███████████████████████████████████████████████████████████████| 34/34 [00:09<00:00,  3.53it/s]
+100%|██████████████████████████████████████████████████████████| 1000/1000 [00:01<00:00, 984.21it/s]
+- Training...
+alignmentLoss:True::Epoch 00: 100%|███████████████████████████████| 250/250 [01:59<00:00,  2.10it/s]
+2025-11-28 05:53:45   Epoch[00](1/2): current batch triplet loss = 0.05004774, average epoch triplet loss = 0.03989997
+- Computing triplets...
+100%|███████████████████████████████████████████████████████████████| 34/34 [00:10<00:00,  3.14it/s]
+100%|██████████████████████████████████████████████████████████| 1000/1000 [00:01<00:00, 988.49it/s]
+- Training...
+alignmentLoss:True::Epoch 00: 100%|███████████████████████████████| 250/250 [01:59<00:00,  2.09it/s]
+2025-11-28 05:55:56   Epoch[00](2/2): current batch triplet loss = 0.01353082, average epoch triplet loss = 0.03668402
+2025-11-28 05:55:56   epoch 00 time: 0:04:21,
+2025-11-28 05:55:56   ===== Evaluating Sequence: SNU =====
+100%|███████████████████████████████████████████████████████████████| 19/19 [00:06<00:00,  2.98it/s]
+2025-11-28 05:56:03   Finished extracting 1197 database features in 6.38 s
+ 89%|██████████████████████████████████████████████████████▍      | 176/197 [03:02<00:21,  1.03s/it]
+2025-11-28 05:59:05
+Traceback (most recent call last):
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/train_wandb.py", line 294, in <module>
+    recalls, recalls_str = inference.inference(args, test_ds, model)
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/inference.py", line 121, in inference
+    for inputs, indices, flags in tqdm(queries_dataloader, ncols=100):
+  File "/home/jwkim/.local/lib/python3.10/site-packages/tqdm/std.py", line 1181, in __iter__
+    for obj in iterable:
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 701, in __next__
+    data = self._next_data()
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 1448, in _next_data
+    idx, data = self._get_data()
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 1402, in _get_data
+    success, data = self._try_get_data()
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/utils/data/dataloader.py", line 1243, in _try_get_data
+    data = self._data_queue.get(timeout=timeout)
+  File "/usr/local/envs/rcv/lib/python3.10/queue.py", line 180, in get
+    self.not_empty.wait(remaining)
+  File "/usr/local/envs/rcv/lib/python3.10/threading.py", line 324, in wait
+    gotit = waiter.acquire(True, timeout)
+KeyboardInterrupt

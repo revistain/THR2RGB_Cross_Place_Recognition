@@ -1,0 +1,27 @@
+2025-11-27 17:01:33   Use 1 GPUs and 128 CPUs
+use_alignment_loss:  True
+load dataset: KAIST
+2025-11-27 17:01:33   There are 0 queries without any positives
+load dataset: KAIST
+load dataset: SNU
+load dataset: Valley
+2025-11-27 17:01:33   using MLP layer as FFN
+/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/network.py:217: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state_dict = torch.load(foundation_model_path)
+2025-11-27 17:01:35   using MLP layer as FFN
+2025-11-27 17:01:37   Start training epoch: 00
+- Computing triplets...
+100%|███████████████████████████████████████████████████████████████| 34/34 [00:09<00:00,  3.65it/s]
+100%|█████████████████████████████████████████████████████████| 1000/1000 [00:00<00:00, 1016.37it/s]
+- Training...
+alignmentLoss:True::Epoch 00: 100%|███████████████████████████████| 250/250 [02:00<00:00,  2.08it/s]
+2025-11-27 17:03:47   Epoch[00](1/2): current batch triplet loss = 0.04769763, average epoch triplet loss = 0.05325805
+- Computing triplets...
+100%|███████████████████████████████████████████████████████████████| 34/34 [00:09<00:00,  3.74it/s]
+100%|██████████████████████████████████████████████████████████| 1000/1000 [00:01<00:00, 861.24it/s]
+- Training...
+alignmentLoss:True::Epoch 00:  64%|███████████████████▉           | 161/250 [01:17<00:43,  2.07it/s]
+2025-11-27 17:05:16
+Traceback (most recent call last):
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/train_wandb.py", line 270, in <module>
+KeyboardInterrupt

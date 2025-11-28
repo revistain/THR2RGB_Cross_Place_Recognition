@@ -7,6 +7,69 @@ from torch.utils.data import DataLoader
 from torch.utils.data.dataset import Subset
 # from datetime import datetime
 import time
+import cv2
+
+def visualize_top5_predictions(args, eval_ds, predictions, distances, positives_per_query, num_samples=10):
+    """
+    Query와 top-5 retrieved 이미지를 시각화
+    
+    Args:
+        eval_ds: evaluation dataset
+        predictions: (num_queries, K) faiss predictions
+        distances: (num_queries, K) L2 distances
+        positives_per_query: list of positive indices per query
+        num_samples: 시각화할 query 개수
+    """
+    # Random하게 query 샘플링
+    query_indices = np.random.choice(eval_ds.queries_num, min(num_samples, eval_ds.queries_num), replace=False)
+    
+    visualizations = []
+    
+    for query_idx in query_indices:
+        # Query 이미지 (thermal)
+        query_img = eval_ds.get_thermal_img(eval_ds.t_queries_paths[query_idx])
+        query_img = cv2.resize(query_img, (224, 224))
+        
+        # Top-5 predictions
+        top5_preds = predictions[query_idx, :5]
+        top5_dists = distances[query_idx, :5]
+        positives = positives_per_query[query_idx]
+        
+        # Top-5 database 이미지들 (RGB)
+        retrieved_imgs = []
+        for rank, (pred_idx, dist) in enumerate(zip(top5_preds, top5_dists)):
+            db_img = eval_ds.get_rgb_img(eval_ds.rgb_database_paths[pred_idx])
+            db_img = cv2.resize(db_img, (224, 224))
+            
+            # GT인지 확인
+            is_correct = pred_idx in positives
+            color = (0, 255, 0) if is_correct else (255, 0, 0)  # Green if correct, Red otherwise
+            
+            # Border와 텍스트 추가
+            db_img = cv2.copyMakeBorder(db_img, 5, 5, 5, 5, cv2.BORDER_CONSTANT, value=color)
+            
+            # Rank와 distance 표시
+            text = f"R{rank+1}: {dist:.2f}"
+            if is_correct:
+                text += " ✓"
+            cv2.putText(db_img, text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+            cv2.putText(db_img, text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            
+            retrieved_imgs.append(db_img)
+        
+        # Query에 "Query" 텍스트 추가
+        query_img = cv2.copyMakeBorder(query_img, 5, 5, 5, 5, cv2.BORDER_CONSTANT, value=(255, 255, 255))
+        cv2.putText(query_img, "Query (T)", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(query_img, "Query (T)", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
+        
+        # Horizontal stack: [Query | Top1 | Top2 | Top3 | Top4 | Top5]
+        grid = np.hstack([query_img] + retrieved_imgs)
+        
+        # BGR to RGB (wandb uses RGB)
+        grid = cv2.cvtColor(grid, cv2.COLOR_BGR2RGB)
+        visualizations.append(grid)
+    
+    return visualizations
 
 # TODO: can be less memory cost
 # TODO: finish the uncompleted parts
@@ -98,6 +161,19 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
             #     print(f"positives_per_query[{query_index}]: {positives_per_query[query_index]}")
     recalls = recalls / eval_ds.queries_num * 100
     
+    # 각 method마다 시각화 저장 (매 평가마다 덮어씌워짐)
+    import os
+    os.makedirs('./visualizations', exist_ok=True)
+    
+    visualizations = visualize_top5_predictions(args, ds_rgb, predictions, distances, 
+                                                positives_per_query, num_samples=10)
+    
+    for idx, vis in enumerate(visualizations):
+        save_path = f'./visualizations/{method[k]}_query{idx}.png'
+        cv2.imwrite(save_path, cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
+    
+    logging.info(f"Saved {len(visualizations)} visualizations for {method[k]} to ./visualizations/")
+    
     logging.info(f"recalls: {','.join(map(str, recalls))}")
     recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, recalls)])
     print(pre_num, eval_ds.queries_num)
@@ -134,8 +210,6 @@ def fuse_inference(args, eval_ds, models):
         ### Extract database features
         start_time = time.time()
 
-        # eval_ds.test_method = "hard_resize"
-        # NOTE: set batch_size == 1
         database_subset_ds_rgb = Subset(ds_rgb, list(range(ds_rgb.database_num)))
         database_dataloader_rgb = DataLoader(dataset=database_subset_ds_rgb, num_workers=args.num_workers,
                                         batch_size=1, pin_memory=(args.device=="cuda"))
@@ -154,8 +228,6 @@ def fuse_inference(args, eval_ds, models):
         for inputs, indices in tqdm(database_dataloader_rgb, ncols=100):
             features = model_rgb(inputs.to(args.device)).view(-1, args.features_dim)
             features = features.cpu().numpy()
-            # if pca:
-            #     features = pca.transform(features)
             database_features_rgb[indices.numpy(), :] = features
             database_features_cat[indices.numpy(), :args.features_dim] = features
             database_features_add[indices.numpy(), :] = features
@@ -163,8 +235,6 @@ def fuse_inference(args, eval_ds, models):
         for inputs, indices in tqdm(database_dataloader_t, ncols=100):
             features = model_t(inputs.to(args.device)).view(-1, args.features_dim)
             features = features.cpu().numpy()
-            # if pca:
-            #     features = pca.transform(features)
             database_features_t[indices.numpy(), :] = features
             database_features_cat[indices.numpy(), args.features_dim:] = features
             database_features_add[indices.numpy(), :] += features
@@ -174,9 +244,7 @@ def fuse_inference(args, eval_ds, models):
         ### Extract query features
         start_time = time.time()
 
-        # single query
         queries_infer_batch_size = 1
-        # eval_ds.test_method = test_method
         queries_subset_ds_rgb = Subset(ds_rgb, list(range(ds_rgb.database_num, len(ds_rgb))))
         queries_dataloader_rgb = DataLoader(dataset=queries_subset_ds_rgb, num_workers=args.num_workers,
                                         batch_size=queries_infer_batch_size, pin_memory=(args.device=="cuda"))
@@ -225,44 +293,52 @@ def fuse_inference(args, eval_ds, models):
     start_time = time.time()
     
     predictions_all = []
+    distances_all = []
+    
     distances, predictions = faiss_index_rgb.search(queries_features_rgb, max(args.recall_values))
     predictions_all.append(predictions)
+    distances_all.append(distances)
     del queries_features_rgb
+    
     distances, predictions = faiss_index_t.search(queries_features_t, max(args.recall_values))
     predictions_all.append(predictions)
+    distances_all.append(distances)
     del queries_features_t
+    
     distances, predictions = faiss_index_cat.search(queries_features_cat, max(args.recall_values))
     predictions_all.append(predictions)
+    distances_all.append(distances)
     del queries_features_cat
+    
     distances, predictions = faiss_index_add.search(queries_features_add, max(args.recall_values))
     predictions_all.append(predictions)
+    distances_all.append(distances)
     del queries_features_add
 
     split = {
-    'morning':list(range(0,365))+list(range(1371,1770))+list(range(2754,2869)),
-    'afternoon':list(range(365,892))+list(range(1770,2231))+list(range(2869,2994)),
-    'evening':list(range(892,1371))+list(range(2231,2754))+list(range(2994,3130)),
-    'allday':list(range(0,3130))
+        'morning':list(range(0,365))+list(range(1371,1770))+list(range(2754,2869)),
+        'afternoon':list(range(365,892))+list(range(1770,2231))+list(range(2869,2994)),
+        'evening':list(range(892,1371))+list(range(2231,2754))+list(range(2994,3130)),
+        'allday':list(range(0,3130))
     }
-    #### For each query, check if the predictions are correct
+    
     positives_per_query = ds_rgb.get_positives()
-    # args.recall_values by default is [1, 5, 10, 20]
     recalls = {'morning':np.zeros((4, len(args.recall_values))), 'afternoon':np.zeros((4, len(args.recall_values))),\
         'evening':np.zeros((4, len(args.recall_values))), 'allday':np.zeros((4, len(args.recall_values)))}
     recalls_str = {'morning':[""]*4, 'afternoon':[""]*4, 'evening':[""]*4, 'allday':[""]*4}
-    for k, predictions in enumerate(predictions_all):   # rgb, t, cat, add
-        for key, indices in split.items(): # morning, afternoon, evening, allday
+    
+    method = ['rgb', 't', 'cat', 'add']
+    
+    for k, (predictions, distances) in enumerate(zip(predictions_all, distances_all)):
+        for key, indices in split.items():
             for query_index in indices:
                 pred = predictions[query_index]
                 for i, n in enumerate(args.recall_values):
                     if np.any(np.in1d(pred[:n], positives_per_query[query_index])):
                         recalls[key][k, i:] += 1
                         break
-            # Divide by the number of queries*100, so the recalls are in percentages
-            method = ['rgb', 't', 'cat', 'add']
+            
             recalls[key][k] = recalls[key][k] / len(indices) * 100
             recalls_str[key][k] = ", ".join([f"{method[k]}/{key}  R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, recalls[key][k])])
-    
-    # logging.info(f"Finished calculating recalls in {time.time() - start_time:.2f} s")
 
     return recalls, recalls_str

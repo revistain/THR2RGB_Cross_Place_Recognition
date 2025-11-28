@@ -81,6 +81,10 @@ class Parser():
         self.parser.add_argument("--save_all", type=bool, default=False)
         
         self.parser.add_argument("--num_trainable_blocks", type=int, default=0, help="number of trainable blocks")
+        
+        # custom settings
+        self.parser.add_argument('--comment', type=str)
+        self.parser.add_argument("--use_alignment_loss", action='store_true', default=False)
     
     def parse_arguments(self):
         args = self.parser.parse_args()

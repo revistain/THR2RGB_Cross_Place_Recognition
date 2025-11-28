@@ -5,13 +5,15 @@ USER_NAME := $(shell whoami)
 # 이미지 및 사용자 정보 변수
 IMAGE_NAME := ${USER_NAME}/thr2rgb_pr
 IMAGE_TAG := cuda12.1.0-torch2.5.1
-FULL_IMAGE := $(IMAGE_NAME):$(IMAGE_TAG)
+# FULL_IMAGE := $(IMAGE_NAME):$(IMAGE_TAG)
+FULL_IMAGE := sjkwon/thr2rgb_pr:cuda12.1.0-torch2.5.1   
+ 
 
-CONTAINER_NAME := sjkwon_thr2rgb_pr
+CONTAINER_NAME := jwkim_thr2rgb_pr
 
 POS_GPUS=all
-TBP=8813
-JNBP=8814
+TBP=8818
+JNBP=8819
 
 docker-build:
 	docker build --build-arg USERNAME=${USER_NAME} \
@@ -23,7 +25,7 @@ docker-build:
 docker-run:
 	docker run --gpus all -it \
 		--name $(CONTAINER_NAME) \
-		--net=host --ipc=host \
+		--ipc=host \
 		-p ${TBP}:6006 \
 		-p ${JNBP}:8888 \
 		-e "TERM=xterm-256color" \
@@ -40,6 +42,7 @@ docker-run:
 		-v /raid4:/raid4: \
 		-v /raid5:/raid5: \
 		-v /raid6:/raid6: \
+		-v /home/sjkwon:/home/sjkwon: \
 		-e NVIDIA_VISIBLE_DEVICES=${POS_GPUS} \
 		--shm-size=32G \
 		$(FULL_IMAGE) \

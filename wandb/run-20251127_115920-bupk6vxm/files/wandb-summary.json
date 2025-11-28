@@ -1,0 +1,1 @@
+{"_runtime":435.961057673,"train/triplet_loss(scaled)":0.06359851956367493,"train/alignment_loss(scaled)":0.010743287205696107,"_timestamp":1.7642451967151222e+09,"_step":382,"train/overall_loss":0.07434181123971939,"_wandb":{"runtime":435}}

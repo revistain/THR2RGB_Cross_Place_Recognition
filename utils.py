@@ -2,6 +2,7 @@ import os
 import yaml
 import torch
 from collections import OrderedDict
+from datetime import datetime
 import shutil
 
 def save_to_yaml(args, filename='config.yaml'):
@@ -43,3 +44,10 @@ def resume_train(args, model, optimizer=None, strict=False):
     if args.resume.endswith("last_model.pth"):  # Copy best model to current save_dir
         shutil.copy(args.resume.replace("last_model.pth", "best_model.pth"), args.save_dir)
     return model, optimizer, best_r5, start_epoch_num, not_improved_num
+
+cached_timestamp = None
+def get_timestamp():
+    global cached_timestamp
+    if cached_timestamp is None:
+        cached_timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
+    return cached_timestamp
