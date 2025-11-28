@@ -86,6 +86,8 @@ class Parser():
         self.parser.add_argument('--comment', type=str)
         self.parser.add_argument("--use_alignment_loss", action='store_true', default=False)
         self.parser.add_argument("--use_GeMAdditionalLayer", action='store_true', default=False)
+        self.parser.add_argument("--use_sepearte_backbone_lr", action='store_true', default=False)
+        self.parser.add_argument("--backbone_lr", type=float, default=0.00001, help="_")
         
     
     def parse_arguments(self):

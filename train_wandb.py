@@ -123,6 +123,8 @@ if __name__ == "__main__":
     model = model.to(args.device)
     model = torch.nn.DataParallel(model)
 
+    backbone_params = []
+    other_params    = []
     for name, param in model.module.rgb_backbone.named_parameters():
         if "adapter" not in name:
             param.requires_grad = False
@@ -149,12 +151,39 @@ if __name__ == "__main__":
                     if isinstance(m2, nn.Conv2d):
                         nn.init.constant_(m2.weight, 0.00001)
                         nn.init.constant_(m2.bias, 0.00001)
+                        
+    if args.use_sepearte_backbone_lr:
+        backbone_params = []
+        other_params = []
+        print("="*30)
+        print(f"Using seperate LR !!!")
+        print(f"- backbone LR: \t{args.backbone_lr}")
+        print(f"- other LR: \t{args.lr}")
+        print("="*30)
 
-    '''Optimizer'''
-    if args.optim == "adam":
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    elif args.optim == "sgd":
-        optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=0.001)
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                if 'rgb_backbone' in name or 'thermal_backbone' in name:
+                    backbone_params.append(param)
+                else: other_params.append(param)
+
+        '''Seperate Optimizer'''
+        if args.optim == "adam":
+            optimizer = torch.optim.Adam([
+                {'params': backbone_params, 'lr': args.lr * 0.1},  # backbone은 10배 작은 lr
+                {'params': other_params, 'lr': args.lr}
+            ])
+        elif args.optim == "sgd":
+            optimizer = torch.optim.SGD([
+                {'params': backbone_params, 'lr': args.lr * 0.1, 'momentum': 0.9, 'weight_decay': 0.001},
+                {'params': other_params, 'lr': args.lr, 'momentum': 0.9, 'weight_decay': 0.001}
+            ])
+    else:
+        '''Optimizer'''
+        if args.optim == "adam":
+            optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+        elif args.optim == "sgd":
+            optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=0.001)
 
     '''Loss Function'''
     GlobalTriplet = nn.TripletMarginLoss(margin=args.margin, p=2, reduction="sum")
@@ -219,7 +248,7 @@ if __name__ == "__main__":
                     # 만약 alignment_loss를 사용한다면 (def clip_patch_alignment_mean_loss 참고)
                     aligned_rgbs = aligned_rgbs.to(args.device)
                     
-                    # FIXME: 나는 여기에 model.eval로 바꿔야하는게 맞지 않나 싶은데, gpt는 아니라고 함
+                    model.eval()
                     with torch.no_grad():
                         _, aligned_rgb_embedding, aligned_rgb_cls_embedding = model(aligned_rgbs, flags=['rgb'] * len(aligned_rgbs), return_embedding=True)
                     
@@ -322,6 +351,8 @@ if __name__ == "__main__":
                 print(f"Performance did not improve for {not_improved_num} epochs.")
                 logging.info(f"Performance did not improve for {not_improved_num} epochs. Stop training.")
                 # break # 굳이 멈출 필요까지야
+        
+        print(f"Comment: {args.comment} :: Epoch {epoch_num:02d}")
 
     logging.info(f"Best R@1: {best_r1:.2f}")
     logging.info(f"Trained for {epoch_num + 1:02d} epochs, in total in {str(datetime.now() - start_time)[:-7]}")
