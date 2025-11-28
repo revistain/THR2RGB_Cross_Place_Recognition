@@ -13,6 +13,12 @@ OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=2 python3 train_wandb.py \
     --use_GeMAdditionalLayer
 
 #    --use_sepearte_backbone_lr
-#    --use_alignment_loss
 #    --backbone_lr 1e-5
+#    --use_alignment_loss
 #    --use_GeMAdditionalLayer
+
+######### 설명 #########
+# comment: wandb 기록명
+# use_alignment_loss: alignment loss 사용 여부
+# use_sepearte_backbone_lr/backbone_lr: backbone과 나머지 모듈의 learning rate를 다르게 설정
+# use_GeMAdditionalLayer: GeM pooling 후에 Linear-ReLU-Linear 추가
