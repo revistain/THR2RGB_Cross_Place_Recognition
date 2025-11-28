@@ -80,7 +80,8 @@ class Parser():
                             help="Path to load checkpoint from, for resuming training or testing.")
         self.parser.add_argument("--save_all", type=bool, default=False)
         
-        self.parser.add_argument("--num_trainable_blocks", type=int, default=0, help="number of trainable blocks")
+        self.parser.add_argument("--num_trainable_blocks_RGB", type=int, default=0, help="number of trainable blocks")
+        self.parser.add_argument("--num_trainable_blocks_THERMAL", type=int, default=0, help="number of trainable blocks")
         
         # custom settings
         self.parser.add_argument('--comment', type=str)

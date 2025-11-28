@@ -43,7 +43,7 @@ def clip_patch_alignment_mean_loss(thermal_patches, rgb_patches, temperature=0.0
     # return (loss_t2r + loss_r2t) / 2
     return loss_t2r
 
-def clip_patch_alignment_cls_loss(thermal_cls, rgb_cls, temperature=0.07):
+def clip_alignment_cls_loss(thermal_cls, rgb_cls, temperature=0.07):
     """
     thermal_cls: (B, D) - CLS token features
     rgb_cls: (B, D) - CLS token features
@@ -144,17 +144,21 @@ if __name__ == "__main__":
 
     backbone_params = []
     other_params    = []
+    print("="*30)
+    print("- Tuning RGB backbone layers: ", args.num_trainable_blocks_RGB)
+    print("- Tuning THERMAL backbone layers: ", args.num_trainable_blocks_THERMAL)
+    print("="*30)
     for name, param in model.module.rgb_backbone.named_parameters():
         if "adapter" not in name:
             param.requires_grad = False
-        for i in range(args.num_trainable_blocks):
+        for i in range(args.num_trainable_blocks_RGB):
             num_blocks = len(model.module.rgb_backbone.blocks)
             model.module.rgb_backbone.blocks[num_blocks - i - 1].requires_grad_(True)
 
     for name, param in model.module.thermal_backbone.named_parameters():
         if "adapter" not in name:
             param.requires_grad = False
-        for i in range(args.num_trainable_blocks):
+        for i in range(args.num_trainable_blocks_THERMAL):
             num_blocks = len(model.module.thermal_backbone.blocks)
             model.module.thermal_backbone.blocks[num_blocks - i - 1].requires_grad_(True)
 
@@ -281,7 +285,7 @@ if __name__ == "__main__":
                     # alignment_loss 구하기
                     # alignment_loss = clip_patch_alignment_mean_loss(thermal_patches, aligned_rgb_patches, temperature=0.07)
                     # alignment_loss = patch_alignment_loss(thermal_patches, aligned_rgb_patches)
-                    alignment_loss = clip_patch_alignment_cls_loss(thermal_cls, aligned_rgb_cls)
+                    alignment_loss = clip_alignment_cls_loss(thermal_cls, aligned_rgb_cls)
 
                 # triplets_local_indexes = (batch, 3, neg_num) => [[[0, 1, 2], [0, 1, 3] ... [0, 1, neg_num+2]] * batch]
                 triplets_local_indexes = torch.transpose(
