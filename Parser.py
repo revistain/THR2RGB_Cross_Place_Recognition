@@ -85,6 +85,8 @@ class Parser():
         # custom settings
         self.parser.add_argument('--comment', type=str)
         self.parser.add_argument("--use_alignment_loss", action='store_true', default=False)
+        self.parser.add_argument("--use_GeMAdditionalLayer", action='store_true', default=False)
+        
     
     def parse_arguments(self):
         args = self.parser.parse_args()

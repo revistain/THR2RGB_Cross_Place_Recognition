@@ -125,8 +125,28 @@ class RGBTVPR_Net(nn.Module):
         
         return x
 
+class AggregationHead(nn.Module):
+    # residue + bottleneck구조 사용함
+    # 1. residue 사용이유: 초반에 GeM을 사용하기 위해(triplet을 구하는 과정을 조금이라도 초반에 안정적으로 하기 위함)
+    # 2. bottleneck 사용이유: 너무 parameter가 많아지면 overfitting 우려가 있어 줄이기 위해
+    def __init__(self, dim=768, bottleneck=192):
+        super().__init__()
+        self.gem = nn.Sequential(L2Norm(), GeM(), Flatten())
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, bottleneck),
+            nn.ReLU(inplace=True),
+            nn.Linear(bottleneck, dim)
+        )
+        # 0 초기화
+        nn.init.zeros_(self.mlp[-1].weight)
+        nn.init.zeros_(self.mlp[-1].bias)
+    
+    def forward(self, x):
+        x = self.gem(x)
+        return x + self.mlp(x)
+
 class CrossModalVPR_Net(nn.Module):
-    def __init__(self, pretrained_foundation=False, foundation_model_path=None, use_alignment_proj=False):
+    def __init__(self, pretrained_foundation=False, foundation_model_path=None, use_alignment_proj=False, use_GeMAdditionalLayer=False):
         super().__init__()
 
         # 1. 두 개의 독립적인 Backbone 생성 (Weights Unshared)
@@ -136,19 +156,24 @@ class CrossModalVPR_Net(nn.Module):
 
         # 2. Aggregation Layer (각각 따로 두는 것을 추천)
         # GeM의 파라미터 p가 모달리티별로 다르게 학습될 수 있도록 분리합니다.
-        self.rgb_aggregation = nn.Sequential(
-            L2Norm(), 
-            GeM(work_with_tokens=None), 
-            Flatten(),
-            nn.Linear(768, 768),
-            nn.ReLU(inplace=True),
-            nn.Linear(768, 768)
-        )
-        self.thermal_aggregation = nn.Sequential(
-            L2Norm(), 
-            GeM(work_with_tokens=None), 
-            Flatten()
-        )
+        if use_GeMAdditionalLayer:
+            print("="*30)
+            print("USING GEM ADDITIONAL LAYER !!!!!")
+            print("="*30)
+            self.rgb_aggregation = AggregationHead(dim=768, bottleneck=192)
+            self.thermal_aggregation = AggregationHead(dim=768, bottleneck=192)
+        else:
+            self.rgb_aggregation = nn.Sequential(
+                L2Norm(), 
+                GeM(work_with_tokens=None), 
+                Flatten(),
+            )
+            self.thermal_aggregation = nn.Sequential(
+                L2Norm(), 
+                GeM(work_with_tokens=None), 
+                Flatten()
+            )
+
         
         self.output_dim = 768
         

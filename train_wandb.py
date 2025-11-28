@@ -119,7 +119,7 @@ if __name__ == "__main__":
         test_ds_list.append(test_ds)
 
     '''Model'''
-    model = network.CrossModalVPR_Net(pretrained_foundation = True, foundation_model_path = args.foundation_model_path)
+    model = network.CrossModalVPR_Net(pretrained_foundation = True, foundation_model_path = args.foundation_model_path, use_GeMAdditionalLayer=args.use_GeMAdditionalLayer)
     model = model.to(args.device)
     model = torch.nn.DataParallel(model)
 

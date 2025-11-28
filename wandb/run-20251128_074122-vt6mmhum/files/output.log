@@ -1,0 +1,32 @@
+2025-11-28 07:41:23   Use 1 GPUs and 128 CPUs
+use_alignment_loss:  True
+load dataset: KAIST
+2025-11-28 07:41:24   There are 0 queries without any positives
+load dataset: KAIST
+load dataset: SNU
+load dataset: Valley
+2025-11-28 07:41:24   using MLP layer as FFN
+/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/network.py:248: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state_dict = torch.load(foundation_model_path)
+2025-11-28 07:41:26   using MLP layer as FFN
+==============================
+USING GEM ADDITIONAL LAYER !!!!!
+==============================
+2025-11-28 07:41:28   Start training epoch: 00
+- Computing triplets...
+100%|███████████████████████████████████████████████████████████████| 34/34 [00:09<00:00,  3.53it/s]
+100%|██████████████████████████████████████████████████████████| 1000/1000 [00:01<00:00, 930.12it/s]
+- Training...
+alignmentLoss:True::Epoch 00: 100%|███████████████████████████████| 250/250 [02:01<00:00,  2.05it/s]
+2025-11-28 07:43:41   Epoch[00](1/2): current batch triplet loss = 0.04494799, average epoch triplet loss = 0.03976104
+- Computing triplets...
+100%|███████████████████████████████████████████████████████████████| 34/34 [00:23<00:00,  1.47it/s]
+100%|██████████████████████████████████████████████████████████| 1000/1000 [00:01<00:00, 880.25it/s]
+- Training...
+alignmentLoss:True::Epoch 00: 100%|███████████████████████████████| 250/250 [01:59<00:00,  2.09it/s]
+2025-11-28 07:46:05   Epoch[00](2/2): current batch triplet loss = 0.00523129, average epoch triplet loss = 0.03639562
+2025-11-28 07:46:05   epoch 00 time: 0:04:36,
+2025-11-28 07:46:05   ===== Evaluating Sequence: SNU =====
+100%|███████████████████████████████████████████████████████████████| 19/19 [00:06<00:00,  2.85it/s]
+2025-11-28 07:46:12   Finished extracting 1197 database features in 6.68 s
+ 34%|████████████████████▊                                         | 66/197 [00:16<00:31,  4.20it/s]
