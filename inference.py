@@ -161,18 +161,18 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
             #     print(f"positives_per_query[{query_index}]: {positives_per_query[query_index]}")
     recalls = recalls / eval_ds.queries_num * 100
     
-    # 각 method마다 시각화 저장 (매 평가마다 덮어씌워짐)
-    import os
-    os.makedirs('./visualizations', exist_ok=True)
+    # # 각 method마다 시각화 저장 (매 평가마다 덮어씌워짐)
+    # import os
+    # os.makedirs('./visualizations', exist_ok=True)
     
-    visualizations = visualize_top5_predictions(args, ds_rgb, predictions, distances, 
-                                                positives_per_query, num_samples=10)
+    # visualizations = visualize_top5_predictions(args, ds_rgb, predictions, distances, 
+    #                                             positives_per_query, num_samples=10)
     
-    for idx, vis in enumerate(visualizations):
-        save_path = f'./visualizations/{method[k]}_query{idx}.png'
-        cv2.imwrite(save_path, cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
+    # for idx, vis in enumerate(visualizations):
+    #     save_path = f'./visualizations/{method[k]}_query{idx}.png'
+    #     cv2.imwrite(save_path, cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
     
-    logging.info(f"Saved {len(visualizations)} visualizations for {method[k]} to ./visualizations/")
+    # logging.info(f"Saved {len(visualizations)} visualizations for {method[k]} to ./visualizations/")
     
     logging.info(f"recalls: {','.join(map(str, recalls))}")
     recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, recalls)])

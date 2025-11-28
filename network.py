@@ -139,7 +139,10 @@ class CrossModalVPR_Net(nn.Module):
         self.rgb_aggregation = nn.Sequential(
             L2Norm(), 
             GeM(work_with_tokens=None), 
-            Flatten()
+            Flatten(),
+            nn.Linear(768, 768),
+            nn.ReLU(inplace=True),
+            nn.Linear(768, 768)
         )
         self.thermal_aggregation = nn.Sequential(
             L2Norm(), 
@@ -174,9 +177,8 @@ class CrossModalVPR_Net(nn.Module):
         cls_token = out["x_norm_clstoken"]
         B, N, D = patch_tokens.shape
         
-        # 224,224 정방 이미지 입력 가정
+        # 224,224 정방 이미지 입력 가정(patch 2D 복원)
         H_feat = W_feat = int(math.sqrt(N)) 
-        
         x_feat = patch_tokens.permute(0, 2, 1).view(B, D, H_feat, W_feat)
         
         # Aggregation -> Descriptor
