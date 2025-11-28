@@ -179,18 +179,20 @@ class CrossModalVPR_Net(nn.Module):
     def forward_model(self, x, modality='rgb', return_embedding=False):
         """단일 모달리티에 대한 Forward"""
         if modality == 'rgb':
-            out = self.rgb_backbone(x)
+            out = self.rgb_backbone(x, return_attention=True)
             agg_layer = self.rgb_aggregation
         elif modality == 'thermal':
-            out = self.thermal_backbone(x)
+            out = self.thermal_backbone(x, return_attention=True)
             agg_layer = self.thermal_aggregation
         else:
             raise ValueError("Modality must be 'rgb' or 'thermal'")
             
         # Backbone 출력 처리 (ViT 기준)
         # x['x_norm_patchtokens']: (B, num_patchs, D)
-        patch_tokens = out["x_norm_patchtokens"]
-        cls_token = out["x_norm_clstoken"]
+        patch_tokens    = out["x_norm_patchtokens"]
+        cls_token       = out["x_norm_clstoken"]
+        cls_attn_map    = out["cls_attention"]
+        
         # attnetion_dict_keys(['x_norm_clstoken', 'x_norm_patchtokens', 'x_prenorm', 'masks'])
         B, N, D = patch_tokens.shape
         
@@ -202,33 +204,36 @@ class CrossModalVPR_Net(nn.Module):
         global_desc = agg_layer(x_feat) # [B, D]
         
         if return_embedding:
-            return global_desc, patch_tokens, cls_token
+            return global_desc, patch_tokens, cls_token, cls_attn_map
         else:
-            return global_desc, None, None
+            return global_desc, None, None, None
 
     def forward(self, x, flags, return_embedding=False):
         is_rgb = torch.tensor([f == 'rgb' for f in flags], device=x.device)
         final_emb = torch.zeros((x.size(0), self.output_dim), device=x.device)
+        attn_maps = []
         
         if return_embedding:
             patch_emb = torch.zeros((x.size(0), 256, 768), device=x.device)
             cls_emb = torch.zeros((x.size(0), 768), device=x.device)  
             
             if is_rgb.any():
-                final_emb[is_rgb], patch_rgb, cls_rgb = self.forward_model(x[is_rgb], 'rgb', return_embedding=True)
+                final_emb[is_rgb], patch_rgb, cls_rgb, attn_rgb = self.forward_model(x[is_rgb], 'rgb', return_embedding=True)
                 patch_emb[is_rgb] = patch_rgb
                 cls_emb[is_rgb] = cls_rgb
+                attn_maps.append(attn_rgb)
             if (~is_rgb).any():
-                final_emb[~is_rgb], patch_thermal, cls_thermal = self.forward_model(x[~is_rgb], 'thermal', return_embedding=True)
+                final_emb[~is_rgb], patch_thermal, cls_thermal, attn_thermal = self.forward_model(x[~is_rgb], 'thermal', return_embedding=True)
                 patch_emb[~is_rgb] = patch_thermal
                 cls_emb[~is_rgb] = cls_thermal
+                attn_maps.append(attn_thermal)
             
-            return final_emb, patch_emb, cls_emb
+            return final_emb, patch_emb, cls_emb, torch.cat(attn_maps, dim=0)
         else:
             if is_rgb.any():
-                final_emb[is_rgb], _, _ = self.forward_model(x[is_rgb], 'rgb', return_embedding=False)
+                final_emb[is_rgb], _, _, _ = self.forward_model(x[is_rgb], 'rgb', return_embedding=False)
             if (~is_rgb).any():
-                final_emb[~is_rgb], _ , _= self.forward_model(x[~is_rgb], 'thermal', return_embedding=False)
+                final_emb[~is_rgb], _ , _, _ = self.forward_model(x[~is_rgb], 'thermal', return_embedding=False)
             
             return final_emb
 

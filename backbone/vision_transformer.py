@@ -156,6 +156,20 @@ class DinoVisionTransformer(nn.Module):
 
         self.init_weights()
 
+    # NOTE: Added by me(jwkim)
+    def get_last_self_attention(self, x, masks=None):
+        if isinstance(x, list):
+            return self.forward_features_list(x, masks)
+            
+        x = self.prepare_tokens_with_masks(x, masks)
+        
+        # Run through model, at the last block just return the attention.
+        for i, blk in enumerate(self.blocks):
+            if i < len(self.blocks) - 1:
+                x = blk(x)
+            else: 
+                return blk(x, return_attention=True)
+
 
     def init_weights(self):
         trunc_normal_(self.pos_embed, std=0.02)
@@ -218,22 +232,49 @@ class DinoVisionTransformer(nn.Module):
             )
         return output
 
-    def forward_features(self, x, masks=None):
+    # def forward_features(self, x, masks=None):
+    #     if isinstance(x, list):
+    #         return self.forward_features_list(x, masks)
+
+    #     x = self.prepare_tokens_with_masks(x, masks)
+
+    #     for blk in self.blocks:
+    #         x = blk(x)
+
+    #     x_norm = self.norm(x)
+    #     return {
+    #         "x_norm_clstoken": x_norm[:, 0],
+    #         "x_norm_patchtokens": x_norm[:, 1:],
+    #         "x_prenorm": x,
+    #         "masks": masks,
+    #     }
+    
+    def forward_features(self, x, masks=None, return_attention=False):
         if isinstance(x, list):
             return self.forward_features_list(x, masks)
 
         x = self.prepare_tokens_with_masks(x, masks)
 
-        for blk in self.blocks:
-            x = blk(x)
+        for i, blk in enumerate(self.blocks):
+            if return_attention and i == len(self.blocks) - 1:
+                # 마지막 블록에서 attention 반환
+                x, attn = blk(x, return_attention=True)
+            else:
+                x = blk(x)
 
         x_norm = self.norm(x)
-        return {
+        result = {
             "x_norm_clstoken": x_norm[:, 0],
             "x_norm_patchtokens": x_norm[:, 1:],
             "x_prenorm": x,
             "masks": masks,
         }
+        
+        if return_attention:
+            result["attention"] = attn  # (B, num_heads, num_tokens, num_tokens)
+            result["cls_attention"] = attn[:, :, 0, :]  # CLS의 attention
+        
+        return result
 
     def _get_intermediate_layers_not_chunked(self, x, n=1):
         x = self.prepare_tokens_with_masks(x)

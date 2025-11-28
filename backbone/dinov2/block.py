@@ -121,12 +121,19 @@ class Block(nn.Module):
         drop_path = 0.
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
     
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, return_attention=False) -> Tensor:
         def attn_residual_func(x: Tensor) -> Tensor:
             return self.ls1(self.attn(self.norm1(x)))
 
         def ffn_residual_func(x: Tensor) -> Tensor:
             return self.ls2(self.mlp(self.norm2(x)) + self.drop_path(0.2*self.adapter(self.norm2(x)))) #
+
+        # NOTE: Added by me(jwkim)
+        if return_attention:
+            attn_out, attn = self.attn(self.norm1(x), return_attn=True)
+            x = x + self.ls1(attn_out)
+            x = x + ffn_residual_func(x)
+            return x, attn
 
         if self.training and self.sample_drop_ratio > 0.1:
             # the overhead is compensated only for a drop path rate larger than 0.1
@@ -284,9 +291,10 @@ class NestedTensorBlock(Block):
             x = x + ffn_residual_func(x)
             return attn_bias.split(x)
 
-    def forward(self, x_or_x_list):
+    def forward(self, x_or_x_list, return_attention=False):
         if isinstance(x_or_x_list, Tensor):
-            return super().forward(x_or_x_list)
+            # return super().forward(x_or_x_list) # NOTE: Changed by me(jwkim)
+            return super().forward(x_or_x_list, return_attention)
         elif isinstance(x_or_x_list, list):
             assert XFORMERS_AVAILABLE, "Please install xFormers for nested tensors usage"
             return self.forward_nested(x_or_x_list)

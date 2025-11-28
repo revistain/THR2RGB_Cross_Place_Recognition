@@ -9,6 +9,7 @@ from sklearn.neighbors import NearestNeighbors
 import cv2
 import os
 import faiss
+faiss.omp_set_num_threads(4)
 from tqdm import tqdm
 import logging
 
@@ -86,7 +87,7 @@ class BaseSTheReODual(data.Dataset):
                 mat['q_pose_evening'][0, 0] for mat in self.matStruct
             ])
 
-        knn = NearestNeighbors(n_jobs=-1)
+        knn = NearestNeighbors(n_jobs=4)
         knn.fit(self.database_utms)
         self.soft_positives_per_query = knn.radius_neighbors(
             self.queries_utms, radius=args.soft_positives_dist_threshold, return_distance=False
@@ -240,7 +241,7 @@ class TripletsSTheReODual(BaseSTheReODual):
             # self.resized_transform,
         ])
 
-        knn = NearestNeighbors(n_jobs=-1)
+        knn = NearestNeighbors(n_jobs=4)
         knn.fit(self.database_utms)
         self.hard_positives_per_query = list(knn.radius_neighbors(self.queries_utms,
                                                                   radius=args.hard_positives_dist_threshold,

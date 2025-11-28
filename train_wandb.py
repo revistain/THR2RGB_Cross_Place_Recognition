@@ -55,6 +55,8 @@ def clip_alignment_cls_loss(thermal_cls, rgb_cls, temperature=0.07):
     labels = torch.arange(thermal_feat.size(0), device=logits.device)
     
     loss_t2r = F.cross_entropy(logits, labels)
+    
+    # FIXME: 이거 loss_r2t도 넣어서 해보기, 필요한거 같음
     return loss_t2r
 
 def patch_alignment_loss(thermal_patches, rgb_patches):
@@ -73,23 +75,48 @@ def patch_alignment_loss(thermal_patches, rgb_patches):
     loss = 1 - cos_sim.mean()
     return loss
 
-def attended_patch_alignment_loss(thermal_patches, rgb_patches, cls_attn, temperature=0.07):
+def attention_weighted_patch_alignment_loss(thermal_patches, rgb_patches, thermal_attn, rgb_attn, use_intranorm=False):
     """
-    thermal_patches: (B, 256, 768)
-    rgb_patches: (B, 256, 768)
-    cls_attn: (B, 256) - attention weight
+    공통 중요도로 가중치를 준 patch alignment
+    
+    Args:
+        thermal_patches: (B, num_patches, 768)
+        rgb_patches: (B, num_patches, 768)
+        thermal_attn: (B, num_heads, num_tokens)
+        rgb_attn: (B, num_heads, num_tokens)
+        use_intranorm: if True, L2-normalize patches before averaging (GeM-style)
+    
+    Returns:
+        loss
     """
-    # Normalize
-    thermal_norm = F.normalize(thermal_patches, dim=-1)
-    rgb_norm = F.normalize(rgb_patches, dim=-1)
+    # Multi-head averaging + CLS 토큰 제거
+    thermal_attn_flat = thermal_attn.mean(dim=1)[:, 1:]  # (B, num_patches)
+    rgb_attn_flat = rgb_attn.mean(dim=1)[:, 1:]  # (B, num_patches)
     
-    # Patch-wise cosine similarity
-    cos_sim = (thermal_norm * rgb_norm).sum(dim=-1)  # (B, 256)
+    # 공통 중요도
+    importance = thermal_attn_flat * rgb_attn_flat
+    importance = importance / (importance.sum(dim=1, keepdim=True) + 1e-8)
     
-    # Attention-weighted mean
-    weighted_sim = (cos_sim * cls_attn).sum(dim=1) / cls_attn.sum(dim=1)  # (B,)
+    if use_intranorm:
+        # IntraNorm: L2-normalize 후 weighted average, 그 다음 다시 normalize
+        thermal_patches = F.normalize(thermal_patches, dim=-1)  # (B, 256, 768)
+        rgb_patches = F.normalize(rgb_patches, dim=-1)  # (B, 256, 768)
+        
+        # Attention-weighted aggregation
+        thermal_agg = (thermal_patches * importance.unsqueeze(-1)).sum(dim=1)  # (B, 768)
+        rgb_agg = (rgb_patches * importance.unsqueeze(-1)).sum(dim=1)  # (B, 768)
+        
+        # Cosine similarity
+        similarity = (thermal_agg * rgb_agg).sum(dim=-1)  # (B,)
+        loss = 1 - similarity.mean()
+    else:
+        # 원래 방식: Patch-wise cosine similarity
+        patch_sim = (thermal_patches * rgb_patches).sum(dim=-1)  # (B, num_patches)
+        
+        # Importance-weighted similarity
+        weighted_sim = (patch_sim * importance).sum(dim=1)  # (B,)
+        loss = 1 - weighted_sim.mean()
     
-    loss = 1 - weighted_sim.mean()
     return loss
 
 def set_seed(seed=42):
@@ -263,7 +290,7 @@ if __name__ == "__main__":
                 flags = bundle_flags * curr_batch_len
                 
                 ### model을 통해, triplet의 descriptor와 patch embedding 추출
-                global_features, patch_embedding, cls_embedding = model(images.to(args.device), flags=flags, return_embedding=True)
+                global_features, patch_embedding, cls_embedding, cls_attn_map = model(images.to(args.device), flags=flags, return_embedding=True)
 
                 overall_loss = 0
                 alignment_loss = 0
@@ -273,19 +300,23 @@ if __name__ == "__main__":
                     
                     model.eval()
                     with torch.no_grad():
-                        _, aligned_rgb_embedding, aligned_rgb_cls_embedding = model(aligned_rgbs, flags=['rgb'] * len(aligned_rgbs), return_embedding=True)
+                        _, aligned_rgb_patches, aligned_rgb_cls_embedding, aligned_cls_attn_map = model(aligned_rgbs, flags=['rgb'] * len(aligned_rgbs), return_embedding=True)
                     
                     # thermal query에 해당하는 patch_embedding만 추출(0, 12, 24, 36, maybe...)
                     thermal_indices = [i * num_bundle_flags for i in range(curr_batch_len)]
-                    # thermal_patches = patch_embedding[thermal_indices]
-                    
+                    thermal_patches = patch_embedding[thermal_indices]
                     thermal_cls = cls_embedding[thermal_indices]
-                    aligned_rgb_cls = aligned_rgb_cls_embedding 
+                    
+                    # attn_maps
+                    thermal_cls_attn_map = cls_attn_map[thermal_indices]
                     
                     # alignment_loss 구하기
                     # alignment_loss = clip_patch_alignment_mean_loss(thermal_patches, aligned_rgb_patches, temperature=0.07)
                     # alignment_loss = patch_alignment_loss(thermal_patches, aligned_rgb_patches)
-                    alignment_loss = clip_alignment_cls_loss(thermal_cls, aligned_rgb_cls)
+                    # alignment_loss = clip_alignment_cls_loss(thermal_cls, aligned_rgb_cls_embedding)
+                    alignment_loss = attention_weighted_patch_alignment_loss(thermal_patches, aligned_rgb_patches,
+                                                                             thermal_cls_attn_map, aligned_cls_attn_map,
+                                                                             use_intranorm=True)
 
                 # triplets_local_indexes = (batch, 3, neg_num) => [[[0, 1, 2], [0, 1, 3] ... [0, 1, neg_num+2]] * batch]
                 triplets_local_indexes = torch.transpose(
@@ -308,7 +339,7 @@ if __name__ == "__main__":
                     overall_loss += triplet_loss
 
                 # train_batch_size: 4, arg.negs_num_per_query: 10
-                al_weight = 1.5 # loss 가중치(al: alignment loss)
+                al_weight = 1.0 # loss 가중치(al: alignment loss)
                 overall_loss += (alignment_loss * al_weight)
                 overall_loss /= (args.train_batch_size * args.negs_num_per_query)
 
