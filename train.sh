@@ -6,7 +6,7 @@ OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=1 python3 train_wandb.py \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 6 \
     --num_trainable_blocks_THERMAL 6 \
-    --comment "baseline_alignment-attn[dot_product,rgb-attn-map, fixed]-loss_al10.0_num-train-block6" \
+    --comment "baseline_alignment-attn[dot_product,rgb-attn-map]_num-train-block6" \
     --use_alignment_loss \
     --margin 0.1 \
     --negs_num_per_query 10
@@ -17,7 +17,7 @@ OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=1 python3 train_wandb.py \
 #    --use_alignment_loss
 #    --use_GeMAdditionalLayer
 #    --comment "baseline_clip-cls-loss_al0.5_GeMLinear[784,ReLU,784]_seperateLR[1e-5,1e-4]" \
-    # --comment "baseline_alignment-attn[dot_product,rgb-attn-map]-loss_al1.0_num-train-block6" \
+#    --comment "baseline_alignment-attn[dot_product,rgb-attn-map]-loss_al1.0_num-train-block6" \
 
 ######### 설명 #########
 # comment: wandb 기록명

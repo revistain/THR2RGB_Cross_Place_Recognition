@@ -39,10 +39,14 @@ class L2Norm(nn.Module):
         return F.normalize(x, p=2, dim=self.dim)
     
 class RGBTfusion(nn.Module):
-    def __init__(self):
+    def __init__(self,use_rgb_adapter=True, use_thermal_adapter=True):
         super().__init__()
-        self.rgb_gate = nn.Linear(256, 256, bias=False)
-        self.thermal_gate = nn.Linear(256, 256, bias=False)
+        self.use_rgb_adapter = use_rgb_adapter
+        self.use_thermal_adapter = use_thermal_adapter
+        if use_rgb_adapter:
+            self.rgb_gate = nn.Linear(256, 256, bias=False)
+        if use_thermal_adapter:
+            self.thermal_gate = nn.Linear(256, 256, bias=False)
         
     def forward(self, rgb_cls, rgb_patch, thermal_cls, thermal_patch):
         rgb_cls = rgb_cls.unsqueeze(1)
@@ -50,8 +54,14 @@ class RGBTfusion(nn.Module):
         attn_score_rgb = torch.bmm(rgb_cls, rgb_patch.permute(0, 2, 1)).squeeze(1) # [B, 256]
         attn_score_thermal = torch.bmm(thermal_cls, thermal_patch.permute(0, 2, 1)).squeeze(1)
 
-        w_rgb = self.rgb_gate(attn_score_rgb) # w_rgb: [B, 256]
-        w_thermal = self.thermal_gate(attn_score_thermal)
+        if self.use_rgb_adapter:
+            w_rgb = self.rgb_gate(attn_score_rgb) # w_rgb: [B, 256]
+        else:
+            w_rgb = attn_score_rgb
+        if self.use_thermal_adapter:
+            w_thermal = self.thermal_gate(attn_score_thermal)
+        else:
+            w_thermal = attn_score_thermal
 
         # L2 normalization
         w = torch.cat((w_rgb, w_thermal), dim=1)
@@ -94,7 +104,7 @@ class RGBTVPR_Net(nn.Module):
         self.rgb_backbone = get_backbone(pretrained_foundation, foundation_model_path)
         self.thermal_backbone = get_backbone(pretrained_foundation, foundation_model_path)
 
-        self.fusion = RGBTfusion()
+        self.fusion = RGBTfusion(use_rgb_adapter=True, use_thermal_adapter=True)
         self.aggregation = nn.Sequential(L2Norm(), GeM(work_with_tokens=None), Flatten())
 
        
@@ -146,7 +156,8 @@ class AggregationHead(nn.Module):
         return x + self.mlp(x)
 
 class CrossModalVPR_Net(nn.Module):
-    def __init__(self, pretrained_foundation=False, foundation_model_path=None, use_alignment_proj=False, use_GeMAdditionalLayer=False):
+    def __init__(self, pretrained_foundation=False, foundation_model_path=None,
+                 use_alignment_proj=False, use_GeMAdditionalLayer=False):
         super().__init__()
 
         # 1. 두 개의 독립적인 Backbone 생성 (Weights Unshared)
@@ -174,7 +185,6 @@ class CrossModalVPR_Net(nn.Module):
                 GeM(work_with_tokens=None), 
                 Flatten()
             )
-
 
     def forward_model(self, x, modality='rgb', return_embedding=False):
         """단일 모달리티에 대한 Forward"""

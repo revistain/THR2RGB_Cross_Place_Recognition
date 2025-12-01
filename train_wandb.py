@@ -77,8 +77,6 @@ def patch_alignment_loss(thermal_patches, rgb_patches):
 
 def attention_weighted_patch_alignment_loss(thermal_patches, rgb_patches, thermal_attn, rgb_attn):
     """
-    공통 중요도로 가중치를 준 patch alignment
-    
     Args:
         thermal_patches: (B, num_patches, 768)
         rgb_patches: (B, num_patches, 768)
@@ -88,17 +86,19 @@ def attention_weighted_patch_alignment_loss(thermal_patches, rgb_patches, therma
     Returns:
         loss
     """
-    # thermal_attn_flat = thermal_attn.mean(dim=1)[:, 1:]  # (B, num_patches)
+    thermal_attn_flat = thermal_attn.mean(dim=1)[:, 1:] 
     rgb_attn_flat = rgb_attn.mean(dim=1)[:, 1:]  # (B, heads, num_patches) => (B, num_patches) # multi-head라서 평균냄 및 CLS token 제거
     
-    # 공통 중요도
-    # importance = thermal_attn_flat * rgb_attn_flat
+    # 1. RGB의 attnetion만 사용하는 방식    
+    # importance = rgb_attn_flat
     # importance = importance / (importance.sum(dim=1, keepdim=True) + 1e-8)
-    importance = rgb_attn_flat
+    
+    # 2. RGB와 Thermal의 attention을 평균으로 사용하는 방식
+    importance = (rgb_attn_flat + thermal_attn_flat) / 2
     importance = importance / (importance.sum(dim=1, keepdim=True) + 1e-8)
     
-    # thermal_patches = F.normalize(thermal_patches, dim=-1)
-    # rgb_patches = F.normalize(rgb_patches, dim=-1)
+    thermal_patches = F.normalize(thermal_patches, dim=-1)
+    rgb_patches = F.normalize(rgb_patches, dim=-1)
     
     thermal_agg = (thermal_patches * importance.unsqueeze(-1)).sum(dim=1)
     rgb_agg = (rgb_patches * importance.unsqueeze(-1)).sum(dim=1)
@@ -303,7 +303,9 @@ if __name__ == "__main__":
                     # alignment_loss 구하기
                     # alignment_loss = clip_patch_alignment_mean_loss(thermal_patches, aligned_rgb_patches, temperature=0.07)
                     # alignment_loss = patch_alignment_loss(thermal_patches, aligned_rgb_patches)
-                    # alignment_loss = clip_alignment_cls_loss(thermal_cls, aligned_rgb_cls_embedding)
+                    # cls_alignment_loss = clip_alignment_cls_loss(thermal_cls, aligned_rgb_cls_embedding)
+                    # attn_alignment_loss = attention_weighted_patch_alignment_loss(thermal_patches, aligned_rgb_patches,
+                    #                                                          thermal_cls_attn_map, aligned_cls_attn_map)
                     alignment_loss = attention_weighted_patch_alignment_loss(thermal_patches, aligned_rgb_patches,
                                                                              thermal_cls_attn_map, aligned_cls_attn_map)
 
@@ -328,8 +330,9 @@ if __name__ == "__main__":
                     overall_loss += triplet_loss
 
                 # train_batch_size: 4, arg.negs_num_per_query: 10
-                al_weight = 10.0 # loss 가중치(al: alignment loss)
+                al_weight = 10.0 # loss 가중치
                 overall_loss += (alignment_loss * al_weight)
+                # overall_loss += ((cls_alignment_loss*0.5+attn_alignment_loss*10.0) / 2)
                 overall_loss /= (args.train_batch_size * args.negs_num_per_query)
 
                 del global_features, query_features, positive_features, negative_features
