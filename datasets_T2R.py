@@ -7,6 +7,7 @@ from scipy.io import loadmat
 import numpy as np
 from sklearn.neighbors import NearestNeighbors
 import cv2
+cv2.setNumThreads(4)
 import os
 import faiss
 faiss.omp_set_num_threads(4)

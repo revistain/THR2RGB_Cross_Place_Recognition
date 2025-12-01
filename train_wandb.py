@@ -94,28 +94,29 @@ def attention_weighted_patch_alignment_loss(thermal_patches, rgb_patches, therma
     rgb_attn_flat = rgb_attn.mean(dim=1)[:, 1:]  # (B, num_patches)
     
     # 공통 중요도
-    importance = thermal_attn_flat * rgb_attn_flat
+    # importance = thermal_attn_flat * rgb_attn_flat
+    # importance = importance / (importance.sum(dim=1, keepdim=True) + 1e-8)
+    importance = rgb_attn_flat
     importance = importance / (importance.sum(dim=1, keepdim=True) + 1e-8)
     
     if use_intranorm:
-        # IntraNorm: L2-normalize 후 weighted average, 그 다음 다시 normalize
-        thermal_patches = F.normalize(thermal_patches, dim=-1)  # (B, 256, 768)
-        rgb_patches = F.normalize(rgb_patches, dim=-1)  # (B, 256, 768)
+        thermal_patches = F.normalize(thermal_patches, dim=-1)
+        rgb_patches = F.normalize(rgb_patches, dim=-1)
         
-        # Attention-weighted aggregation
-        thermal_agg = (thermal_patches * importance.unsqueeze(-1)).sum(dim=1)  # (B, 768)
-        rgb_agg = (rgb_patches * importance.unsqueeze(-1)).sum(dim=1)  # (B, 768)
+        thermal_agg = (thermal_patches * importance.unsqueeze(-1)).sum(dim=1)
+        rgb_agg = (rgb_patches * importance.unsqueeze(-1)).sum(dim=1)
         
-        # Cosine similarity
-        similarity = (thermal_agg * rgb_agg).sum(dim=-1)  # (B,)
+        # F.cosine_similarity 사용
+        similarity = F.cosine_similarity(thermal_agg, rgb_agg, dim=-1)
         loss = 1 - similarity.mean()
     else:
-        # 원래 방식: Patch-wise cosine similarity
-        patch_sim = (thermal_patches * rgb_patches).sum(dim=-1)  # (B, num_patches)
+        ...
+        # # 원래 방식: Patch-wise cosine similarity
+        # patch_sim = (thermal_patches * rgb_patches).sum(dim=-1)  # (B, num_patches)
         
-        # Importance-weighted similarity
-        weighted_sim = (patch_sim * importance).sum(dim=1)  # (B,)
-        loss = 1 - weighted_sim.mean()
+        # # Importance-weighted similarity
+        # weighted_sim = (patch_sim * importance).sum(dim=1)  # (B,)
+        # loss = 1 - weighted_sim.mean()
     
     return loss
 
@@ -339,7 +340,7 @@ if __name__ == "__main__":
                     overall_loss += triplet_loss
 
                 # train_batch_size: 4, arg.negs_num_per_query: 10
-                al_weight = 1.0 # loss 가중치(al: alignment loss)
+                al_weight = 10.0 # loss 가중치(al: alignment loss)
                 overall_loss += (alignment_loss * al_weight)
                 overall_loss /= (args.train_batch_size * args.negs_num_per_query)
 
