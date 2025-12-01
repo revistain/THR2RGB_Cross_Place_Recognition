@@ -75,7 +75,7 @@ def patch_alignment_loss(thermal_patches, rgb_patches):
     loss = 1 - cos_sim.mean()
     return loss
 
-def attention_weighted_patch_alignment_loss(thermal_patches, rgb_patches, thermal_attn, rgb_attn, use_intranorm=False):
+def attention_weighted_patch_alignment_loss(thermal_patches, rgb_patches, thermal_attn, rgb_attn):
     """
     공통 중요도로 가중치를 준 patch alignment
     
@@ -84,14 +84,12 @@ def attention_weighted_patch_alignment_loss(thermal_patches, rgb_patches, therma
         rgb_patches: (B, num_patches, 768)
         thermal_attn: (B, num_heads, num_tokens)
         rgb_attn: (B, num_heads, num_tokens)
-        use_intranorm: if True, L2-normalize patches before averaging (GeM-style)
     
     Returns:
         loss
     """
-    # Multi-head averaging + CLS 토큰 제거
-    thermal_attn_flat = thermal_attn.mean(dim=1)[:, 1:]  # (B, num_patches)
-    rgb_attn_flat = rgb_attn.mean(dim=1)[:, 1:]  # (B, num_patches)
+    # thermal_attn_flat = thermal_attn.mean(dim=1)[:, 1:]  # (B, num_patches)
+    rgb_attn_flat = rgb_attn.mean(dim=1)[:, 1:]  # (B, heads, num_patches) => (B, num_patches) # multi-head라서 평균냄 및 CLS token 제거
     
     # 공통 중요도
     # importance = thermal_attn_flat * rgb_attn_flat
@@ -99,24 +97,15 @@ def attention_weighted_patch_alignment_loss(thermal_patches, rgb_patches, therma
     importance = rgb_attn_flat
     importance = importance / (importance.sum(dim=1, keepdim=True) + 1e-8)
     
-    if use_intranorm:
-        thermal_patches = F.normalize(thermal_patches, dim=-1)
-        rgb_patches = F.normalize(rgb_patches, dim=-1)
-        
-        thermal_agg = (thermal_patches * importance.unsqueeze(-1)).sum(dim=1)
-        rgb_agg = (rgb_patches * importance.unsqueeze(-1)).sum(dim=1)
-        
-        # F.cosine_similarity 사용
-        similarity = F.cosine_similarity(thermal_agg, rgb_agg, dim=-1)
-        loss = 1 - similarity.mean()
-    else:
-        ...
-        # # 원래 방식: Patch-wise cosine similarity
-        # patch_sim = (thermal_patches * rgb_patches).sum(dim=-1)  # (B, num_patches)
-        
-        # # Importance-weighted similarity
-        # weighted_sim = (patch_sim * importance).sum(dim=1)  # (B,)
-        # loss = 1 - weighted_sim.mean()
+    # thermal_patches = F.normalize(thermal_patches, dim=-1)
+    # rgb_patches = F.normalize(rgb_patches, dim=-1)
+    
+    thermal_agg = (thermal_patches * importance.unsqueeze(-1)).sum(dim=1)
+    rgb_agg = (rgb_patches * importance.unsqueeze(-1)).sum(dim=1)
+    
+    # F.cosine_similarity 사용
+    similarity = F.cosine_similarity(thermal_agg, rgb_agg, dim=-1)
+    loss = 1 - similarity.mean()
     
     return loss
 
@@ -316,8 +305,7 @@ if __name__ == "__main__":
                     # alignment_loss = patch_alignment_loss(thermal_patches, aligned_rgb_patches)
                     # alignment_loss = clip_alignment_cls_loss(thermal_cls, aligned_rgb_cls_embedding)
                     alignment_loss = attention_weighted_patch_alignment_loss(thermal_patches, aligned_rgb_patches,
-                                                                             thermal_cls_attn_map, aligned_cls_attn_map,
-                                                                             use_intranorm=True)
+                                                                             thermal_cls_attn_map, aligned_cls_attn_map)
 
                 # triplets_local_indexes = (batch, 3, neg_num) => [[[0, 1, 2], [0, 1, 3] ... [0, 1, neg_num+2]] * batch]
                 triplets_local_indexes = torch.transpose(
