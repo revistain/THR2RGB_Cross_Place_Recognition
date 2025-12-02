@@ -8,7 +8,6 @@
 #   https://github.com/facebookresearch/dino/blob/master/vision_transformer.py
 #   https://github.com/rwightman/pytorch-image-models/tree/master/timm/layers/patch_embed.py
 
-
 import logging
 from typing import Callable, List, Any, Tuple, Dict
 
@@ -87,6 +86,7 @@ class Block(nn.Module):
         norm_layer: Callable[..., nn.Module] = nn.LayerNorm,
         attn_class: Callable[..., nn.Module] = Attention,
         ffn_layer: Callable[..., nn.Module] = Mlp,
+        use_adapter: bool = False
     ) -> None:
         super().__init__()
         # print(f"biases: qkv: {qkv_bias}, proj: {proj_bias}, ffn: {ffn_bias}")
@@ -116,7 +116,11 @@ class Block(nn.Module):
 
         self.sample_drop_ratio = drop_path
 
-        self.adapter = VanillaAdapter(768, 384)
+        self.use_adapter = use_adapter
+        if use_adapter:
+            self.adapter = VanillaAdapter(768, 384)
+        else:
+            self.adapter = None
 
         drop_path = 0.
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
@@ -125,8 +129,14 @@ class Block(nn.Module):
         def attn_residual_func(x: Tensor) -> Tensor:
             return self.ls1(self.attn(self.norm1(x)))
 
+        # def ffn_residual_func(x: Tensor) -> Tensor:
+        #     return self.ls2(self.mlp(self.norm2(x)) + self.drop_path(0.2*self.adapter(self.norm2(x)))) #
+
         def ffn_residual_func(x: Tensor) -> Tensor:
-            return self.ls2(self.mlp(self.norm2(x)) + self.drop_path(0.2*self.adapter(self.norm2(x)))) #
+            mlp_out = self.mlp(self.norm2(x))
+            if self.adapter is not None:
+                mlp_out = mlp_out + self.drop_path(0.2 * self.adapter(self.norm2(x)))
+            return self.ls2(mlp_out)
 
         # NOTE: Added by me(jwkim)
         if return_attention:
@@ -262,8 +272,14 @@ class NestedTensorBlock(Block):
             def attn_residual_func(x: Tensor, attn_bias=None) -> Tensor:
                 return self.attn(self.norm1(x), attn_bias=attn_bias)
 
+            # def ffn_residual_func(x: Tensor, attn_bias=None) -> Tensor:
+            #     return self.mlp(self.norm2(x)) +self.drop_path(0.2*self.adapter(self.norm2(x))) #
+
             def ffn_residual_func(x: Tensor, attn_bias=None) -> Tensor:
-                return self.mlp(self.norm2(x)) +self.drop_path(0.2*self.adapter(self.norm2(x))) #
+                mlp_out = self.mlp(self.norm2(x))
+                if self.adapter is not None:
+                    mlp_out = mlp_out + self.drop_path(0.2 * self.adapter(self.norm2(x)))
+                return mlp_out
 
             x_list = drop_add_residual_stochastic_depth_list(
                 x_list,
@@ -283,8 +299,14 @@ class NestedTensorBlock(Block):
             def attn_residual_func(x: Tensor, attn_bias=None) -> Tensor:
                 return self.ls1(self.attn(self.norm1(x), attn_bias=attn_bias))
 
+            # def ffn_residual_func(x: Tensor, attn_bias=None) -> Tensor:
+            #     return self.ls2(self.mlp(self.norm2(x)) + self.drop_path(0.2*self.adapter(self.norm2(x)))) #
+
             def ffn_residual_func(x: Tensor, attn_bias=None) -> Tensor:
-                return self.ls2(self.mlp(self.norm2(x)) + self.drop_path(0.2*self.adapter(self.norm2(x)))) #
+                mlp_out = self.mlp(self.norm2(x))
+                if self.adapter is not None:
+                    mlp_out = mlp_out + self.drop_path(0.2 * self.adapter(self.norm2(x)))
+                return self.ls2(mlp_out)
 
             attn_bias, x = get_attn_bias_and_cat(x_list)
             x = x + attn_residual_func(x, attn_bias=attn_bias)

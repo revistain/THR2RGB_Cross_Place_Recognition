@@ -101,8 +101,8 @@ class RGBTVPR_Net(nn.Module):
     def __init__(self, pretrained_foundation = False, foundation_model_path = None):
         super().__init__()
 
-        self.rgb_backbone = get_backbone(pretrained_foundation, foundation_model_path)
-        self.thermal_backbone = get_backbone(pretrained_foundation, foundation_model_path)
+        self.rgb_backbone = get_backbone(pretrained_foundation, foundation_model_path, use_adapter=False)
+        self.thermal_backbone = get_backbone(pretrained_foundation, foundation_model_path, use_adapter=True)
 
         self.fusion = RGBTfusion(use_rgb_adapter=True, use_thermal_adapter=True)
         self.aggregation = nn.Sequential(L2Norm(), GeM(work_with_tokens=None), Flatten())
@@ -157,13 +157,19 @@ class AggregationHead(nn.Module):
 
 class CrossModalVPR_Net(nn.Module):
     def __init__(self, pretrained_foundation=False, foundation_model_path=None,
-                 use_alignment_proj=False, use_GeMAdditionalLayer=False):
+                 use_alignment_proj=False, use_GeMAdditionalLayer=False,
+                 use_rgb_adapter=True, use_thermal_adapter=True):
         super().__init__()
 
         # 1. 두 개의 독립적인 Backbone 생성 (Weights Unshared)
         # Cross-modal에서는 모달리티 간 특성이 다르므로 가중치를 공유하지 않는 것이 일반적입니다.
-        self.rgb_backbone = get_backbone(pretrained_foundation, foundation_model_path)
-        self.thermal_backbone = get_backbone(pretrained_foundation, foundation_model_path)
+        print("="*30)
+        print("- use_rgb_adapter: \t", use_rgb_adapter)
+        print("- use_thermal_adapter: \t", use_thermal_adapter)
+        print("="*30)
+
+        self.rgb_backbone = get_backbone(pretrained_foundation, foundation_model_path, use_adapter=use_rgb_adapter)
+        self.thermal_backbone = get_backbone(pretrained_foundation, foundation_model_path, use_adapter=use_thermal_adapter)
         self.output_dim = 768
 
         # 2. Aggregation Layer (각각 따로 두는 것을 추천)
@@ -247,8 +253,8 @@ class CrossModalVPR_Net(nn.Module):
             
             return final_emb
 
-def get_backbone(pretrained_foundation, foundation_model_path):
-    backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0)
+def get_backbone(pretrained_foundation, foundation_model_path, use_adapter=False):
+    backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0,use_adapter=use_adapter)
     if pretrained_foundation:
         assert foundation_model_path is not None, "Please specify foundation model path."
         model_dict = backbone.state_dict()

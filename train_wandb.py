@@ -26,7 +26,6 @@ def clip_patch_alignment_mean_loss(thermal_patches, rgb_patches, temperature=0.0
     # https://taeyuplab.tistory.com/16
     B, N, D = thermal_patches.shape # (batch, 16x16, feature_dim)
     
-    # 
     thermal_feat = thermal_patches.mean(dim=1)
     rgb_feat = rgb_patches.mean(dim=1)
     
@@ -37,11 +36,9 @@ def clip_patch_alignment_mean_loss(thermal_patches, rgb_patches, temperature=0.0
     labels = torch.arange(B, device=logits.device)
     
     loss_t2r = F.cross_entropy(logits, labels)
-    # loss_r2t = F.cross_entropy(logits.T, labels)
+    loss_r2t = F.cross_entropy(logits.T, labels)
     
-    # FIXME: loss_r2t는 필요없지 않나
-    # return (loss_t2r + loss_r2t) / 2
-    return loss_t2r
+    return (loss_t2r + loss_r2t) / 2
 
 def clip_alignment_cls_loss(thermal_cls, rgb_cls, temperature=0.07):
     """
@@ -86,26 +83,30 @@ def attention_weighted_patch_alignment_loss(thermal_patches, rgb_patches, therma
     Returns:
         loss
     """
-    thermal_attn_flat = thermal_attn.mean(dim=1)[:, 1:] 
-    rgb_attn_flat = rgb_attn.mean(dim=1)[:, 1:]  # (B, heads, num_patches) => (B, num_patches) # multi-head라서 평균냄 및 CLS token 제거
+    # mean(dim=1): multi-head의 mean
+    # [:. 1:]: CLS token 제거
+    thermal_attn_flat = thermal_attn.mean(dim=1)[:, 1:] # (B, heads, num_patches) => (B, num_patches)
+    rgb_attn_flat = rgb_attn.mean(dim=1)[:, 1:] # (B, heads, num_patches) => (B, num_patches)
     
     # 1. RGB의 attnetion만 사용하는 방식    
-    # importance = rgb_attn_flat
-    # importance = importance / (importance.sum(dim=1, keepdim=True) + 1e-8)
-    
-    # 2. RGB와 Thermal의 attention을 평균으로 사용하는 방식
-    importance = (rgb_attn_flat + thermal_attn_flat) / 2
+    importance = rgb_attn_flat
     importance = importance / (importance.sum(dim=1, keepdim=True) + 1e-8)
     
-    thermal_patches = F.normalize(thermal_patches, dim=-1)
+    # 2. RGB와 Thermal의 attention을 평균으로 사용하는 방식
+    # importance = (rgb_attn_flat + thermal_attn_flat) / 2
+    # importance = importance / (importance.sum(dim=1, keepdim=True) + 1e-8) # 합이 1이되도록 정규화
+    
+    # 이 과정 없이 실험 결과 있는게 더 성능이 좋음
+    thermal_patches = F.normalize(thermal_patches, dim=-1) 
     rgb_patches = F.normalize(rgb_patches, dim=-1)
     
+    # 각 patch에 attention-map importance를 곱함
     thermal_agg = (thermal_patches * importance.unsqueeze(-1)).sum(dim=1)
     rgb_agg = (rgb_patches * importance.unsqueeze(-1)).sum(dim=1)
     
     # F.cosine_similarity 사용
     similarity = F.cosine_similarity(thermal_agg, rgb_agg, dim=-1)
-    loss = 1 - similarity.mean()
+    loss = 1 - similarity.mean() # patch들의 평균을 내주어 사용
     
     return loss
 
@@ -155,7 +156,10 @@ if __name__ == "__main__":
         test_ds_list.append(test_ds)
 
     '''Model'''
-    model = network.CrossModalVPR_Net(pretrained_foundation = True, foundation_model_path = args.foundation_model_path, use_GeMAdditionalLayer=args.use_GeMAdditionalLayer)
+    model = network.CrossModalVPR_Net(
+        pretrained_foundation = True, foundation_model_path = args.foundation_model_path,
+        use_GeMAdditionalLayer=args.use_GeMAdditionalLayer,
+        use_rgb_adapter=args.use_rgb_adapter, use_thermal_adapter=args.use_thermal_adapter)
     model = model.to(args.device)
     model = torch.nn.DataParallel(model)
 
@@ -303,11 +307,11 @@ if __name__ == "__main__":
                     # alignment_loss 구하기
                     # alignment_loss = clip_patch_alignment_mean_loss(thermal_patches, aligned_rgb_patches, temperature=0.07)
                     # alignment_loss = patch_alignment_loss(thermal_patches, aligned_rgb_patches)
-                    # cls_alignment_loss = clip_alignment_cls_loss(thermal_cls, aligned_rgb_cls_embedding)
-                    # attn_alignment_loss = attention_weighted_patch_alignment_loss(thermal_patches, aligned_rgb_patches,
-                    #                                                          thermal_cls_attn_map, aligned_cls_attn_map)
-                    alignment_loss = attention_weighted_patch_alignment_loss(thermal_patches, aligned_rgb_patches,
+                    cls_alignment_loss = clip_alignment_cls_loss(thermal_cls, aligned_rgb_cls_embedding)
+                    attn_alignment_loss = attention_weighted_patch_alignment_loss(thermal_patches, aligned_rgb_patches,
                                                                              thermal_cls_attn_map, aligned_cls_attn_map)
+                    # alignment_loss = attention_weighted_patch_alignment_loss(thermal_patches, aligned_rgb_patches,
+                    #                                                          thermal_cls_attn_map, aligned_cls_attn_map)
 
                 # triplets_local_indexes = (batch, 3, neg_num) => [[[0, 1, 2], [0, 1, 3] ... [0, 1, neg_num+2]] * batch]
                 triplets_local_indexes = torch.transpose(
@@ -330,9 +334,13 @@ if __name__ == "__main__":
                     overall_loss += triplet_loss
 
                 # train_batch_size: 4, arg.negs_num_per_query: 10
-                al_weight = 10.0 # loss 가중치
-                overall_loss += (alignment_loss * al_weight)
-                # overall_loss += ((cls_alignment_loss*0.5+attn_alignment_loss*10.0) / 2)
+                # al_weight = 10.0 # loss 가중치
+                # overall_loss += (alignment_loss * al_weight)
+
+                alignment_loss = (cls_alignment_loss*0.5+attn_alignment_loss*10.0) / 2
+                overall_loss += alignment_loss
+                
+                # args.train_batch_size * args.negs_num_per_query = 40, alignment_loss의 scale이 너무 커서 맞춰주기 위해 같이 나눠줌
                 overall_loss /= (args.train_batch_size * args.negs_num_per_query)
 
                 del global_features, query_features, positive_features, negative_features
@@ -348,7 +356,7 @@ if __name__ == "__main__":
                 wandb.log({
                     "train/overall_loss": overall_loss,
                     "train/triplet_loss(scaled)": triplet_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query),
-                    "train/alignment_loss(scaled)": (alignment_loss * al_weight).item() / (args.train_batch_size * args.negs_num_per_query) if isinstance(alignment_loss, torch.Tensor) else 0,
+                    "train/alignment_loss(scaled)": (alignment_loss).item() / (args.train_batch_size * args.negs_num_per_query) if isinstance(alignment_loss, torch.Tensor) else 0,
                 }, step=global_step)
                 global_step += 1
 

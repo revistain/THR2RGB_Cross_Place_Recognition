@@ -344,7 +344,7 @@ class TripletsSTheReODual(BaseSTheReODual):
         neg_features = cache[neg_samples]
         faiss_index = faiss.IndexFlatL2(args.features_dim)
         faiss_index.add(neg_features)
-        # Search the 10 nearest negatives (further than 25 meters and nearest in features space)
+        # Search the 10 nearest negatives (further than 25 meters and nearest in features space) # 이거 맞나?
         _, neg_nums = faiss_index.search(query_features.reshape(1, -1), self.negs_num_per_query)
         neg_nums = neg_nums.reshape(-1)
         neg_indexes = neg_samples[neg_nums].astype(np.int32)

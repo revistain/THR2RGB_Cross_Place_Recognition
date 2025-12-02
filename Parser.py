@@ -89,6 +89,9 @@ class Parser():
         self.parser.add_argument("--use_GeMAdditionalLayer", action='store_true', default=False)
         self.parser.add_argument("--use_sepearte_backbone_lr", action='store_true', default=False)
         self.parser.add_argument("--backbone_lr", type=float, default=0.00001, help="_")
+
+        self.parser.add_argument("--use_rgb_adapter", action='store_true', default=False)
+        self.parser.add_argument("--use_thermal_adapter", action='store_true', default=False)
         
     
     def parse_arguments(self):
