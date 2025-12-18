@@ -1,3 +1,6 @@
+# 정리한 결과보고서!!
+- https://www.notion.so/4-rgb-t-2bcb3ee9d68780e9bb82d8376a8cf149?source=copy_link
+
 # 혁신인재 4차년도, Cross-spectral PR
 - Query는 thermal image, DB는 RGB image
 
