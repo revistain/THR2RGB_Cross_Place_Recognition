@@ -1,4 +1,4 @@
-OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=0 python3 train_wandb.py \
+OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=7 python3 train_wandb.py \
     --save_dir './logs' \
     --features_dim 768 \
     --sequences KAIST \
