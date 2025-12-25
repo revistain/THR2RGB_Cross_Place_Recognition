@@ -61,7 +61,7 @@ class AggregationHead(nn.Module):
         x = self.gem(x)
         return x + self.mlp(x)
 
-# ============= CroCo 원본 구조 추가 =============
+# ============= CroCo 원본 구조 =============
 class CroCoDecoderBlock(nn.Module):
     """
     CroCo 원본 Decoder Block
@@ -81,9 +81,8 @@ class CroCoDecoderBlock(nn.Module):
         self.self_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
         
         # Cross-Attention components (CroCo의 핵심!)
-        # Thermal(query)이 RGB(key, value)를 참조
         self.norm2 = nn.LayerNorm(dim)
-        self.norm_cross = nn.LayerNorm(dim)  # encoder output용 norm
+        self.norm_cross = nn.LayerNorm(dim)
         self.cross_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
         
         # MLP components
@@ -103,22 +102,20 @@ class CroCoDecoderBlock(nn.Module):
         Returns:
             x: [B, N, D] - updated decoder features
         """
-        # Step 1: Self-Attention (decoder 내부 정보 혼합)
+        # Step 1: Self-Attention
         x_norm = self.norm1(x)
         x = x + self.self_attn(x_norm, x_norm, x_norm)[0]
         
         # Step 2: Cross-Attention (RGB 정보 참조!)
-        # Query: thermal (복원하려는 대상)
-        # Key, Value: RGB (참조할 정보)
         x_norm = self.norm2(x)
         encoder_norm = self.norm_cross(encoder_output)
         x = x + self.cross_attn(
-            query=x_norm,           # Thermal
-            key=encoder_norm,       # RGB
-            value=encoder_norm      # RGB
+            query=x_norm,
+            key=encoder_norm,
+            value=encoder_norm
         )[0]
         
-        # Step 3: MLP (position-wise transformation)
+        # Step 3: MLP
         x = x + self.mlp(self.norm3(x))
         
         return x
@@ -127,17 +124,10 @@ class ThermalDecoder(nn.Module):
     """
     CroCo-style Cross-modal Decoder
     
-    목적:
-    - Thermal의 masked patches를 RGB 정보를 참조하여 복원
-    - Cross-attention으로 RGB의 semantic 정보 활용
-    
-    입력:
-    1. Thermal encoder output (FULL 257 tokens)
-    2. RGB encoder output (full patches)
-    3. Mask positions
-    
-    출력:
-    - 복원된 thermal patch features [B, 256, 768]
+    핵심 설계:
+    - Input: Full 257 tokens (CLS + 256 patches)
+    - Masked positions만 mask token으로 교체
+    - Cross-attention으로 RGB 정보 참조하여 복원
     """
     def __init__(self, embed_dim=768, num_patches=256, decoder_depth=4, num_heads=12):
         super().__init__()
@@ -145,30 +135,26 @@ class ThermalDecoder(nn.Module):
         self.num_patches = num_patches
         
         # Masked position용 learnable token
-        # 각 masked patch는 이 token으로 초기화됨
         self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         nn.init.normal_(self.mask_token, std=0.02)
         
-        # Decoder용 positional encoding (encoder와 별도)
+        # Decoder용 positional encoding
         self.decoder_pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
         nn.init.normal_(self.decoder_pos_embed, std=0.02)
         
-        # CroCo Decoder blocks (cross-attention 포함!)
+        # CroCo Decoder blocks
         self.decoder_blocks = nn.ModuleList([
             CroCoDecoderBlock(embed_dim, num_heads) 
             for _ in range(decoder_depth)
         ])
         
         self.decoder_norm = nn.LayerNorm(embed_dim)
-        
-        # Prediction head: decoder output → 원본 patch feature space
         self.decoder_pred = nn.Linear(embed_dim, embed_dim)
         
     def forward(self, x_thermal_full, masks, x_rgb_full):
         """
-        ============ 수정: Full 257 tokens 받도록 변경 ============
         Args:
-            x_thermal_full: [B, 257, D] - thermal encoder output (CLS + FULL 256 patches)
+            x_thermal_full: [B, 257, D] - thermal encoder output (CLS + 256 patches)
             masks: [B, 256] - boolean mask (True = masked position)
             x_rgb_full: [B, 256, D] - RGB full patch features
         Returns:
@@ -178,7 +164,7 @@ class ThermalDecoder(nn.Module):
         
         # Step 1: CLS token 분리
         cls_token = x_thermal_full[:, :1, :]  # [B, 1, D]
-        x_patches_full = x_thermal_full[:, 1:, :]  # [B, 256, D] - Full patches!
+        x_patches_full = x_thermal_full[:, 1:, :]  # [B, 256, D]
         
         # Step 2: Decoder input 생성
         # Visible positions: encoder output 사용
@@ -196,7 +182,7 @@ class ThermalDecoder(nn.Module):
         # Step 4: Decoder positional encoding 추가
         x_full = x_full + self.decoder_pos_embed
         
-        # Step 5: Decoder blocks 통과 (RGB 참조하며 복원!)
+        # Step 5: Decoder blocks 통과 (RGB 참조!)
         for blk in self.decoder_blocks:
             x_full = blk(x_full, encoder_output=x_rgb_full)
         
@@ -205,7 +191,7 @@ class ThermalDecoder(nn.Module):
         # Step 6: CLS token 제거
         x_patches = x_full[:, 1:, :]  # [B, 256, D]
         
-        # Step 7: Prediction head로 최종 복원
+        # Step 7: Prediction head
         x_rec = self.decoder_pred(x_patches)  # [B, 256, D]
         
         return x_rec
@@ -230,7 +216,7 @@ class CrossModalVPR_Net(nn.Module):
         self.thermal_backbone = get_backbone(pretrained_foundation, foundation_model_path, use_adapter=use_thermal_adapter)
         self.output_dim = 768
 
-        # 2. Aggregation Layer (모달리티별 독립적)
+        # 2. Aggregation Layer
         if use_GeMAdditionalLayer:
             print("="*30)
             print("USING GEM ADDITIONAL LAYER !!!!!")
@@ -249,7 +235,7 @@ class CrossModalVPR_Net(nn.Module):
                 Flatten()
             )
 
-        # 3. Thermal Decoder (CroCo-style cross-modal reconstruction)
+        # 3. Thermal Decoder (CroCo-style)
         self.thermal_decoder = ThermalDecoder(
             embed_dim=768, 
             num_patches=256, 
@@ -257,12 +243,16 @@ class CrossModalVPR_Net(nn.Module):
             num_heads=12
         )
         
-        # 4. Masking & Loss 설정
+        # 4. Encoder용 learnable mask token (중요!)
+        self.encoder_mask_token = nn.Parameter(torch.zeros(1, 1, 768))
+        nn.init.normal_(self.encoder_mask_token, std=0.02)
+        
+        # 5. Masking & Loss 설정
         self.mask_ratio = mask_ratio
         self.recon_loss_weight = recon_loss_weight
         self._set_mask_generator(16*16, mask_ratio)
         
-        # 5. Reconstruction loss 모니터링용
+        # 6. Visualization용
         self.last_recon_loss = None
         self.vis_data = None
 
@@ -274,43 +264,35 @@ class CrossModalVPR_Net(nn.Module):
         """
         CroCo-style reconstruction loss (Smooth L1)
         
-        Smooth L1 Loss:
-        - 작은 오차 (|x| < 1): 0.5 * x^2 (L2처럼, 정확도 중시)
-        - 큰 오차 (|x| >= 1): |x| - 0.5 (L1처럼, outlier robust)
-        - 방향 + 크기 모두 고려
-        
         Args:
-            pred_features: [B, 256, 768] - decoder가 예측한 features
+            pred_features: [B, 256, 768] - decoder 예측
             target_features: [B, 256, 768] - 원본 patch features
             masks: [B, 256] - masked positions (True = 복원 대상)
         Returns:
-            loss: scalar - masked positions에서만 계산한 평균 loss
+            loss: scalar
         """
-        # Smooth L1 loss (element-wise)
-        # reduction='none'으로 각 element별 loss 계산
         loss = F.smooth_l1_loss(pred_features, target_features, reduction='none', beta=1.0)
-        # Output: [B, 256, 768]
-        
-        # Feature dimension (768)에 대해 sum → patch별 loss
         loss_per_patch = loss.sum(dim=-1)  # [B, 256]
         
-        # Safety check: masked positions가 없으면 0 반환
         if masks.sum() == 0:
             return torch.tensor(0.0, device=pred_features.device, requires_grad=True)
         
-        # Masked positions만 loss 계산
         masked_loss = loss_per_patch[masks].mean()
-        
         return masked_loss
     
     def forward_model(self, x, modality='rgb', rgb_reference=None, save_rgb_img=None):
         """
         단일 모달리티 Forward Pass
         
-        Args:
-            x: [B, 3, 224, 224] - 입력 이미지
-            modality: 'rgb' or 'thermal'
-            rgb_reference: [B, 256, 768] - RGB patch features (thermal 복원 시 참조)
+        핵심 설계:
+        1. RGB: 일반 DINOv2 forward
+        2. Thermal (Training):
+           - Target path (no_grad): Clean input → Encoder → Target features
+           - Masked path (grad): Masked input → Encoder → Features
+           - Decoder: Masked features + RGB → Reconstruction
+           - Aggregation: Target features (clean!)
+        3. Thermal (Inference):
+           - Clean input → Encoder → Aggregation
         """
         
         if modality == 'rgb':
@@ -320,30 +302,24 @@ class CrossModalVPR_Net(nn.Module):
             recon_loss = None
             
         elif modality == 'thermal':
-            # === Thermal: MAE-style masking + CroCo cross-modal reconstruction ===
+            # === Thermal: CroCo-style reconstruction ===
             agg_layer = self.thermal_aggregation
             
             # Step 1: Patch Embedding
             x_patch = self.thermal_backbone.patch_embed(x)
             B, N, D = x_patch.shape  # N=256, D=768
             
-            # Step 2: Positional Embedding 리사이징 (518x518 → 224x224)
+            # Step 2: Positional Embedding 리사이징
             pos_tokens = self.thermal_backbone.pos_embed[:, 1:, :]
             pos_embed_grid = pos_tokens.reshape(1, 37, 37, 768).permute(0, 3, 1, 2)
-            
-            pos_embed_resized = F.interpolate(
-                pos_embed_grid, 
-                size=(16, 16), 
-                mode='bicubic', 
-                align_corners=False
-            )
-            
+            pos_embed_resized = F.interpolate(pos_embed_grid, size=(16, 16), mode='bicubic', align_corners=False)
             pos_embed_final = pos_embed_resized.permute(0, 2, 3, 1).flatten(1, 2)
             x_patch = x_patch + pos_embed_final  # [B, 256, 768]
             
             # === Training vs Inference 분기 ===
             if self.training:
-                # ============ Target 계산: Full thermal을 Transformer 통과 (no_grad) ============
+                # ============ Target Path (no_grad) ============
+                # 목적: Clean features로 "정답" 생성
                 with torch.no_grad():
                     cls_full = self.thermal_backbone.cls_token.expand(B, -1, -1)
                     cls_full = cls_full + self.thermal_backbone.pos_embed[:, :1, :]
@@ -353,42 +329,32 @@ class CrossModalVPR_Net(nn.Module):
                         x_full = blk(x_full)
                     
                     x_full_norm = self.thermal_backbone.norm(x_full)
-                    target_features = x_full_norm[:, 1:, :]  # [B, 256, 768]
+                    target_features = x_full_norm[:, 1:, :]  # [B, 256, 768] - Clean!
                 
-                # ============ Masking 적용 - 시퀀스 길이 유지! ============
+                # ============ Masked Path (grad) ============
+                # 목적: Reconstruction 학습
                 masks = self.mask_generator(x_patch)  # [B, 256]
                 
-                # Masked positions를 0으로 채움 (시퀀스 길이 유지)
+                # Learnable mask token 사용 (0 대신!)
                 x_patch_masked = x_patch.clone()
+                mask_token = self.encoder_mask_token.expand(B, N, -1)  # [B, 256, 768]
                 for i in range(B):
-                    x_patch_masked[i, masks[i]] = 0  # Masked positions를 0으로
+                    x_patch_masked[i, masks[i]] = mask_token[i, masks[i]]
                 
-                # CLS token 추가 - 항상 257 tokens!
+                # Encoder 통과 (Full 257 tokens 유지)
                 cls_token = self.thermal_backbone.cls_token.expand(B, -1, -1)
                 cls_pos = self.thermal_backbone.pos_embed[:, :1, :]
                 cls_token = cls_token + cls_pos
                 x_with_cls = torch.cat([cls_token, x_patch_masked], dim=1)  # [B, 257, 768]
                 
-                # Encoder 통과 - Full 257 tokens
                 for blk in self.thermal_backbone.blocks:
                     x_with_cls = blk(x_with_cls)
                 x_norm = self.thermal_backbone.norm(x_with_cls)
                 
-                # ============ Decoder로 복원 (RGB 참조) ============
+                # ============ Decoder (Reconstruction) ============
                 if rgb_reference is not None:
-                    # Decoder에 Full 257 tokens 전달!
-                    pred_features = self.thermal_decoder(
-                        x_norm,  # [B, 257, 768] - Full sequence!
-                        masks, 
-                        rgb_reference
-                    )
-                                    
-                    recon_loss = self.compute_reconstruction_loss(
-                        pred_features,      # [B, 256, 768]
-                        target_features,    # [B, 256, 768]
-                        masks
-                    )
-                    
+                    pred_features = self.thermal_decoder(x_norm, masks, rgb_reference)
+                    recon_loss = self.compute_reconstruction_loss(pred_features, target_features, masks)
                     self.last_recon_loss = recon_loss.item()
 
                     if x.size(0) > 0:
@@ -402,13 +368,13 @@ class CrossModalVPR_Net(nn.Module):
                 else:
                     recon_loss = None
                 
-                # ============ Aggregation에 Encoder output 직접 사용 ============
-                # Gradient가 aggregation까지 흐름!
+                # ============ 핵심: Aggregation에 Target features 사용! ============
+                # 이유: Training/Inference 완벽 일치
                 cls_token_final = x_full_norm[:, 0]  # Target CLS
-                full_patches = target_features  # Target features (깨끗한!)
+                full_patches = target_features  # Clean features!
                     
             else:
-                # Inference: Masking 없이 전체 패치 사용
+                # ============ Inference: Clean forward ============
                 recon_loss = None
                 
                 cls_token = self.thermal_backbone.cls_token.expand(B, -1, -1)
@@ -449,43 +415,38 @@ class CrossModalVPR_Net(nn.Module):
         """
         Main forward pass
         
-        CroCo 수정 사항:
-        1. RGB를 먼저 처리해서 patch features 저장
-        2. Thermal 처리 시 RGB features를 decoder에 전달
+        Args:
+            x: [B, 3, 224, 224] - 입력 이미지 (thermal + RGB 혼합)
+            aligned_x: [B_thermal, 3, 224, 224] - thermal query와 aligned된 RGB
+            flags: ['thermal', 'rgb', 'rgb', ...] - 각 이미지의 modality
         """
         is_rgb = torch.tensor([f == 'rgb' for f in flags], device=x.device)
         final_emb = torch.zeros((x.size(0), self.output_dim), device=x.device)
         total_recon_loss = 0.0
         
-        # 전체 batch에 대한 patch embeddings 저장
-        patch_emb = torch.zeros((x.size(0), 256, 768), device=x.device)
-        
-        # Step 1: RGB 먼저 처리
+        # Step 1: RGB 먼저 처리 (reference 생성)
         if is_rgb.any():
-            final_emb[is_rgb], rgb_patches, cls_token, cls_attn_map, recon_loss = \
+            final_emb[is_rgb], rgb_patches, _, _, _ = \
                 self.forward_model(x[is_rgb], 'rgb')
-            patch_emb[is_rgb] = rgb_patches  # 전체 batch 기준으로 저장
         
         # Step 2: Thermal 처리
         if aligned_x is None:
             if (~is_rgb).any():
-                final_emb[~is_rgb], thermal_patches, cls_token, cls_attn_map, recon_loss = \
+                final_emb[~is_rgb], _, _, _, _ = \
                     self.forward_model(x[~is_rgb], 'thermal')
-                patch_emb[~is_rgb] = thermal_patches
         else:
-            # aligned RGB image의 embedding 추출
+            # Aligned RGB의 patch features 추출 (reference)
             with torch.no_grad():
                 _, aligned_x_embed, _, _, _ = self.forward_model(aligned_x, 'rgb')
 
             if (~is_rgb).any():
-                final_emb[~is_rgb], thermal_patches, cls_token, cls_attn_map, recon_loss = \
+                final_emb[~is_rgb], _, _, _, recon_loss = \
                     self.forward_model(
                         x[~is_rgb], 
                         'thermal', 
                         rgb_reference=aligned_x_embed,
                         save_rgb_img=aligned_x,
                     )
-                patch_emb[~is_rgb] = thermal_patches
                     
                 if recon_loss is not None:
                     total_recon_loss = recon_loss

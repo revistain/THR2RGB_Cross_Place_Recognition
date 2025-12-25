@@ -68,19 +68,24 @@ if __name__ == "__main__":
 
     '''Model'''
     model = network.CrossModalVPR_Net(
-        pretrained_foundation = True, foundation_model_path = args.foundation_model_path,
+        pretrained_foundation = True, 
+        foundation_model_path = args.foundation_model_path,
         use_GeMAdditionalLayer=args.use_GeMAdditionalLayer,
-        use_rgb_adapter=args.use_rgb_adapter, use_thermal_adapter=args.use_thermal_adapter,
-        mask_ratio=args.croco_mask_ratio, decoder_depth=4, recon_loss_weight=0.00001)
+        use_rgb_adapter=args.use_rgb_adapter, 
+        use_thermal_adapter=args.use_thermal_adapter,
+        mask_ratio=args.croco_mask_ratio,  # 0.75 권장
+        decoder_depth=4, 
+        recon_loss_weight=0.1
+    )
     model = model.to(args.device)
     model = torch.nn.DataParallel(model)
 
-    backbone_params = []
-    other_params    = []
+    # Backbone tuning 설정
     print("="*30)
     print("- Tuning RGB backbone layers: ", args.num_trainable_blocks_RGB)
     print("- Tuning THERMAL backbone layers: ", args.num_trainable_blocks_THERMAL)
     print("="*30)
+    
     for name, param in model.module.rgb_backbone.named_parameters():
         if "adapter" not in name:
             param.requires_grad = False
@@ -139,7 +144,7 @@ if __name__ == "__main__":
         for loop_num in range(loops_num):
             logging.debug(f"Cache: {loop_num + 1} / {loops_num}")
 
-            ### contrastive learning을 위한 triplet 샘플링
+            # Triplet 샘플링
             triplets_ds.is_inference = True
             print("- Computing triplets...")
             triplets_ds.compute_triplets(args, model)
@@ -147,43 +152,35 @@ if __name__ == "__main__":
 
             logging.debug("Finish computing triplets")
 
-            model.train() 
-            ### triplet을 위한 DataLoader 생성
-            # DataLoader는 (Batch, images, triplets_local_indexes, triplets_global_indexes[index], aligned_rgb)를 getitem
-            # images: stacked(query, pos, *negs)
-            # triplets_local_indexes: triplet 내에서의 local index
-            #   ex) (0, 1, 2), (0, 1, 3), ..., (0, 1, 11) # (query, pos, neg)의 pairs
-            # triplets_global_indexes[index]: ?
-            # aligned_rgb: thermal query와 맞는 rgb query 이미지
-            triplets_dl = DataLoader(dataset=triplets_ds, num_workers=args.num_workers,
-                                    batch_size=args.train_batch_size,
-                                    collate_fn=datasets_T2R.collate_fn,
-                                    pin_memory=(args.device == "cuda"),
-                                    drop_last=True)
+            model.train()
             
-            model = model.train()
+            # DataLoader 생성
+            triplets_dl = DataLoader(
+                dataset=triplets_ds, 
+                num_workers=args.num_workers,
+                batch_size=args.train_batch_size,
+                collate_fn=datasets_T2R.collate_fn,
+                pin_memory=(args.device == "cuda"),
+                drop_last=True
+            )
+            
             logging.debug(f"Start loading {len(triplets_ds)} triplets as {len(triplets_dl)} batches")
 
             print("- Training...")
-            for images, triplets_local_indexes, _, aligned_rgbs in tqdm(triplets_dl, ncols=100, desc=f"alignmentLoss:{args.use_alignment_loss}::Epoch {epoch_num:02d}"):
+            for images, triplets_local_indexes, _, aligned_rgbs in tqdm(triplets_dl, ncols=100, desc=f"Epoch {epoch_num:02d}"):
                 curr_batch_len = len(images) // num_bundle_flags
                 flags = bundle_flags * curr_batch_len
                 
-                ### model을 통해, triplet의 descriptor와 patch embedding 추출
-                # return_embedding=True일 때: (desc, patch, cls, attn, recon_loss) 반환
+                # Forward pass
                 global_features, recon_loss = model(images.to(args.device), aligned_rgbs, flags=flags)
-                # global_features, patch_embedding, cls_embedding, cls_attn_map, recon_loss = model(images.to(args.device), aligned_rgbs, flags=flags)
 
                 overall_loss = 0
-                alignment_loss = 0
-                reconstruction_loss = 0 
                 
-                # triplets_local_indexes = (batch, 3, neg_num) => [[[0, 1, 2], [0, 1, 3] ... [0, 1, neg_num+2]] * batch]
+                # Triplet loss
                 triplets_local_indexes = torch.transpose(
                     triplets_local_indexes.view(args.train_batch_size, args.negs_num_per_query, 3), 1, 0)
                 
                 triplet_loss_sum = 0
-                # 각 triplet에 대해 triplet loss 계산
                 for triplets in triplets_local_indexes:
                     queries_indexes, positives_indexes, negatives_indexes = triplets.T
                     
@@ -196,12 +193,7 @@ if __name__ == "__main__":
                     overall_loss += triplet_loss
 
                 # Reconstruction loss 추가
-                reconstruction_loss = recon_loss
-                # reconstruction_loss = 0
-                # model.module.recon_loss_weight로 가중치 적용
-                
-                # Normalize by batch size
-                overall_loss += model.module.recon_loss_weight * reconstruction_loss
+                overall_loss += model.module.recon_loss_weight * recon_loss
                 overall_loss /= (args.train_batch_size * args.negs_num_per_query)
 
                 del global_features, query_features, positive_features, negative_features
@@ -213,33 +205,31 @@ if __name__ == "__main__":
                 batch_loss = overall_loss.item()
                 epoch_losses = np.append(epoch_losses, batch_loss)
 
-                # wandb 로깅 (batch 단위)
+                # wandb 로깅
                 wandb.log({
                     "train/overall_loss": overall_loss.item(),
-                    "train/triplet_loss(scaled)": triplet_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query),
-                    "train/reconstruction_loss": model.module.recon_loss_weight * reconstruction_loss / (args.train_batch_size * args.negs_num_per_query) if isinstance(reconstruction_loss, (int, float)) else model.module.recon_loss_weight * reconstruction_loss.item() / (args.train_batch_size * args.negs_num_per_query),
+                    "train/triplet_loss": triplet_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query),
+                    "train/reconstruction_loss": (model.module.recon_loss_weight * recon_loss).item() / (args.train_batch_size * args.negs_num_per_query) if isinstance(recon_loss, torch.Tensor) else 0,
                 }, step=global_step)
                 global_step += 1
 
-                del overall_loss, triplet_loss, alignment_loss, recon_loss
+                del overall_loss, triplet_loss, recon_loss
                 
             logging.info(f"Epoch[{epoch_num:02d}]({loop_num + 1}/{loops_num}): " +
-                        f"current batch triplet loss = {batch_loss:.8f}, " +
-                        f"average epoch triplet loss = {epoch_losses.mean():.8f}, " +
-                        f"current reconstruction loss = {reconstruction_loss if isinstance(reconstruction_loss, (int, float)) else reconstruction_loss.item():.8f}")
+                        f"current batch loss = {batch_loss:.8f}, " +
+                        f"average epoch loss = {epoch_losses.mean():.8f}")
             
+        # Visualization
         utils.visualize_reconstruction(
             model, 
             save_path=f"{args.save_dir}/reconstruction_epoch_{epoch_num:02d}.png"
         )
-        # 다음 epoch을 위해 리셋
-        model.vis_data = None
+        model.module.vis_data = None
         
-        # wandb 로깅 (epoch 단위)
         wandb.log({"train/epoch_avg_loss": epoch_losses.mean(), "epoch": epoch_num}, step=global_step)
         logging.info(f"epoch {epoch_num:02d} time: {str(datetime.now() - epoch_start_time)[:-7]}, ")
 
-        # Compute recalls
+        # Evaluation
         current_epoch_r1_list = []
         for seq, test_ds in zip(test_sequences, test_ds_list):
             logging.info(f"===== Evaluating Sequence: {seq} =====")
@@ -248,19 +238,21 @@ if __name__ == "__main__":
             logging.info(f"================================================")
             current_epoch_r1_list.append(recalls[0])
             
-            # wandb 로깅 (sequence별 recall)
             wandb.log({f"val/{seq}_R@1": recalls[0], f"val/{seq}_R@5": recalls[1]}, step=global_step)
 
         current_avg_r1 = np.mean(current_epoch_r1_list)
         is_best = current_avg_r1 > best_r1
 
-        # wandb 로깅 (평균 recall)
         wandb.log({"val/avg_R@1": current_avg_r1, "val/best_R@1": best_r1}, step=global_step)
 
-        utils.save_checkpoint(args, {"epoch_num": epoch_num, "model_state_dict": model.state_dict(),
-                                    "optimizer_state_dict": optimizer.state_dict(), "recalls": recalls, "best_r1": best_r1,
-                                    "not_improved_num": not_improved_num
-                                    }, is_best, filename="last_model.pth")
+        utils.save_checkpoint(args, {
+            "epoch_num": epoch_num, 
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(), 
+            "recalls": recalls, 
+            "best_r1": best_r1,
+            "not_improved_num": not_improved_num
+        }, is_best, filename="last_model.pth")
 
         if is_best:
             logging.info(f"Improved: previous best R@1 = {best_r1:.1f}, current R@1 = {(current_avg_r1):.1f}")
@@ -268,12 +260,9 @@ if __name__ == "__main__":
             not_improved_num = 0
         else:
             not_improved_num += 1
-            logging.info(
-                f"Not improved: {not_improved_num} / {args.patience}: best R@1 = {best_r1:.1f}, current R@1 = {(current_avg_r1):.1f}")
+            logging.info(f"Not improved: {not_improved_num} / {args.patience}: best R@1 = {best_r1:.1f}, current R@1 = {(current_avg_r1):.1f}")
             if not_improved_num >= args.patience:
-                print(f"Performance did not improve for {not_improved_num} epochs.")
                 logging.info(f"Performance did not improve for {not_improved_num} epochs. Stop training.")
-                # break # 굳이 멈출 필요까지야
         
         print(f"Comment: {args.comment} :: Epoch {epoch_num:02d}")
 
