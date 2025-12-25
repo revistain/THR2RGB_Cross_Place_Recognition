@@ -102,7 +102,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
         
         # NOTE:GOOD CODE
         for inputs, indices, flags in tqdm(database_dataloader, ncols=100):
-            features = model(inputs.to(args.device), flags).view(-1, args.features_dim)
+            features = model(inputs.to(args.device), None, flags).view(-1, args.features_dim)
             features = features.cpu().numpy()
             database_features[indices.numpy(), :] = features
 
@@ -120,7 +120,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
 
         for inputs, indices, flags in tqdm(queries_dataloader, ncols=100):
 
-            features = model(inputs.to(args.device), flags).view(-1, args.features_dim)
+            features = model(inputs.to(args.device), None, flags).view(-1, args.features_dim)
             features = features.cpu().numpy()
             queries_features[indices.numpy()-eval_ds.database_num, :] = features
 

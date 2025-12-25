@@ -22,6 +22,94 @@ import inference
 import network
 import random
 
+def clip_patch_alignment_mean_loss(thermal_patches, rgb_patches, temperature=0.07):
+    # https://taeyuplab.tistory.com/16
+    B, N, D = thermal_patches.shape # (batch, 16x16, feature_dim)
+    
+    thermal_feat = thermal_patches.mean(dim=1)
+    rgb_feat = rgb_patches.mean(dim=1)
+    
+    thermal_feat = F.normalize(thermal_feat, dim=-1)
+    rgb_feat = F.normalize(rgb_feat, dim=-1)
+    
+    logits = torch.matmul(thermal_feat, rgb_feat.T) / temperature
+    labels = torch.arange(B, device=logits.device)
+    
+    loss_t2r = F.cross_entropy(logits, labels)
+    loss_r2t = F.cross_entropy(logits.T, labels)
+    
+    return (loss_t2r + loss_r2t) / 2
+
+def clip_alignment_cls_loss(thermal_cls, rgb_cls, temperature=0.07):
+    """
+    thermal_cls: (B, D) - CLS token features
+    rgb_cls: (B, D) - CLS token features
+    """
+    thermal_feat = F.normalize(thermal_cls, dim=-1)
+    rgb_feat = F.normalize(rgb_cls, dim=-1)
+    
+    logits = torch.matmul(thermal_feat, rgb_feat.T) / temperature
+    labels = torch.arange(thermal_feat.size(0), device=logits.device)
+    
+    loss_t2r = F.cross_entropy(logits, labels)
+    
+    # FIXME: 이거 loss_r2t도 넣어서 해보기, 필요한거 같음
+    return loss_t2r
+
+def patch_alignment_loss(thermal_patches, rgb_patches):
+    """
+    thermal_patches: (B, 256, 768)
+    rgb_patches: (B, 256, 768)
+    """
+    # L2 normalize
+    thermal_norm = F.normalize(thermal_patches, dim=-1)  # (B, 256, 768)
+    rgb_norm = F.normalize(rgb_patches, dim=-1)          # (B, 256, 768)
+    
+    # 같은 위치 patch끼리 cosine similarity
+    cos_sim = (thermal_norm * rgb_norm).sum(dim=-1)  # (B, 256)
+    
+    # similarity가 1에 가까울수록 좋음
+    loss = 1 - cos_sim.mean()
+    return loss
+
+def attention_weighted_patch_alignment_loss(thermal_patches, rgb_patches, thermal_attn, rgb_attn):
+    """
+    Args:
+        thermal_patches: (B, num_patches, 768)
+        rgb_patches: (B, num_patches, 768)
+        thermal_attn: (B, num_heads, num_tokens)
+        rgb_attn: (B, num_heads, num_tokens)
+    
+    Returns:
+        loss
+    """
+    # mean(dim=1): multi-head의 mean
+    # [:. 1:]: CLS token 제거
+    thermal_attn_flat = thermal_attn.mean(dim=1)[:, 1:] # (B, heads, num_patches) => (B, num_patches)
+    rgb_attn_flat = rgb_attn.mean(dim=1)[:, 1:] # (B, heads, num_patches) => (B, num_patches)
+    
+    # 1. RGB의 attnetion만 사용하는 방식    
+    importance = rgb_attn_flat
+    importance = importance / (importance.sum(dim=1, keepdim=True) + 1e-8)
+    
+    # 2. RGB와 Thermal의 attention을 평균으로 사용하는 방식
+    # importance = (rgb_attn_flat + thermal_attn_flat) / 2
+    # importance = importance / (importance.sum(dim=1, keepdim=True) + 1e-8) # 합이 1이되도록 정규화
+    
+    # 이 과정 없이 실험 결과 있는게 더 성능이 좋음
+    thermal_patches = F.normalize(thermal_patches, dim=-1) 
+    rgb_patches = F.normalize(rgb_patches, dim=-1)
+    
+    # 각 patch에 attention-map importance를 곱함
+    thermal_agg = (thermal_patches * importance.unsqueeze(-1)).sum(dim=1)
+    rgb_agg = (rgb_patches * importance.unsqueeze(-1)).sum(dim=1)
+    
+    # F.cosine_similarity 사용
+    similarity = F.cosine_similarity(thermal_agg, rgb_agg, dim=-1)
+    loss = 1 - similarity.mean() # patch들의 평균을 내주어 사용
+    
+    return loss
+
 def set_seed(seed=42):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -55,7 +143,8 @@ if __name__ == "__main__":
 
     '''Datasets'''
     args.sequences = ['KAIST']
-    triplets_ds = datasets_T2R.TripletsSTheReODual(args, DATASET_FOLDER, use_align_rgb=True)
+    print("use_alignment_loss: ", args.use_alignment_loss)
+    triplets_ds = datasets_T2R.TripletsSTheReODual(args, DATASET_FOLDER, use_align_rgb=args.use_alignment_loss)
     train_ds = datasets_T2R.BaseSTheReODual(args, DATASET_FOLDER, split='train')
 
     args.sequences = ['SNU', 'Valley']
@@ -70,8 +159,7 @@ if __name__ == "__main__":
     model = network.CrossModalVPR_Net(
         pretrained_foundation = True, foundation_model_path = args.foundation_model_path,
         use_GeMAdditionalLayer=args.use_GeMAdditionalLayer,
-        use_rgb_adapter=args.use_rgb_adapter, use_thermal_adapter=args.use_thermal_adapter,
-        mask_ratio=args.croco_mask_ratio, decoder_depth=4, recon_loss_weight=0.00001)
+        use_rgb_adapter=args.use_rgb_adapter, use_thermal_adapter=args.use_thermal_adapter)
     model = model.to(args.device)
     model = torch.nn.DataParallel(model)
 
@@ -107,12 +195,39 @@ if __name__ == "__main__":
                     if isinstance(m2, nn.Conv2d):
                         nn.init.constant_(m2.weight, 0.00001)
                         nn.init.constant_(m2.bias, 0.00001)
+                        
+    if args.use_sepearte_backbone_lr:
+        backbone_params = []
+        other_params = []
+        print("="*30)
+        print(f"Using seperate LR !!!")
+        print(f"- backbone LR: \t{args.backbone_lr}")
+        print(f"- other LR: \t{args.lr}")
+        print("="*30)
 
-    '''Optimizer'''
-    if args.optim == "adam":
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    elif args.optim == "sgd":
-        optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=0.001)
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                if 'rgb_backbone' in name or 'thermal_backbone' in name:
+                    backbone_params.append(param)
+                else: other_params.append(param)
+
+        '''Seperate Optimizer'''
+        if args.optim == "adam":
+            optimizer = torch.optim.Adam([
+                {'params': backbone_params, 'lr': args.backbone_lr},
+                {'params': other_params, 'lr': args.lr}
+            ])
+        elif args.optim == "sgd":
+            optimizer = torch.optim.SGD([
+                {'params': backbone_params, 'lr': args.backbone_lr, 'momentum': 0.9, 'weight_decay': 0.001},
+                {'params': other_params, 'lr': args.lr, 'momentum': 0.9, 'weight_decay': 0.001}
+            ])
+    else:
+        '''Optimizer'''
+        if args.optim == "adam":
+            optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+        elif args.optim == "sgd":
+            optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=0.001)
 
     '''Loss Function'''
     GlobalTriplet = nn.TripletMarginLoss(margin=args.margin, p=2, reduction="sum")
@@ -147,7 +262,6 @@ if __name__ == "__main__":
 
             logging.debug("Finish computing triplets")
 
-            model.train() 
             ### triplet을 위한 DataLoader 생성
             # DataLoader는 (Batch, images, triplets_local_indexes, triplets_global_indexes[index], aligned_rgb)를 getitem
             # images: stacked(query, pos, *negs)
@@ -170,14 +284,35 @@ if __name__ == "__main__":
                 flags = bundle_flags * curr_batch_len
                 
                 ### model을 통해, triplet의 descriptor와 patch embedding 추출
-                # return_embedding=True일 때: (desc, patch, cls, attn, recon_loss) 반환
-                global_features, recon_loss = model(images.to(args.device), aligned_rgbs, flags=flags)
-                # global_features, patch_embedding, cls_embedding, cls_attn_map, recon_loss = model(images.to(args.device), aligned_rgbs, flags=flags)
+                global_features, patch_embedding, cls_embedding, cls_attn_map = model(images.to(args.device), flags=flags, return_embedding=True)
 
                 overall_loss = 0
                 alignment_loss = 0
-                reconstruction_loss = 0 
-                
+                if aligned_rgbs is not None:
+                    # 만약 alignment_loss를 사용한다면 (def clip_patch_alignment_mean_loss 참고)
+                    aligned_rgbs = aligned_rgbs.to(args.device)
+                    
+                    model.eval()
+                    with torch.no_grad():
+                        _, aligned_rgb_patches, aligned_rgb_cls_embedding, aligned_cls_attn_map = model(aligned_rgbs, flags=['rgb'] * len(aligned_rgbs), return_embedding=True)
+                    
+                    # thermal query에 해당하는 patch_embedding만 추출(0, 12, 24, 36, maybe...)
+                    thermal_indices = [i * num_bundle_flags for i in range(curr_batch_len)]
+                    thermal_patches = patch_embedding[thermal_indices]
+                    thermal_cls = cls_embedding[thermal_indices]
+                    
+                    # attn_maps
+                    thermal_cls_attn_map = cls_attn_map[thermal_indices]
+                    
+                    # alignment_loss 구하기
+                    # alignment_loss = clip_patch_alignment_mean_loss(thermal_patches, aligned_rgb_patches, temperature=0.07)
+                    # alignment_loss = patch_alignment_loss(thermal_patches, aligned_rgb_patches)
+                    cls_alignment_loss = clip_alignment_cls_loss(thermal_cls, aligned_rgb_cls_embedding)
+                    attn_alignment_loss = attention_weighted_patch_alignment_loss(thermal_patches, aligned_rgb_patches,
+                                                                             thermal_cls_attn_map, aligned_cls_attn_map)
+                    # alignment_loss = attention_weighted_patch_alignment_loss(thermal_patches, aligned_rgb_patches,
+                    #                                                          thermal_cls_attn_map, aligned_cls_attn_map)
+
                 # triplets_local_indexes = (batch, 3, neg_num) => [[[0, 1, 2], [0, 1, 3] ... [0, 1, neg_num+2]] * batch]
                 triplets_local_indexes = torch.transpose(
                     triplets_local_indexes.view(args.train_batch_size, args.negs_num_per_query, 3), 1, 0)
@@ -187,21 +322,25 @@ if __name__ == "__main__":
                 for triplets in triplets_local_indexes:
                     queries_indexes, positives_indexes, negatives_indexes = triplets.T
                     
+                    # 각각에 해당하는 descriptor 추출
                     query_features = global_features[queries_indexes]
                     positive_features = global_features[positives_indexes]
                     negative_features = global_features[negatives_indexes]
 
                     triplet_loss = GlobalTriplet(query_features, positive_features, negative_features)
                     triplet_loss_sum += triplet_loss
+                    
+                    # triplet_loss
                     overall_loss += triplet_loss
 
-                # Reconstruction loss 추가
-                reconstruction_loss = recon_loss
-                # reconstruction_loss = 0
-                # model.module.recon_loss_weight로 가중치 적용
+                # train_batch_size: 4, arg.negs_num_per_query: 10
+                # al_weight = 10.0 # loss 가중치
+                # overall_loss += (alignment_loss * al_weight)
+
+                alignment_loss = (cls_alignment_loss*0.5+attn_alignment_loss*10.0) / 2
+                overall_loss += alignment_loss
                 
-                # Normalize by batch size
-                overall_loss += model.module.recon_loss_weight * reconstruction_loss
+                # args.train_batch_size * args.negs_num_per_query = 40, alignment_loss의 scale이 너무 커서 맞춰주기 위해 같이 나눠줌
                 overall_loss /= (args.train_batch_size * args.negs_num_per_query)
 
                 del global_features, query_features, positive_features, negative_features
@@ -215,26 +354,18 @@ if __name__ == "__main__":
 
                 # wandb 로깅 (batch 단위)
                 wandb.log({
-                    "train/overall_loss": overall_loss.item(),
+                    "train/overall_loss": overall_loss,
                     "train/triplet_loss(scaled)": triplet_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query),
-                    "train/reconstruction_loss": model.module.recon_loss_weight * reconstruction_loss / (args.train_batch_size * args.negs_num_per_query) if isinstance(reconstruction_loss, (int, float)) else model.module.recon_loss_weight * reconstruction_loss.item() / (args.train_batch_size * args.negs_num_per_query),
+                    "train/alignment_loss(scaled)": (alignment_loss).item() / (args.train_batch_size * args.negs_num_per_query) if isinstance(alignment_loss, torch.Tensor) else 0,
                 }, step=global_step)
                 global_step += 1
 
-                del overall_loss, triplet_loss, alignment_loss, recon_loss
-                
+                del overall_loss, triplet_loss, alignment_loss
+
             logging.info(f"Epoch[{epoch_num:02d}]({loop_num + 1}/{loops_num}): " +
                         f"current batch triplet loss = {batch_loss:.8f}, " +
-                        f"average epoch triplet loss = {epoch_losses.mean():.8f}, " +
-                        f"current reconstruction loss = {reconstruction_loss if isinstance(reconstruction_loss, (int, float)) else reconstruction_loss.item():.8f}")
-            
-        utils.visualize_reconstruction(
-            model, 
-            save_path=f"{args.save_dir}/reconstruction_epoch_{epoch_num:02d}.png"
-        )
-        # 다음 epoch을 위해 리셋
-        model.vis_data = None
-        
+                        f"average epoch triplet loss = {epoch_losses.mean():.8f}")
+
         # wandb 로깅 (epoch 단위)
         wandb.log({"train/epoch_avg_loss": epoch_losses.mean(), "epoch": epoch_num}, step=global_step)
         logging.info(f"epoch {epoch_num:02d} time: {str(datetime.now() - epoch_start_time)[:-7]}, ")

@@ -318,9 +318,11 @@ class TripletsSTheReODual(BaseSTheReODual):
             for images, indexes, flags in tqdm(subset_dl, ncols=100):
                 images = images.to(args.device)
                 # local_features, global_features = model(images)
-                global_features = model(images, flags)
+                global_features = model(images, None, flags)
                 cache[indexes.numpy()] = global_features.cpu().numpy()
                 # cache_local[indexes.numpy] = local_features.cpu().numpy()
+        
+        model.train()
         return cache
 
     def get_query_features(self, query_index, cache):

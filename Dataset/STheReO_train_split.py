@@ -11,13 +11,13 @@ import cv2
 
 np.random.seed(42)
 
-dataset_dir = '/DATA1/datasets/PR/STheReO'
-seq = 'KAIST'
+dataset_dir = '/DATA2/datasets/PR/STheReO'
+seq = 'Valley'
 sequence_key = {'KAIST': ['sthereo_01_kaist_morning', 'sthereo_02_kaist_afternoon', 'sthereo_03_kaist_evening'], 
                 'SNU': ['sthereo_04_snu_morning', 'sthereo_05_snu_afternoon', 'sthereo_06_snu_evening'], 
                 'Valley': ['sthereo_07_valley_morning', 'sthereo_08_valley_afternoon', 'sthereo_09_valley_evening']}
 
-dataset_path = [os.path.join(dataset_dir, index) for index in sequence_key[seq]]    
+dataset_path = [os.path.join(dataset_dir, index) for index in sequence_key[seq]]   
 pose_path = [path + '/pose/global_pose.csv' for path in dataset_path]  
 rgb_path = [path + '/image/stereo_left/' for path in dataset_path]   
 thermal_path = [path + '/image/stereo_thermal_14_left/' for path in dataset_path]   

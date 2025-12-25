@@ -1,4 +1,4 @@
-OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=7 python3 train_wandb.py \
+OMP_NUM_THREADS=6 CUDA_VISIBLE_DEVICES=7 python3 train_wandb.py \
     --save_dir './logs' \
     --features_dim 768 \
     --sequences KAIST \
@@ -6,10 +6,10 @@ OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=7 python3 train_wandb.py \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 6 \
     --num_trainable_blocks_THERMAL 6 \
-    --comment "baseline_test" \
+    --comment "croco_mask-ratio-0.01_decoder-depth-4_recon-loss-weight-0.1-SmoothL1" \
     --use_rgb_adapter \
     --use_thermal_adapter \
-    --use_alignment_loss
+    --croco_mask_ratio 0.75
 
 
 ######### 설명 #########

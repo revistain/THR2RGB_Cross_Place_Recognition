@@ -80,18 +80,18 @@ class Parser():
                             help="Path to load checkpoint from, for resuming training or testing.")
         self.parser.add_argument("--save_all", type=bool, default=False)
         
+        # custom settings
         self.parser.add_argument("--num_trainable_blocks_RGB", type=int, default=0, help="number of trainable blocks")
         self.parser.add_argument("--num_trainable_blocks_THERMAL", type=int, default=0, help="number of trainable blocks")
         
-        # custom settings
         self.parser.add_argument('--comment', type=str)
         self.parser.add_argument("--use_alignment_loss", action='store_true', default=False)
         self.parser.add_argument("--use_GeMAdditionalLayer", action='store_true', default=False)
-        self.parser.add_argument("--use_sepearte_backbone_lr", action='store_true', default=False)
         self.parser.add_argument("--backbone_lr", type=float, default=0.00001, help="_")
 
         self.parser.add_argument("--use_rgb_adapter", action='store_true', default=False)
         self.parser.add_argument("--use_thermal_adapter", action='store_true', default=False)
+        self.parser.add_argument("--croco_mask_ratio", type=float, default=0.75, help="_")
         
     
     def parse_arguments(self):
