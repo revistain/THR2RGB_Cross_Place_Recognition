@@ -1,4 +1,4 @@
-OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=0 python3 train_wandb.py \
+OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=7 python3 train_wandb.py \
     --save_dir './logs' \
     --features_dim 768 \
     --sequences KAIST \
@@ -6,10 +6,10 @@ OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=0 python3 train_wandb.py \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 4 \
     --num_trainable_blocks_THERMAL 4 \
-    --comment "baseline_alignment-attn[dot_product,rgb-attn-map]-loss_al10.0_num-train-block4" \
-    --use_alignment_loss \
+    --comment "croco-0.5-alpha1.0" \
     --margin 0.1 \
-    --negs_num_per_query 10
+    --negs_num_per_query 10 \
+    --croco_mask_ratio 0.5
 
 #    --use_sepearte_backbone_lr
 #    --backbone_lr 1e-5
@@ -17,7 +17,7 @@ OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=0 python3 train_wandb.py \
 #    --use_alignment_loss
 #    --use_GeMAdditionalLayer
 #    --comment "baseline_clip-cls-loss_al0.5_GeMLinear[784,ReLU,784]_seperateLR[1e-5,1e-4]" \
-    # --comment "baseline_alignment-attn[dot_product,rgb-attn-map]-loss_al1.0_num-train-block6" \
+#    --comment "baseline_alignment-attn[dot_product,rgb-attn-map]-loss_al1.0_num-train-block6" \
 
 ######### 설명 #########
 # comment: wandb 기록명

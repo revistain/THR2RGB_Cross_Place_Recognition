@@ -21,6 +21,7 @@ import datasets_T2R
 import inference
 import network
 import random
+from recon_vis import visualize_during_training
 
 def clip_patch_alignment_mean_loss(thermal_patches, rgb_patches, temperature=0.07):
     # https://taeyuplab.tistory.com/16
@@ -154,7 +155,7 @@ if __name__ == "__main__":
     '''Datasets'''
     args.sequences = ['KAIST']
     print("use_alignment_loss: ", args.use_alignment_loss)
-    triplets_ds = datasets_T2R.TripletsSTheReODual(args, DATASET_FOLDER, use_align_rgb=args.use_alignment_loss)
+    triplets_ds = datasets_T2R.TripletsSTheReODual(args, DATASET_FOLDER, use_align_rgb=True)
     train_ds = datasets_T2R.BaseSTheReODual(args, DATASET_FOLDER, split='train')
 
     args.sequences = ['SNU', 'Valley']
@@ -166,7 +167,12 @@ if __name__ == "__main__":
         test_ds_list.append(test_ds)
 
     '''Model'''
-    model = network.CrossModalVPR_Net(pretrained_foundation = True, foundation_model_path = args.foundation_model_path, use_GeMAdditionalLayer=args.use_GeMAdditionalLayer)
+    model = network.CrossModalVPR_Net(
+        pretrained_foundation = True,
+        foundation_model_path = args.foundation_model_path, 
+        use_GeMAdditionalLayer=args.use_GeMAdditionalLayer,
+        mask_ratio=args.croco_mask_ratio
+    )
     model = model.to(args.device)
     model = torch.nn.DataParallel(model)
 
@@ -286,43 +292,18 @@ if __name__ == "__main__":
             logging.debug(f"Start loading {len(triplets_ds)} triplets as {len(triplets_dl)} batches")
 
             print("- Training...")
-            for images, triplets_local_indexes, _, aligned_rgbs in tqdm(triplets_dl, ncols=100, desc=f"alignmentLoss:{args.use_alignment_loss}::Epoch {epoch_num:02d}"):
+            for images, triplets_local_indexes, _, aligned_rgbs in tqdm(triplets_dl, ncols=100, desc=f"Epoch {epoch_num:02d}"):
                 curr_batch_len = len(images) // num_bundle_flags
                 flags = bundle_flags * curr_batch_len
                 
                 ### model을 통해, triplet의 descriptor와 patch embedding 추출
-                global_features, patch_embedding, cls_embedding, cls_attn_map = model(images.to(args.device), flags=flags)
-
-                overall_loss = 0
-                alignment_loss = 0
-                if aligned_rgbs is not None:
-                    # 만약 alignment_loss를 사용한다면 (def clip_patch_alignment_mean_loss 참고)
-                    aligned_rgbs = aligned_rgbs.to(args.device)
-                    
-                    model.eval()
-                    with torch.no_grad():
-                        _, aligned_rgb_patches, aligned_rgb_cls_embedding, aligned_cls_attn_map = model(aligned_rgbs, flags=['rgb'] * len(aligned_rgbs))
-                    
-                    # thermal query에 해당하는 patch_embedding만 추출(0, 12, 24, 36, maybe...)
-                    thermal_indices = [i * num_bundle_flags for i in range(curr_batch_len)]
-                    thermal_patches = patch_embedding[thermal_indices]
-                    thermal_cls = cls_embedding[thermal_indices]
-                    
-                    # attn_maps
-                    thermal_cls_attn_map = cls_attn_map[thermal_indices]
-                    
-                    # alignment_loss 구하기
-                    # alignment_loss = clip_patch_alignment_mean_loss(thermal_patches, aligned_rgb_patches, temperature=0.07)
-                    # alignment_loss = patch_alignment_loss(thermal_patches, aligned_rgb_patches)
-                    # alignment_loss = clip_alignment_cls_loss(thermal_cls, aligned_rgb_cls_embedding)
-                    alignment_loss = attention_weighted_patch_alignment_loss(thermal_patches, aligned_rgb_patches,
-                                                                             thermal_cls_attn_map, aligned_cls_attn_map,
-                                                                             use_intranorm=True)
+                global_features, patch_embedding, recon_loss = model(images.to(args.device), flags=flags, aligned_rgb=aligned_rgbs.to(args.device))
 
                 # triplets_local_indexes = (batch, 3, neg_num) => [[[0, 1, 2], [0, 1, 3] ... [0, 1, neg_num+2]] * batch]
                 triplets_local_indexes = torch.transpose(
                     triplets_local_indexes.view(args.train_batch_size, args.negs_num_per_query, 3), 1, 0)
                 
+                overall_loss = 0
                 triplet_loss_sum = 0
                 # 각 triplet에 대해 triplet loss 계산
                 for triplets in triplets_local_indexes:
@@ -340,8 +321,8 @@ if __name__ == "__main__":
                     overall_loss += triplet_loss
 
                 # train_batch_size: 4, arg.negs_num_per_query: 10
-                al_weight = 10.0 # loss 가중치(al: alignment loss)
-                overall_loss += (alignment_loss * al_weight)
+                al_weight = 1 # loss 가중치(al: alignment loss)
+                overall_loss += (recon_loss * al_weight)
                 overall_loss /= (args.train_batch_size * args.negs_num_per_query)
 
                 del global_features, query_features, positive_features, negative_features
@@ -357,15 +338,24 @@ if __name__ == "__main__":
                 wandb.log({
                     "train/overall_loss": overall_loss,
                     "train/triplet_loss(scaled)": triplet_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query),
-                    "train/alignment_loss(scaled)": (alignment_loss * al_weight).item() / (args.train_batch_size * args.negs_num_per_query) if isinstance(alignment_loss, torch.Tensor) else 0,
+                    "train/recon_loss(scaled)": (recon_loss * al_weight).item() / (args.train_batch_size * args.negs_num_per_query) if isinstance(recon_loss, torch.Tensor) else 0,
                 }, step=global_step)
                 global_step += 1
 
-                del overall_loss, triplet_loss, alignment_loss
+                del overall_loss, triplet_loss, recon_loss
 
             logging.info(f"Epoch[{epoch_num:02d}]({loop_num + 1}/{loops_num}): " +
                         f"current batch triplet loss = {batch_loss:.8f}, " +
                         f"average epoch triplet loss = {epoch_losses.mean():.8f}")
+        
+        visualize_during_training(
+            model, 
+            triplets_dl, 
+            args.device, 
+            epoch_num,
+            save_dir=os.path.join(args.save_dir, 'reconstructions')
+            comment=args.comment
+        )
 
         # wandb 로깅 (epoch 단위)
         wandb.log({"train/epoch_avg_loss": epoch_losses.mean(), "epoch": epoch_num}, step=global_step)
