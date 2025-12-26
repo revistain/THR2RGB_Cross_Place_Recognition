@@ -291,7 +291,7 @@ if __name__ == "__main__":
                 flags = bundle_flags * curr_batch_len
                 
                 ### model을 통해, triplet의 descriptor와 patch embedding 추출
-                global_features, patch_embedding, cls_embedding, cls_attn_map = model(images.to(args.device), flags=flags, return_embedding=True)
+                global_features, patch_embedding, cls_embedding, cls_attn_map = model(images.to(args.device), flags=flags)
 
                 overall_loss = 0
                 alignment_loss = 0
@@ -301,7 +301,7 @@ if __name__ == "__main__":
                     
                     model.eval()
                     with torch.no_grad():
-                        _, aligned_rgb_patches, aligned_rgb_cls_embedding, aligned_cls_attn_map = model(aligned_rgbs, flags=['rgb'] * len(aligned_rgbs), return_embedding=True)
+                        _, aligned_rgb_patches, aligned_rgb_cls_embedding, aligned_cls_attn_map = model(aligned_rgbs, flags=['rgb'] * len(aligned_rgbs))
                     
                     # thermal query에 해당하는 patch_embedding만 추출(0, 12, 24, 36, maybe...)
                     thermal_indices = [i * num_bundle_flags for i in range(curr_batch_len)]
