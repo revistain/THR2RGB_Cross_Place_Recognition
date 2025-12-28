@@ -62,6 +62,9 @@ def visualize_reconstruction(model, thermal_img, aligned_rgb, device='cuda', sav
         # 10. Unpatchify
         reconstructed_img = unpatchify_visual(reconstructed_patches, patch_size=14)  # [1, 3, 224, 224]
         
+        # 11. 원본 이미지도 patchify
+        original_patches = model.module.patchify(thermal_img)  # [1, 256, 588]
+        
     # Denormalize (ImageNet stats 사용했다고 가정)
     mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(device)
     std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(device)
@@ -70,57 +73,69 @@ def visualize_reconstruction(model, thermal_img, aligned_rgb, device='cuda', sav
     aligned_rgb_denorm = aligned_rgb * std + mean
     reconstructed_img_denorm = reconstructed_img * std + mean
     
+    # ===== 핵심: Visible + Reconstructed 합치기 =====
+    # Visible patches는 원본, Masked patches는 reconstruction 사용
+    hybrid_patches = original_patches.clone()  # [1, 256, 588]
+    hybrid_patches[mask] = reconstructed_patches[mask]  # Masked 위치만 reconstruction으로 교체
+    
+    hybrid_img = unpatchify_visual(hybrid_patches, patch_size=14)  # [1, 3, 224, 224]
+    hybrid_img_denorm = hybrid_img * std + mean
+    
     # Mask 시각화 (16x16 grid)
-    mask_img = mask.reshape(1, 16, 16).float()  # [1, 16, 16]
+    mask_2d = mask.reshape(1, 16, 16).float()  # [1, 16, 16]
     mask_img = torch.nn.functional.interpolate(
-        mask_img.unsqueeze(1), size=(224, 224), mode='nearest'
+        mask_2d.unsqueeze(1), size=(224, 224), mode='nearest'
     ).squeeze(1)  # [1, 224, 224]
     
     # Plot
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
     
-    # Row 1: Thermal
+    # Row 1
     axes[0, 0].imshow(thermal_img_denorm[0].cpu().permute(1, 2, 0).clip(0, 1))
-    axes[0, 0].set_title('Original Thermal', fontsize=14)
+    axes[0, 0].set_title('Original Thermal', fontsize=14, fontweight='bold')
     axes[0, 0].axis('off')
     
-    axes[0, 1].imshow(mask_img[0].cpu(), cmap='gray')
-    axes[0, 1].set_title(f'Mask (Ratio: {mask.float().mean():.2f})', fontsize=14)
+    axes[0, 1].imshow(mask_img[0].cpu(), cmap='RdYlGn_r', vmin=0, vmax=1)
+    axes[0, 1].set_title(f'Mask (Masked={mask.float().mean()*100:.1f}%)', fontsize=14, fontweight='bold')
     axes[0, 1].axis('off')
     
-    axes[0, 2].imshow(reconstructed_img_denorm[0].cpu().permute(1, 2, 0).clip(0, 1))
-    axes[0, 2].set_title('Reconstructed Thermal', fontsize=14)
+    # ★ 핵심: Hybrid 이미지 (Visible + Reconstructed)
+    axes[0, 2].imshow(hybrid_img_denorm[0].cpu().permute(1, 2, 0).clip(0, 1))
+    axes[0, 2].set_title('Hybrid (Vis+Recon)', fontsize=14, fontweight='bold', color='red')
     axes[0, 2].axis('off')
     
-    # Row 2: RGB + Comparison
+    # Row 2
     axes[1, 0].imshow(aligned_rgb_denorm[0].cpu().permute(1, 2, 0).clip(0, 1))
-    axes[1, 0].set_title('Aligned RGB (Reference)', fontsize=14)
+    axes[1, 0].set_title('Aligned RGB (Reference)', fontsize=14, fontweight='bold')
     axes[1, 0].axis('off')
     
-    # Masked thermal (visible만 보이게)
-    masked_thermal = thermal_img_denorm.clone()
+    # Reconstruction only (masked 영역만)
+    recon_only = reconstructed_img_denorm.clone()
     mask_expanded = mask_img.unsqueeze(1).expand(-1, 3, -1, -1)  # [1, 3, 224, 224]
-    masked_thermal[mask_expanded > 0.5] = 0  # Masked region = black
-    axes[1, 1].imshow(masked_thermal[0].cpu().permute(1, 2, 0).clip(0, 1))
-    axes[1, 1].set_title('Visible Patches Only', fontsize=14)
+    recon_only[mask_expanded < 0.5] = 0  # Visible region = black
+    axes[1, 1].imshow(recon_only[0].cpu().permute(1, 2, 0).clip(0, 1))
+    axes[1, 1].set_title('Reconstructed (Masked Only)', fontsize=14, fontweight='bold')
     axes[1, 1].axis('off')
     
-    # Reconstruction error (MSE)
+    # Reconstruction error (masked 영역에서만)
     error = (thermal_img_denorm - reconstructed_img_denorm).abs().mean(dim=1)  # [1, 224, 224]
-    im = axes[1, 2].imshow(error[0].cpu(), cmap='hot')
-    axes[1, 2].set_title('Reconstruction Error', fontsize=14)
+    error_masked = error.clone()
+    error_masked[mask_img < 0.5] = 0  # Visible 영역은 0으로
+    im = axes[1, 2].imshow(error_masked[0].cpu(), cmap='hot', vmin=0, vmax=0.3)
+    axes[1, 2].set_title('Error (Masked Only)', fontsize=14, fontweight='bold')
     axes[1, 2].axis('off')
-    plt.colorbar(im, ax=axes[1, 2], fraction=0.046)
+    plt.colorbar(im, ax=axes[1, 2], fraction=0.046, pad=0.04)
     
     plt.tight_layout()
     
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         print(f"Saved to {save_path}")
+        plt.close()
+    else:
+        plt.show()
     
-    plt.show()
-    
-    return reconstructed_img_denorm
+    return hybrid_img_denorm
 
 def unpatchify_visual(patches, patch_size=14):
     """
@@ -138,12 +153,12 @@ def unpatchify_visual(patches, patch_size=14):
 
 
 # ===== Training Loop에서 사용 =====
-def visualize_during_training(model, triplets_dl, device, epoch, save_dir='./visualizations',comment="default"):
+def visualize_during_training(model, triplets_dl, device, epoch, save_dir='./visualizations', comment="default"):
     """Training 중간에 주기적으로 시각화"""
     import os
-    os.makedirs(save_dir, exist_ok=True)
-    os.makedirs(os.path.join(save_dir, comment), exist_ok=True)
-    os.makedirs(os.path.join(save_dir, comment, get_timestamp()), exist_ok=True)
+    timestamp = get_timestamp()
+    save_subdir = os.path.join(save_dir, comment, timestamp)
+    os.makedirs(save_subdir, exist_ok=True)
     
     model.eval()
     
@@ -154,7 +169,7 @@ def visualize_during_training(model, triplets_dl, device, epoch, save_dir='./vis
     thermal_img = images[0:1].to(device)  # [1, 3, 224, 224]
     aligned_rgb = aligned_rgbs[0:1].to(device)  # [1, 3, 224, 224]
     
-    save_path = f"{os.path.join(save_dir, comment, get_timestamp())}/epoch_{epoch:03d}.png"
+    save_path = f"{save_subdir}/epoch_{epoch:03d}.png"
     visualize_reconstruction(model, thermal_img, aligned_rgb, device, save_path)
     
     model.train()

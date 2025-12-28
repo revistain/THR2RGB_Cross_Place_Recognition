@@ -171,7 +171,8 @@ if __name__ == "__main__":
         pretrained_foundation = True,
         foundation_model_path = args.foundation_model_path, 
         use_GeMAdditionalLayer=args.use_GeMAdditionalLayer,
-        mask_ratio=args.croco_mask_ratio
+        mask_ratio=args.croco_mask_ratio,
+        use_single_pass=args.use_single_pass, use_reduced_thermal_patch=args.use_reduced_thermal_patch,
     )
     model = model.to(args.device)
     model = torch.nn.DataParallel(model)
@@ -321,8 +322,8 @@ if __name__ == "__main__":
                     overall_loss += triplet_loss
 
                 # train_batch_size: 4, arg.negs_num_per_query: 10
-                al_weight = 1 # loss 가중치(al: alignment loss)
-                overall_loss += (recon_loss * al_weight)
+                recon_weight = args.recon_weight # loss 가중치(al: alignment loss)
+                overall_loss += (recon_loss * recon_weight)
                 overall_loss /= (args.train_batch_size * args.negs_num_per_query)
 
                 del global_features, query_features, positive_features, negative_features
@@ -338,8 +339,9 @@ if __name__ == "__main__":
                 wandb.log({
                     "train/overall_loss": overall_loss,
                     "train/triplet_loss(scaled)": triplet_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query),
-                    "train/recon_loss(scaled)": (recon_loss * al_weight).item() / (args.train_batch_size * args.negs_num_per_query) if isinstance(recon_loss, torch.Tensor) else 0,
+                    "train/recon_loss(scaled)": (recon_loss * recon_weight).item() / (args.train_batch_size * args.negs_num_per_query) if isinstance(recon_loss, torch.Tensor) else 0,
                 }, step=global_step)
+                
                 global_step += 1
 
                 del overall_loss, triplet_loss, recon_loss
@@ -353,7 +355,7 @@ if __name__ == "__main__":
             triplets_dl, 
             args.device, 
             epoch_num,
-            save_dir=os.path.join(args.save_dir, 'reconstructions')
+            save_dir=os.path.join(args.save_dir, 'reconstructions'),
             comment=args.comment
         )
 

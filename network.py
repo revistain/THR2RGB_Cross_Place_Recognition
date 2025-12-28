@@ -17,7 +17,7 @@ class CroCoDecoderBlock(nn.Module):
     
     구조:
     1. Self-Attention: decoder 내부 token들 간 정보 혼합
-    2. Cross-Attention: RGB encoder output 참조 (CroCo의 핵심!)
+    2. Cross-Attention: RGB encoder output 참조
     3. MLP: Position-wise feed-forward
     
     모두 Pre-LayerNorm + Residual connection 사용
@@ -29,7 +29,7 @@ class CroCoDecoderBlock(nn.Module):
         self.norm1 = nn.LayerNorm(dim)
         self.self_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
         
-        # Cross-Attention components (CroCo의 핵심!)
+        # Cross-Attention components
         self.norm2 = nn.LayerNorm(dim)
         self.norm_cross = nn.LayerNorm(dim)
         self.cross_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
@@ -121,7 +121,8 @@ class AggregationHead(nn.Module):
 
 class CrossModalVPR_Net(nn.Module):
     def __init__(self, pretrained_foundation=False, foundation_model_path=None,
-                 use_alignment_proj=False, use_GeMAdditionalLayer=False, mask_ratio=0.5):
+                 use_alignment_proj=False, use_GeMAdditionalLayer=False, mask_ratio=0.5,
+                 use_single_pass=False, use_reduced_thermal_patch=True):
         super().__init__()
 
         # 1. 두 개의 독립적인 Backbone 생성 (Weights Unshared)
@@ -129,6 +130,8 @@ class CrossModalVPR_Net(nn.Module):
         self.rgb_backbone = get_backbone(pretrained_foundation, foundation_model_path)
         self.thermal_backbone = get_backbone(pretrained_foundation, foundation_model_path)
         self.output_dim = 768
+        self.use_single_pass = use_single_pass
+        self.use_reduced_thermal_patch = use_reduced_thermal_patch
         
         # Croco settings
         dec_depth = 8
@@ -241,10 +244,15 @@ class CrossModalVPR_Net(nn.Module):
                 
                 # 3. patch embedding을 masking 해준다.
                 mask = self.mask_generator(thermal_patch)
-                thermal_visible = thermal_patch[~mask].reshape(patch_B, -1, patch_D)
+                if self.use_reduced_thermal_patch:
+                    thermal_visible = thermal_patch[~mask].reshape(patch_B, -1, patch_D)
+                else:
+                    thermal_visible = thermal_patch.clone()
+                    # Masked positions에 mask_token 삽입
+                    mask_token_expanded = self.mask_token.expand(patch_B, patch_N, patch_D)
+                    thermal_visible[mask] = mask_token_expanded[mask]
                 
                 # 4. unmasked된 patch들만 DINOv2 통과시키기
-                # TODO: 여기를 어떻게 할것인지 고민
                 for blk in self.thermal_backbone.blocks:
                     thermal_visible = blk(thermal_visible)
                 thermal_visible = self.thermal_backbone.norm(thermal_visible)
@@ -254,35 +262,43 @@ class CrossModalVPR_Net(nn.Module):
                 rgb_full = rgb_full["x_norm_patchtokens"] 
                 
                 # 6. Mask token expansion
-                mask_tokens = self.mask_token.expand(patch_B, patch_N, -1) # [B, 256, 768]
-                
-                thermal_full = mask_tokens.clone()
-                for i in range(patch_B):
-                    thermal_full[i, ~mask[i]] = thermal_visible[i]
-                thermal_full = thermal_full.reshape(patch_B, -1, patch_D)
+                if self.use_reduced_thermal_patch:
+                    mask_tokens = self.mask_token.expand(patch_B, patch_N, -1) # [B, 256, 768]
+                    thermal_full = mask_tokens.clone()
+                    for i in range(patch_B):
+                        thermal_full[i, ~mask[i]] = thermal_visible[i]
+                    thermal_full = thermal_full.reshape(patch_B, -1, patch_D)
+                else:
+                    thermal_full = thermal_visible
                 
                 # 7. Decoder Positional Encoding
-                thermal_full = thermal_full + self.decoder_pos_embed  # [B, 256, 768]
+                thermal_full_dec = thermal_full + self.decoder_pos_embed  # [B, 256, 768]
                 rgb_full = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
                 
                 # 8. decoder 통과시키기
                 for blk in self.decoder_blocks:
-                    thermal_full = blk(thermal_full, rgb_full)
-                thermal_full = self.decoder_norm(thermal_full)
+                    thermal_full_dec = blk(thermal_full_dec, rgb_full)
+                thermal_full_dec = self.decoder_norm(thermal_full_dec)
                 
                 # 9. Prediction Head
-                reconstructed_patchs = self.prediction_head(thermal_full)
+                reconstructed_patches = self.prediction_head(thermal_full_dec)
                 target_patches = self.patchify(x)
                 
                 # 10. Reconstruction loss 계산
                 recon_loss = self.reconstruction_criterion(
-                    pred=reconstructed_patchs,  # [B, 256, 768]
+                    pred=reconstructed_patches,  # [B, 256, 768]
                     mask=mask,                  # [B, 256]
                     target=target_patches       # [B, 3, 256, 768]
                 )
                 
-                # 11. VPR용 Full thermal patch tokens
-                out = self.thermal_backbone(x)
+                # 11. VPR용 patch tokens
+                if self.use_single_pass:
+                    thermal_for_vpr = thermal_full.clone()
+                    thermal_for_vpr[mask] = thermal_full_dec[mask]
+                    out = {"x_norm_patchtokens": thermal_for_vpr}
+                else:
+                    out = self.thermal_backbone(x)
+                    
                 agg_layer = self.thermal_aggregation
             else:
                 # if inferencing

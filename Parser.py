@@ -90,7 +90,9 @@ class Parser():
         self.parser.add_argument("--use_sepearte_backbone_lr", action='store_true', default=False)
         self.parser.add_argument("--backbone_lr", type=float, default=0.00001, help="_")
         self.parser.add_argument("--croco_mask_ratio", type=float, default=0.75, help="_")
-        
+        self.parser.add_argument("--recon_weight", type=float, default=1, help="_")
+        self.parser.add_argument("--use_single_pass", action='store_true', default=False)
+        self.parser.add_argument("--use_reduced_thermal_patch", action='store_true', default=False)
         
     
     def parse_arguments(self):
