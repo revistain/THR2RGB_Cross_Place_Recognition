@@ -8,6 +8,7 @@ from torch.utils.data.dataset import Subset
 # from datetime import datetime
 import time
 import cv2
+from croco.models.masking import RandomMask
 
 def visualize_top5_predictions(args, eval_ds, predictions, distances, positives_per_query, num_samples=10):
     """
@@ -88,7 +89,6 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
     # TODO test_efficient_ram_usage
 
     test_method = args.test_method
-    
     model = model.eval()
     with torch.no_grad():
         ### Extract database features
@@ -119,7 +119,6 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
         queries_features = np.empty((eval_ds.queries_num, args.features_dim), dtype="float32")
 
         for inputs, indices, flags in tqdm(queries_dataloader, ncols=100):
-
             features = model(inputs.to(args.device), flags)[0].view(-1, args.features_dim)
             features = features.cpu().numpy()
             queries_features[indices.numpy()-eval_ds.database_num, :] = features
@@ -138,10 +137,9 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
     start_time = time.time()
     
     distances, predictions = faiss_index.search(queries_features, max(args.recall_values))
-    del queries_features
-
+    del queries_features    
+    
     # NOTE: default args.recall_values is 20
-
     #### For each query, check if the predictions are correct
     positives_per_query = eval_ds.get_positives()
     # args.recall_values by default is [1, 5, 10, 20]
@@ -149,17 +147,69 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
     pre_num = eval_ds.queries_num
     for query_index, pred in enumerate(predictions):
         for i, n in enumerate(args.recall_values):
+            breakpoint()
             if np.any(np.in1d(pred[:n], positives_per_query[query_index])):
                 recalls[i:] += 1
-                # print(f"pred[:{n}]: {pred[:n]}")
-                # print(f"positives_per_query[{query_index}]: {positives_per_query[query_index]}")
-                # print(f"recalls: {recalls}")
                 break
-            # elif i == 3:
-            #     print(f"failed query_index: {query_index}")
-            #     print(f"pred[:{n}]: {pred[:n]}")
-            #     print(f"positives_per_query[{query_index}]: {positives_per_query[query_index]}")
     recalls = recalls / eval_ds.queries_num * 100
+    
+    
+    #####################################
+    ### RERANKING Process
+    positives_per_query = eval_ds.get_positives()
+    recalls = np.zeros(len(args.recall_values))
+    pre_num = eval_ds.queries_num
+    
+    RERANKING_IMAGE_COUNT = 10
+    mask_generator = RandomMask(16*16, args.croco_mask_ratio)
+    # # query_index: query image의 index, pred: 예측한 index들(20개)
+    # with torch.no_grad():
+    #     for query_index, pred in enumerate(predictions):
+    #         # 1. topN에 해당하는 RGB 이미지들 가져오기
+    #         image_to_be_reranked = pred[:RERANKING_IMAGE_COUNT]
+
+    #         # 2. thermal 이미지 masking
+    #         thermal_patch = model.module.thermal_backbone.patch_embed(thermal_img)
+    #         B, N, D = thermal_patch.shape  # [1, 256, 768]
+            
+    #         # 3. masking된 thermal이미지를 RGB 이미지를 이용해 reconstruction
+    #         pos_tokens = model.module.thermal_backbone.pos_embed[:, 1:, :]
+    #         pos_embed_grid = pos_tokens.reshape(1, 37, 37, 768).permute(0, 3, 1, 2)
+    #         pos_embed_resized = torch.nn.functional.interpolate(
+    #             pos_embed_grid, size=(16, 16), mode='bicubic', align_corners=False
+    #         )
+    #         pos_embed_final = pos_embed_resized.permute(0, 2, 3, 1).flatten(1, 2)
+    #         thermal_patch = thermal_patch + pos_embed_final
+            
+    #         mask = model.module.mask_generator(thermal_patch)  # [1, 256]
+    #         thermal_visible = thermal_patch[~mask].reshape(B, -1, D)
+            
+    #         for blk in model.module.thermal_backbone.blocks:
+    #             thermal_visible = blk(thermal_visible)
+    #         thermal_visible = model.module.thermal_backbone.norm(thermal_visible)
+            
+    #         rgb_full = model.module.rgb_backbone(aligned_rgb)
+    #         rgb_full = rgb_full["x_norm_patchtokens"]
+            
+    #         mask_tokens = model.module.mask_token.expand(B, N, -1)
+    #         thermal_full = mask_tokens.clone()
+    #         thermal_full[0, ~mask[0]] = thermal_visible[0]
+            
+    #         thermal_full = thermal_full + model.module.decoder_pos_embed
+    #         rgb_full = rgb_full + model.module.decoder_pos_embed
+            
+    #         # 8. Decoder
+    #         for blk in model.module.decoder_blocks:
+    #             thermal_full = blk(thermal_full, rgb_full)
+    #         thermal_full = model.module.decoder_norm(thermal_full)
+            
+    #         # 9. Prediction
+    #         reconstructed_patches = model.module.prediction_head(thermal_full)  # [1, 256, 588]
+    #         # 4. reconstruct된 이미지를 loss 방식으로 score 계산
+            
+    #         # 5. score를 기반으로 reranking
+    
+    #####################################
     
     # # 각 method마다 시각화 저장 (매 평가마다 덮어씌워짐)
     # import os

@@ -1,4 +1,4 @@
-OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=3 python3 train_wandb.py \
+OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=7 python3 train_wandb.py \
     --save_dir './logs' \
     --features_dim 768 \
     --sequences KAIST \
@@ -6,14 +6,14 @@ OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=3 python3 train_wandb.py \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 4 \
     --num_trainable_blocks_THERMAL 4 \
-    --comment "croco-0.80-alpha10-single-pass" \
+    --use_reduced_thermal_patch \
+    --comment "croco-0.8-alpha5-with-new-aug" \
     --margin 0.1 \
     --negs_num_per_query 10 \
-    --croco_mask_ratio 0.80 \
-    --recon_weight 10 \
-    --use_single_pass
-    --use_reduced_thermal_patch
+    --croco_mask_ratio 0.8 \
+    --recon_weight 5
 
+    # --use_single_pass \
 #    --use_sepearte_backbone_lr
 #    --backbone_lr 1e-5
 #    --lr 1e-5
