@@ -55,7 +55,7 @@ class CroCoDecoderBlock(nn.Module):
         x_norm = self.norm1(x)
         x = x + self.self_attn(x_norm, x_norm, x_norm)[0]
         
-        # Step 2: Cross-Attention (RGB 정보 참조!)
+        # Step 2: Cross-Attention
         x_norm = self.norm2(x)
         encoder_norm = self.norm_cross(y)
         x = x + self.cross_attn(
@@ -122,7 +122,7 @@ class AggregationHead(nn.Module):
 class CrossModalVPR_Net(nn.Module):
     def __init__(self, pretrained_foundation=False, foundation_model_path=None,
                  use_alignment_proj=False, use_GeMAdditionalLayer=False, mask_ratio=0.5,
-                 use_single_pass=False, use_reduced_thermal_patch=True):
+                 use_single_pass=False, use_reduced_thermal_patch=True, num_decoder_depth=8):
         super().__init__()
 
         # 1. 두 개의 독립적인 Backbone 생성 (Weights Unshared)
@@ -134,7 +134,7 @@ class CrossModalVPR_Net(nn.Module):
         self.use_reduced_thermal_patch = use_reduced_thermal_patch
         
         # Croco settings
-        dec_depth = 8
+        dec_depth = num_decoder_depth
         dec_num_heads = 16
         self.decoder_blocks = nn.ModuleList([
             CroCoDecoderBlock(self.output_dim, dec_num_heads) 

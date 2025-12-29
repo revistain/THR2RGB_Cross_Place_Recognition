@@ -174,6 +174,7 @@ if __name__ == "__main__":
         use_GeMAdditionalLayer=args.use_GeMAdditionalLayer,
         mask_ratio=args.croco_mask_ratio,
         use_single_pass=args.use_single_pass, use_reduced_thermal_patch=args.use_reduced_thermal_patch,
+        num_decoder_depth=args.num_decoder_depth
     )
     model = model.to(args.device)
     model = torch.nn.DataParallel(model)
@@ -226,7 +227,7 @@ if __name__ == "__main__":
                     backbone_params.append(param)
                 else: other_params.append(param)
 
-        '''Seperate Optimizer'''
+        '''Seperate Learning Rate'''
         if args.optim == "adam":
             optimizer = torch.optim.Adam([
                 {'params': backbone_params, 'lr': args.backbone_lr},

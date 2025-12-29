@@ -158,30 +158,8 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
     ### RERANKING Process
     ####################################
     start_time = time.time()
+
     if args.use_reranking:
-        mask_generator = RandomMask(16*16, args.croco_mask_ratio)
-        
-        # rerank1. masked된 query 전부 추출
-        with torch.no_grad():
-            start_time = time.time()
-
-            queries_infer_batch_size = args.infer_batch_size
-            queries_subset_ds = Subset(eval_ds, list(range(eval_ds.database_num, len(eval_ds))))
-            queries_dataloader = DataLoader(dataset=queries_subset_ds, num_workers=args.num_workers,
-                                            batch_size=queries_infer_batch_size, pin_memory=(args.device=="cuda"))
-
-            queries_features = np.empty((eval_ds.queries_num, args.features_dim), dtype="float32")
-
-            for inputs, indices, flags in tqdm(queries_dataloader, ncols=100):
-                # masking 추가
-                mask = mask_generator(thermal_patch)
-                
-                features = model(inputs.to(args.device), flags)[0].view(-1, args.features_dim)
-                features = features.cpu().numpy()
-                queries_features[indices.numpy()-eval_ds.database_num, :] = features
-
-            logging.info(f"Finished extracting {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
-
         RERANKING_TOP_K = 5
         reranked_predictions = predictions.copy()  # 원본 보존
         mask_generator = RandomMask(16*16, args.croco_mask_ratio)

@@ -93,6 +93,9 @@ class Parser():
         self.parser.add_argument("--recon_weight", type=float, default=1, help="_")
         self.parser.add_argument("--use_single_pass", action='store_true', default=False)
         self.parser.add_argument("--use_reduced_thermal_patch", action='store_true', default=False)
+        self.parser.add_argument("--use_reranking", action='store_true', default=False)
+        self.parser.add_argument("--num_decoder_depth", type=int, default=8, help="_")
+        
         
     
     def parse_arguments(self):

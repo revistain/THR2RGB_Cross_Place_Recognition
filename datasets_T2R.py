@@ -143,7 +143,6 @@ class BaseSTheReODual(data.Dataset):
                 mat['q_t_evening'][0, 0] for mat in self.matStruct
             ])
 
-
         assert (self.t_database_paths.shape) == (self.rgb_database_paths.shape) and (self.t_queries_paths.shape) == (self.rgb_queries_paths.shape)
 
         self.rgb_img_paths = list(self.rgb_database_paths) + list(self.rgb_queries_paths)
