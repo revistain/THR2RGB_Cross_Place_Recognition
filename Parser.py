@@ -95,6 +95,7 @@ class Parser():
         self.parser.add_argument("--use_reduced_thermal_patch", action='store_true', default=False)
         self.parser.add_argument("--use_reranking", action='store_true', default=False)
         self.parser.add_argument("--num_decoder_depth", type=int, default=8, help="_")
+        self.parser.add_argument('--debug_subset', type=int, default=None, help='For quick testing, limit dataset size')
         
         
     

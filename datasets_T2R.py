@@ -149,7 +149,20 @@ class BaseSTheReODual(data.Dataset):
         self.t_img_paths = list(self.t_database_paths) + list(self.t_queries_paths)
         self.database_num = len(self.rgb_database_paths)
         self.queries_num = len(self.rgb_queries_paths)
-
+        
+        if args.debug_subset is not None:
+            self.rgb_database_paths = self.rgb_database_paths[:args.debug_subset]
+            self.t_database_paths = self.t_database_paths[:args.debug_subset]
+            self.rgb_queries_paths = self.rgb_queries_paths[:args.debug_subset//10]
+            self.t_queries_paths = self.t_queries_paths[:args.debug_subset//10]
+            
+            self.database_num = len(self.rgb_database_paths)
+            self.queries_num = len(self.rgb_queries_paths)
+            self.rgb_img_paths = list(self.rgb_database_paths) + list(self.rgb_queries_paths)
+            self.t_img_paths = list(self.t_database_paths) + list(self.t_queries_paths)
+            
+            print(f"[DEBUG] DB: {self.database_num}, Query: {self.queries_num}")
+                    
     def get_rgb_img(self, path):
         img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
         img = cv2.cvtColor(img, cv2.COLOR_BAYER_BG2RGB)
@@ -364,11 +377,13 @@ class TripletsSTheReODual(BaseSTheReODual):
         negtives: eliminate soft positives from sampled database images, then get the hardest negatives
         '''
         self.triplets_global_indexes = []
-        # Take 1000 random queries
-        sampled_queries_indexes = np.random.choice(self.queries_num, args.cache_refresh_rate, replace=False)
+        # Take 1000 random queries (or less if dataset is smaller)
+        sample_size = min(args.cache_refresh_rate, self.queries_num)
+        sampled_queries_indexes = np.random.choice(self.queries_num, sample_size, replace=False)
 
-        # Sample 1000 random database images for the negatives
-        sampled_database_indexes = np.random.choice(self.database_num, self.neg_samples_num, replace=False)
+        # Sample database images for the negatives
+        neg_sample_size = min(self.neg_samples_num, self.database_num)
+        sampled_database_indexes = np.random.choice(self.database_num, neg_sample_size, replace=False)
 
         positives_indexes = [self.hard_positives_per_query[i] for i in sampled_queries_indexes]
         positives_indexes = [p for pos in positives_indexes for p in pos]

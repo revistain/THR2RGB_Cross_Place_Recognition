@@ -132,6 +132,7 @@ class CrossModalVPR_Net(nn.Module):
         self.output_dim = 768
         self.use_single_pass = use_single_pass
         self.use_reduced_thermal_patch = use_reduced_thermal_patch
+        self.use_masked_inference = False
         
         # Croco settings
         dec_depth = num_decoder_depth
@@ -220,42 +221,66 @@ class CrossModalVPR_Net(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], channels, h * patch_size, h * patch_size))
         return imgs
     
+    def croco_like_encoder(self, x):
+        # thermal       : torch.Size([4, 3, 224, 224])
+        # aligned_rgb   : torch.Size([4, 3, 224, 224])
+        
+        # 1. 먼저 thermal의 patch_embedding한 걸 가져온다
+        thermal_patch = self.thermal_backbone.patch_embed(x)
+        patch_B, patch_N, patch_D = thermal_patch.shape  # N=256, D=768
+        
+        # 2. positional embedding도 구해서 더해준다.
+        pos_tokens = self.thermal_backbone.pos_embed[:, 1:, :]
+        pos_embed_grid = pos_tokens.reshape(1, 37, 37, 768).permute(0, 3, 1, 2) # (BHWC) => (BCHW)
+        pos_embed_resized = F.interpolate(pos_embed_grid, size=(16, 16), mode='bicubic', align_corners=False)
+        pos_embed_final = pos_embed_resized.permute(0, 2, 3, 1).flatten(1, 2) # (BCHW) => (BNC)
+        thermal_patch = thermal_patch + pos_embed_final  # [B, 256, 768]
+        
+        # 3. patch embedding을 masking 해준다.
+        mask = self.mask_generator(thermal_patch)
+        if self.use_reduced_thermal_patch:
+            thermal_visible = thermal_patch[~mask].reshape(patch_B, -1, patch_D)
+        else:
+            thermal_visible = thermal_patch.clone()
+            # Masked positions에 mask_token 삽입
+            mask_token_expanded = self.mask_token.expand(patch_B, patch_N, patch_D)
+            thermal_visible[mask] = mask_token_expanded[mask]
+        
+        # 4. unmasked된 patch들만 DINOv2 통과시키기
+        for blk in self.thermal_backbone.blocks:
+            thermal_visible = blk(thermal_visible)
+        thermal_visible = self.thermal_backbone.norm(thermal_visible)
+
+        return thermal_visible, mask, patch_B, patch_N, patch_D
+
+    def croco_encoded_mask_expension(self, thermal_visible, mask, patch_B, patch_N, patch_D):
+        # CROCO로 masking된 부분 mask token으로 채워넣기
+        mask_tokens = self.mask_token.expand(patch_B, patch_N, -1) # [B, 256, 768]
+        thermal_full = mask_tokens.clone()
+        for i in range(patch_B): thermal_full[i, ~mask[i]] = thermal_visible[i]
+        thermal_full = thermal_full.reshape(patch_B, -1, patch_D)
+        return thermal_full
+    
     def forward_model(self, x, aligned_rgb=None, modality='rgb'):
         """단일 모달리티에 대한 Forward"""
+        # self.use_masked_inference: rerank를 위해, decoder에 들어가기 바로 전 단계를 뱉는다
+        
+        global_desc = None
         recon_loss = None
+        mask = None
         if modality == 'rgb':
-            out = self.rgb_backbone(x)
+            if self.use_masked_inference:
+                rgb_full = self.rgb_backbone(x)
+                rgb_full = rgb_full["x_norm_patchtokens"] 
+                rgb_full = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
+                out = {"x_norm_patchtokens": rgb_full}
+            else:
+                out = self.rgb_backbone(x)
             agg_layer = self.rgb_aggregation
         elif modality == 'thermal':
             if self.training:
-                # thermal       : torch.Size([4, 3, 224, 224])
-                # aligned_rgb   : torch.Size([4, 3, 224, 224])
-                
-                # 1. 먼저 thermal의 patch_embedding한 걸 가져온다
-                thermal_patch = self.thermal_backbone.patch_embed(x)
-                patch_B, patch_N, patch_D = thermal_patch.shape  # N=256, D=768
-                
-                # 2. positional embedding도 구해서 더해준다.
-                pos_tokens = self.thermal_backbone.pos_embed[:, 1:, :]
-                pos_embed_grid = pos_tokens.reshape(1, 37, 37, 768).permute(0, 3, 1, 2) # (BHWC) => (BCHW)
-                pos_embed_resized = F.interpolate(pos_embed_grid, size=(16, 16), mode='bicubic', align_corners=False)
-                pos_embed_final = pos_embed_resized.permute(0, 2, 3, 1).flatten(1, 2) # (BCHW) => (BNC)
-                thermal_patch = thermal_patch + pos_embed_final  # [B, 256, 768]
-                
-                # 3. patch embedding을 masking 해준다.
-                mask = self.mask_generator(thermal_patch)
-                if self.use_reduced_thermal_patch:
-                    thermal_visible = thermal_patch[~mask].reshape(patch_B, -1, patch_D)
-                else:
-                    thermal_visible = thermal_patch.clone()
-                    # Masked positions에 mask_token 삽입
-                    mask_token_expanded = self.mask_token.expand(patch_B, patch_N, patch_D)
-                    thermal_visible[mask] = mask_token_expanded[mask]
-                
-                # 4. unmasked된 patch들만 DINOv2 통과시키기
-                for blk in self.thermal_backbone.blocks:
-                    thermal_visible = blk(thermal_visible)
-                thermal_visible = self.thermal_backbone.norm(thermal_visible)
+                # 1-4. masked thermal encoder
+                thermal_visible, mask, patch_B, patch_N, patch_D = self.croco_like_encoder(x)
                 
                 # 5. aligned RGB도 feature tokens 추출하기
                 rgb_full = self.rgb_backbone(aligned_rgb)
@@ -263,11 +288,7 @@ class CrossModalVPR_Net(nn.Module):
                 
                 # 6. Mask token expansion
                 if self.use_reduced_thermal_patch:
-                    mask_tokens = self.mask_token.expand(patch_B, patch_N, -1) # [B, 256, 768]
-                    thermal_full = mask_tokens.clone()
-                    for i in range(patch_B):
-                        thermal_full[i, ~mask[i]] = thermal_visible[i]
-                    thermal_full = thermal_full.reshape(patch_B, -1, patch_D)
+                    thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask, patch_B, patch_N, patch_D)
                 else:
                     thermal_full = thermal_visible
                 
@@ -298,45 +319,67 @@ class CrossModalVPR_Net(nn.Module):
                     out = {"x_norm_patchtokens": thermal_for_vpr}
                 else:
                     out = self.thermal_backbone(x)
-                    
-                agg_layer = self.thermal_aggregation
             else:
-                # if inferencing
-                out = self.thermal_backbone(x)
-                agg_layer = self.thermal_aggregation
+                # when inference
+                # NOTE: 부르는 곳에 no_grad 호출하기
+                if self.use_masked_inference:
+                    # 1-4. masked thermal encoder
+                    thermal_visible, mask, patch_B, patch_N, patch_D = self.croco_like_encoder(x)
+                    
+                    # 5. Mask token expansion
+                    if self.use_reduced_thermal_patch:
+                        thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask, patch_B, patch_N, patch_D)
+                    else:
+                        thermal_full = thermal_visible
+                    
+                    # 6. Decoder Positional Encoding
+                    thermal_full_dec = thermal_full + self.decoder_pos_embed  # [B, 256, 768]
+                    out = {"x_norm_patchtokens": thermal_full_dec}
+                else:
+                    out = self.thermal_backbone(x)
+            agg_layer = self.thermal_aggregation
         else:
             raise ValueError("Modality must be 'rgb' or 'thermal'")
             
         # Backbone 출력 처리 (ViT 기준)
         # x['x_norm_patchtokens']: (B, num_patchs, D)
-        patch_tokens    = out["x_norm_patchtokens"]
+        patch_tokens = out["x_norm_patchtokens"]
         
-        # attnetion_dict_keys(['x_norm_clstoken', 'x_norm_patchtokens', 'x_prenorm', 'masks'])
-        B, N, D = patch_tokens.shape
-        
-        # 224,224 정방 이미지 입력 가정(patch 2D 복원)
-        H_feat = W_feat = int(math.sqrt(N)) 
-        x_feat = patch_tokens.permute(0, 2, 1).view(B, D, H_feat, W_feat)
-        
-        # Aggregation -> Descriptor
-        global_desc = agg_layer(x_feat) # [B, D]
-        
-        return global_desc, patch_tokens, recon_loss
+        if not self.use_masked_inference:
+            # attnetion_dict_keys(['x_norm_clstoken', 'x_norm_patchtokens', 'x_prenorm', 'masks'])
+            B, N, D = patch_tokens.shape
+            
+            # 224,224 정방 이미지 입력 가정(patch 2D 복원)
+            H_feat = W_feat = int(math.sqrt(N)) 
+            x_feat = patch_tokens.permute(0, 2, 1).view(B, D, H_feat, W_feat)
+            
+            # Aggregation -> Descriptor
+            global_desc = agg_layer(x_feat) # [B, D]
+            
+        return global_desc, patch_tokens, recon_loss, mask
 
-    def forward(self, x, flags, aligned_rgb=None):
+    def forward(self, x, flags, aligned_rgb=None, return_mask=False):
         is_rgb = torch.tensor([f == 'rgb' for f in flags], device=x.device)
         final_emb = torch.zeros((x.size(0), self.output_dim), device=x.device)
         patch_emb = torch.zeros((x.size(0), 256, 768), device=x.device)
+        masks = torch.zeros((x.size(0), 256), dtype=torch.bool, device=x.device)
         
         recon_loss = None
-        if is_rgb.any():
-            final_emb[is_rgb], patch_rgb, _ = self.forward_model(x[is_rgb], modality='rgb')
-            patch_emb[is_rgb] = patch_rgb
-        if (~is_rgb).any():
-            final_emb[~is_rgb], patch_thermal, recon_loss = self.forward_model(x[~is_rgb], modality='thermal', aligned_rgb=aligned_rgb)
-            patch_emb[~is_rgb] = patch_thermal
+        try:
+            if is_rgb.any():
+                global_emb, patch_rgb, _, _ = self.forward_model(x[is_rgb], modality='rgb')
+                if global_emb is not None: final_emb[is_rgb] = global_emb
+                patch_emb[is_rgb] = patch_rgb
+            if (~is_rgb).any():
+                global_emb, patch_thermal, recon_loss, mask = self.forward_model(x[~is_rgb], modality='thermal', aligned_rgb=aligned_rgb)
+                if global_emb is not None: final_emb[~is_rgb] = global_emb
+                patch_emb[~is_rgb] = patch_thermal
+                if return_mask: masks[~is_rgb] = mask
+        except Exception as e:
+            print(e)
+            breakpoint()
         
-        return final_emb, patch_emb, recon_loss
+        return final_emb, patch_emb, recon_loss, masks
 
 def get_backbone(pretrained_foundation, foundation_model_path):
     backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0)

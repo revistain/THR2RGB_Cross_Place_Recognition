@@ -300,7 +300,7 @@ if __name__ == "__main__":
                 flags = bundle_flags * curr_batch_len
                 
                 ### model을 통해, triplet의 descriptor와 patch embedding 추출
-                global_features, patch_embedding, recon_loss = model(images.to(args.device), flags=flags, aligned_rgb=aligned_rgbs.to(args.device))
+                global_features, patch_embedding, recon_loss, _ = model(images.to(args.device), flags=flags, aligned_rgb=aligned_rgbs.to(args.device))
 
                 # triplets_local_indexes = (batch, 3, neg_num) => [[[0, 1, 2], [0, 1, 3] ... [0, 1, neg_num+2]] * batch]
                 triplets_local_indexes = torch.transpose(
@@ -348,6 +348,7 @@ if __name__ == "__main__":
 
                 del overall_loss, triplet_loss, recon_loss
 
+                break
             logging.info(f"Epoch[{epoch_num:02d}]({loop_num + 1}/{loops_num}): " +
                         f"current batch triplet loss = {batch_loss:.8f}, " +
                         f"average epoch triplet loss = {epoch_losses.mean():.8f}")
