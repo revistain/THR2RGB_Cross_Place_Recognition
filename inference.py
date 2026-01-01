@@ -122,7 +122,6 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                 features = model(inputs.to(args.device), flags)[0].view(-1, args.features_dim)
                 features = features.cpu().numpy()
                 database_features[indices.numpy(), :] = features
-                break
 
             logging.info(f"Finished extracting {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
 
@@ -141,7 +140,6 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                 features = model(inputs.to(args.device), flags)[0].view(-1, args.features_dim)
                 features = features.cpu().numpy()
                 queries_features[indices.numpy()-eval_ds.database_num, :] = features
-                break
 
             logging.info(f"Finished extracting {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
         
@@ -162,7 +160,6 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
         ####################################
         start_time = time.time()
         if args.use_reranking:
-            mask_generator = RandomMask(16*16, args.croco_mask_ratio)
             with torch.no_grad():
                 # NOTE: decoder에 들어가기 완전 직전 상태를 저장해놔야함
                 # rerank1. RGB database 전부 추출 (before decoder)
@@ -203,10 +200,8 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
 
             # rerank3. Decoder 쭉쭉 태워서 rerank 진행하기
             # masked_database_features.shape: [1197, 256, 768]
-            
             RERANKING_TOP_K = 5
             reranked_predictions = predictions.copy()  # 원본 보존
-            mask_generator = RandomMask(16*16, args.croco_mask_ratio)
             reconstruction_criterion = MaskedMSE(
                 norm_pix_loss=False,
                 masked=True,
@@ -235,18 +230,19 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                     )  # [RERANKING_TOP_K, N_visible, 768]
         
                     # d. Decoder 통과
+                    thermal_dec = encoded_query_batch
                     for blk in model.module.decoder_blocks:
-                        thermal_full_dec = blk(encoded_query_batch, encoded_dbs)
-                    thermal_full_dec = model.module.decoder_norm(thermal_full_dec)
+                        thermal_dec = blk(thermal_dec, encoded_dbs)
+                    thermal_full_dec = model.module.decoder_norm(thermal_dec)
                     
-                    # Reconstruction
+                    # e. Reconstruction
                     reconstructed_patches = model.module.prediction_head(thermal_full_dec)  # [1, 256, 588]
                     query_abs_idx = eval_ds.database_num + query_index
                     query_img = eval_ds[query_abs_idx][0]
                     query_img_batch = query_img.unsqueeze(0).expand(RERANKING_TOP_K, -1, -1, -1).to('cuda')
                     target_patches = patchify(query_img_batch)
                     
-                    # Reconstruction loss 계산
+                    # f. Reconstruction loss 계산
                     if reconstructed_patches.shape != target_patches.shape:
                         print(f"recons_shape: {reconstructed_patches.shape}")
                         print(f"target_shape: {target_patches.shape}")
@@ -256,13 +252,12 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                     mask_batch = mask.unsqueeze(0).expand(RERANKING_TOP_K, -1)
                     loss = reconstruction_criterion(pred=reconstructed_patches, mask=mask_batch, target=target_patches)
                     
-                    # c. Reconstruction loss 기반 reranking
+                    # g. Reconstruction loss 기반 reranking
                     reconstruction_losses = np.array(loss.detach().cpu())
                     reranked_order = np.argsort(reconstruction_losses)  # 낮은 loss 순서
                     
-                    # 기존 predictions 업데이트
+                    # h. 기존 predictions 업데이트
                     reranked_predictions[query_index, :RERANKING_TOP_K] = top_k_db_indices[reranked_order]
-                    
                     if predictions[query_index, 0] != reranked_predictions[query_index, 0]:
                         top1_change_count += 1
                     total_count += 1
