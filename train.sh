@@ -1,23 +1,25 @@
-OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES=7 python3 train_wandb.py \
+OMP_NUM_THREADS=6 CUDA_VISIBLE_DEVICES=0 python3 train_wandb.py \
     --save_dir './logs' \
     --features_dim 768 \
     --sequences KAIST \
-    --foundation_model_path /home/sjkwon/workspace/VPR/THR2RGB_Cross_Place_Recognition/backbone/dinov2/pretrained/dinov2_vitb14_pretrain.pth \
+    --foundation_model_path /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/backbone/dinov2/pretrained/dinov2_vitb14_pretrain.pth \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 4 \
     --num_trainable_blocks_THERMAL 4 \
     --use_reduced_thermal_patch \
-    --comment "test-croco-0.8-alpha10.0-reranking" \
+    --comment "croco-0.8-alpha10.0-decDepth12-rerank_vis(no_rrloss)" \
     --margin 0.1 \
+    --epochs_num 100 \
     --negs_num_per_query 10 \
-    --croco_mask_ratio 0.8 \
+    --croco_mask_ratio 0.5 \
     --num_decoder_depth 2 \
     --recon_weight 10 \
-    --use_reranking
+    --rerank_weight 1 \
+    --use_reranking \
+    --use_rerank_loss
     # --debug_subset 1000
 
     # --use_single_pass \
-
 
 #    --use_sepearte_backbone_lr
 #    --backbone_lr 1e-5

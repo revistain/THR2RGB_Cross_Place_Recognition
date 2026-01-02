@@ -73,7 +73,7 @@ class Parser():
 
         ### Common settings
         self.parser.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu"])
-        self.parser.add_argument("--num_workers", type=int, default=4, help="num_workers for all dataloaders")
+        self.parser.add_argument("--num_workers", type=int, default=8, help="num_workers for all dataloaders")
         self.parser.add_argument("--efficient_ram_testing", action='store_true', help="_")
         self.parser.add_argument("--seed", type=int, default=42)
         self.parser.add_argument("--resume", type=str, default=None, nargs='*',
@@ -91,9 +91,11 @@ class Parser():
         self.parser.add_argument("--backbone_lr", type=float, default=0.00001, help="_")
         self.parser.add_argument("--croco_mask_ratio", type=float, default=0.75, help="_")
         self.parser.add_argument("--recon_weight", type=float, default=1, help="_")
+        self.parser.add_argument("--rerank_weight", type=float, default=1, help="_")
         self.parser.add_argument("--use_single_pass", action='store_true', default=False)
         self.parser.add_argument("--use_reduced_thermal_patch", action='store_true', default=False)
         self.parser.add_argument("--use_reranking", action='store_true', default=False)
+        self.parser.add_argument("--use_rerank_loss", action='store_true', default=False)
         self.parser.add_argument("--num_decoder_depth", type=int, default=8, help="_")
         self.parser.add_argument('--debug_subset', type=int, default=None, help='For quick testing, limit dataset size')
         

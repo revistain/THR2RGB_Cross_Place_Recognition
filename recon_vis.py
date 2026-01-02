@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from torchvision.utils import make_grid
 from utils import get_timestamp
+import cv2
 
 def visualize_reconstruction(model, thermal_img, aligned_rgb, device='cuda', save_path=None):
     """
@@ -174,3 +175,174 @@ def visualize_during_training(model, triplets_dl, device, epoch, save_dir='./vis
     visualize_reconstruction(model, thermal_img, aligned_rgb, device, save_path)
     
     model.train()
+    
+def visualize_reranking_comparison(args, eval_ds, 
+                                   original_predictions, 
+                                   reranked_predictions,
+                                   reconstruction_losses_dict,
+                                   positives_per_query,
+                                   epoch,
+                                   save_dir='./rerank_visualizations',
+                                   num_samples=2):
+    # FIXME: 현재 이미지를 랜덤하게 가져오지 않음
+    # 이미지의 거리계산 없음
+    # 정답인 이미지를 제대로 체크하는지 모르겠음
+    # reconstruction된 이미지를 그려야할지도 결정못함
+    """
+    Reranking 전/후를 비교하는 시각화
+    
+    Args:
+        original_predictions: Faiss 초기 predictions [Q, K]
+        reranked_predictions: Reranking 후 predictions [Q, K]
+        reconstruction_losses_dict: {query_idx: [loss1, loss2, ...]} 
+        num_samples: 시각화할 query 개수
+    """
+    import os
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+    
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # Top-1이 바뀐 query들 중에서 샘플링
+    changed_queries = []
+    for q_idx in range(eval_ds.queries_num):
+        if original_predictions[q_idx, 0] != reranked_predictions[q_idx, 0]:
+            changed_queries.append(q_idx)
+    
+    if len(changed_queries) < num_samples:
+        # Top-1 안 바뀐 것도 포함
+        sample_indices = np.random.choice(eval_ds.queries_num, num_samples, replace=False)
+    else:
+        # Top-1 바뀐 것만
+        sample_indices = np.random.choice(changed_queries, num_samples, replace=False)
+    
+    for sample_num, query_idx in enumerate(sample_indices):
+        fig = plt.figure(figsize=(20, 8))
+        gs = fig.add_gridspec(2, 7, hspace=0.3, wspace=0.3)
+        
+        # Query 이미지
+        query_img = eval_ds.get_thermal_img(eval_ds.t_queries_paths[query_idx])
+        query_img = cv2.resize(query_img, (224, 224))
+        query_img = cv2.cvtColor(query_img, cv2.COLOR_BGR2RGB)
+        
+        positives = positives_per_query[query_idx]
+        
+        # ===== Row 1: Original (Faiss) =====
+        ax_query1 = fig.add_subplot(gs[0, 0])
+        ax_query1.imshow(query_img)
+        ax_query1.set_title('Query\n(Thermal)', fontsize=12, fontweight='bold')
+        ax_query1.axis('off')
+        
+        for rank in range(5):
+            ax = fig.add_subplot(gs[0, rank+1])
+            
+            pred_idx = original_predictions[query_idx, rank]
+            db_img = eval_ds.get_rgb_img(eval_ds.rgb_database_paths[pred_idx])
+            db_img = cv2.resize(db_img, (224, 224))
+            db_img = cv2.cvtColor(db_img, cv2.COLOR_BGR2RGB)
+            
+            is_correct = pred_idx in positives
+            
+            # Border 색상
+            if is_correct:
+                border_color = 'green'
+                border_width = 4
+            else:
+                border_color = 'red'
+                border_width = 2
+            
+            ax.imshow(db_img)
+            
+            # Border 그리기
+            rect = Rectangle((0, 0), 223, 223, linewidth=border_width, 
+                           edgecolor=border_color, facecolor='none')
+            ax.add_patch(rect)
+            
+            # Title
+            title = f'Rank {rank+1}'
+            if is_correct:
+                title += ' Yes'
+            recon_losses = reconstruction_losses_dict.get(query_idx, [0]*5)
+            title += f'\nLoss: {recon_losses[rank]:.3f}'
+            ax.set_title(title, fontsize=11, fontweight='bold', 
+                        color=border_color)
+            ax.axis('off')
+        
+        # Legend for row 1
+        ax_legend1 = fig.add_subplot(gs[0, 6])
+        ax_legend1.text(0.1, 0.7, 'Before\nReranking', fontsize=14, 
+                       fontweight='bold', va='center')
+        ax_legend1.text(0.1, 0.3, '(Faiss L2)', fontsize=11, 
+                       style='italic', va='center')
+        ax_legend1.axis('off')
+        
+        # ===== Row 2: Reranked =====
+        ax_query2 = fig.add_subplot(gs[1, 0])
+        ax_query2.imshow(query_img)
+        ax_query2.set_title('Query\n(Thermal)', fontsize=12, fontweight='bold')
+        ax_query2.axis('off')
+        
+        for rank in range(5):
+            ax = fig.add_subplot(gs[1, rank+1])
+            
+            pred_idx = reranked_predictions[query_idx, rank]
+            db_img = eval_ds.get_rgb_img(eval_ds.rgb_database_paths[pred_idx])
+            db_img = cv2.resize(db_img, (224, 224))
+            db_img = cv2.cvtColor(db_img, cv2.COLOR_BGR2RGB)
+            
+            is_correct = pred_idx in positives
+            
+            # 원래 순위 찾기
+            orig_rank = np.where(original_predictions[query_idx, :5] == pred_idx)[0]
+            if len(orig_rank) > 0:
+                rank_change = f"(was R{orig_rank[0]+1})"
+            else:
+                rank_change = "(new)"
+            
+            # Border 색상
+            if is_correct:
+                border_color = 'green'
+                border_width = 4
+            else:
+                border_color = 'red'
+                border_width = 2
+            
+            ax.imshow(db_img)
+            
+            # Border
+            rect = Rectangle((0, 0), 223, 223, linewidth=border_width,
+                           edgecolor=border_color, facecolor='none')
+            ax.add_patch(rect)
+            
+            # Title with loss
+            title = f'Rank {rank+1}'
+            if is_correct:
+                title += ' Yes'
+            title += f'\n{rank_change}'
+            
+            ax.set_title(title, fontsize=10, fontweight='bold',
+                        color=border_color)
+            ax.axis('off')
+        
+        # Legend for row 2
+        ax_legend2 = fig.add_subplot(gs[1, 6])
+        ax_legend2.text(0.1, 0.7, 'After\nReranking', fontsize=14,
+                       fontweight='bold', va='center')
+        ax_legend2.text(0.1, 0.3, '(Recon Loss)', fontsize=11,
+                       style='italic', va='center')
+        ax_legend2.axis('off')
+        
+        # Overall title
+        top1_changed = original_predictions[query_idx, 0] != reranked_predictions[query_idx, 0]
+        change_marker = "🔄 TOP-1 CHANGED" if top1_changed else "✓ TOP-1 SAME"
+        
+        fig.suptitle(f'Query #{query_idx} - {change_marker}', 
+                    fontsize=16, fontweight='bold',
+                    color='red' if top1_changed else 'blue')
+        
+        # Save
+        save_path = os.path.join(save_dir, f'epoch_{epoch:03d}_sample_{sample_num+1}.png')
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Saved: {save_path}")

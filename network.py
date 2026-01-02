@@ -1,3 +1,4 @@
+# network.py
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -255,19 +256,25 @@ class CrossModalVPR_Net(nn.Module):
 
     def croco_encoded_mask_expension(self, thermal_visible, mask, patch_B, patch_N, patch_D):
         # CROCO로 masking된 부분 mask token으로 채워넣기
-        mask_tokens = self.mask_token.expand(patch_B, patch_N, -1) # [B, 256, 768]
-        thermal_full = mask_tokens.clone()
-        for i in range(patch_B): thermal_full[i, ~mask[i]] = thermal_visible[i]
-        thermal_full = thermal_full.reshape(patch_B, -1, patch_D)
+        try:
+            mask_tokens = self.mask_token.expand(patch_B, patch_N, -1) # [B, 256, 768]
+            thermal_full = mask_tokens.clone()
+            for i in range(patch_B):
+                thermal_full[i, ~mask[i]] = thermal_visible[i]
+            thermal_full = thermal_full.reshape(patch_B, -1, patch_D)
+        except Exception as e:
+            print("Error: ", e)
+            breakpoint()
         return thermal_full
     
-    def forward_model(self, x, aligned_rgb=None, modality='rgb'):
+    def forward_model(self, x, aligned_rgb=None, modality='rgb', return_masked_patch=False):
         """단일 모달리티에 대한 Forward"""
         # self.use_masked_inference: rerank를 위해, decoder에 들어가기 바로 전 단계를 뱉는다
         
         global_desc = None
         recon_loss = None
         mask = None
+        masked_patch = None
         if modality == 'rgb':
             if self.use_masked_inference:
                 rgb_full = self.rgb_backbone(x)
@@ -313,6 +320,9 @@ class CrossModalVPR_Net(nn.Module):
                 )
                 
                 # 11. VPR용 patch tokens
+                if return_masked_patch:
+                    masked_patch = thermal_full
+                    
                 if self.use_single_pass:
                     thermal_for_vpr = thermal_full.clone()
                     thermal_for_vpr[mask] = thermal_full_dec[mask]
@@ -355,31 +365,40 @@ class CrossModalVPR_Net(nn.Module):
             
             # Aggregation -> Descriptor
             global_desc = agg_layer(x_feat) # [B, D]
-            
-        return global_desc, patch_tokens, recon_loss, mask
+        
+        return global_desc, patch_tokens, recon_loss, mask, masked_patch
 
-    def forward(self, x, flags, aligned_rgb=None, return_mask=False):
+    def forward(self, x, flags, aligned_rgb=None, return_mask=False, return_masked_patch=False):
         is_rgb = torch.tensor([f == 'rgb' for f in flags], device=x.device)
         final_emb = torch.zeros((x.size(0), self.output_dim), device=x.device)
-        patch_emb = torch.zeros((x.size(0), 256, 768), device=x.device)
+        patch_emb = torch.zeros((x.size(0), 256, self.output_dim), device=x.device)
         masks = torch.zeros((x.size(0), 256), dtype=torch.bool, device=x.device)
+        
+        # thermal_count = len([_ for _ in flags if _ == 'thermal'])
+        # masked_patch_emb = torch.zeros((thermal_count, 256, self.output_dim), device=x.device)
+        masked_patch_emb = None
         
         recon_loss = None
         try:
             if is_rgb.any():
-                global_emb, patch_rgb, _, _ = self.forward_model(x[is_rgb], modality='rgb')
+                global_emb, patch_rgb, _, _, _ = self.forward_model(x[is_rgb], modality='rgb')
                 if global_emb is not None: final_emb[is_rgb] = global_emb
                 patch_emb[is_rgb] = patch_rgb
             if (~is_rgb).any():
-                global_emb, patch_thermal, recon_loss, mask = self.forward_model(x[~is_rgb], modality='thermal', aligned_rgb=aligned_rgb)
+                global_emb, patch_thermal, recon_loss, mask, masked_patch_thermal = self.forward_model(x[~is_rgb], modality='thermal', aligned_rgb=aligned_rgb, return_masked_patch=return_masked_patch)
                 if global_emb is not None: final_emb[~is_rgb] = global_emb
                 patch_emb[~is_rgb] = patch_thermal
                 if return_mask: masks[~is_rgb] = mask
+                if return_masked_patch:
+                    masked_patch_emb = masked_patch_thermal # torch.Size([4, 256, 768])
         except Exception as e:
             print(e)
             breakpoint()
         
-        return final_emb, patch_emb, recon_loss, masks
+        if return_masked_patch:
+            return final_emb, patch_emb, recon_loss, masks, masked_patch_emb
+        else:
+            return final_emb, patch_emb, recon_loss, masks
 
 def get_backbone(pretrained_foundation, foundation_model_path):
     backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0)

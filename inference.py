@@ -7,9 +7,14 @@ from torch.utils.data import DataLoader
 from torch.utils.data.dataset import Subset
 import time
 import cv2
+import os
+cv2.setNumThreads(0)
+cv2.ocl.setUseOpenCL(False)
 
 from croco.models.masking import RandomMask
 from croco.models.criterion import MaskedMSE
+
+from recon_vis import *
 
 def patchify(imgs):
     """
@@ -105,6 +110,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
     * selected test_method for all query images
     '''
     try:
+        positives_per_query = eval_ds.get_positives()
         test_method = args.test_method
         model = model.eval()
         with torch.no_grad():
@@ -147,7 +153,13 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
         # database_features = all_features[:eval_ds.database_num]
 
         # 3. faiss를 이용하여, L2 distance로 가까운 descriptor 찾기
-        faiss_index = faiss.IndexFlatL2(args.features_dim)
+        if torch.cuda.is_available():
+            res = faiss.StandardGpuResources()
+            cpu_index = faiss.IndexFlatL2(args.features_dim)
+            faiss_index = faiss.index_cpu_to_gpu(res, 0, cpu_index)
+        else:
+            faiss_index = faiss.IndexFlatL2(args.features_dim)
+            
         faiss_index.add(database_features)
         del database_features
         
@@ -202,6 +214,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
             # masked_database_features.shape: [1197, 256, 768]
             RERANKING_TOP_K = 5
             reranked_predictions = predictions.copy()  # 원본 보존
+            reconstruction_losses_dict = {}
             reconstruction_criterion = MaskedMSE(
                 norm_pix_loss=False,
                 masked=True,
@@ -254,7 +267,11 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                     
                     # g. Reconstruction loss 기반 reranking
                     reconstruction_losses = np.array(loss.detach().cpu())
-                    reranked_order = np.argsort(reconstruction_losses)  # 낮은 loss 순서
+                    reranked_order = np.argsort(reconstruction_losses)
+                    
+                    #### 시각화 ####
+                    reconstruction_losses_dict[query_index] = reconstruction_losses.tolist()
+                    ##############
                     
                     # h. 기존 predictions 업데이트
                     reranked_predictions[query_index, :RERANKING_TOP_K] = top_k_db_indices[reranked_order]
@@ -265,12 +282,25 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                 logging.info(f"Reranking completed in {time.time() - start_time:.2f} s")
                 print(f"RERANK: changed {top1_change_count} / {total_count}")
                 
+                # ===== 시각화 추가 ===== #
+                if hasattr(args, 'current_epoch'):
+                    visualize_reranking_comparison(
+                        args, eval_ds,
+                        original_predictions=predictions,
+                        reranked_predictions=reranked_predictions,
+                        reconstruction_losses_dict=reconstruction_losses_dict,
+                        positives_per_query=positives_per_query,
+                        epoch=args.current_epoch,
+                        save_dir=os.path.join(args.save_dir, 'rerank_vis'),
+                        num_samples=4
+                    )
+        
                 # Reranking 결과로 recall 계산
                 predictions = reranked_predictions
                 ####################################
         
         # 4. positive query(정답)가 몇번째 top-N에 속하는지 검사하기
-        positives_per_query = eval_ds.get_positives()
+        # positives_per_query = eval_ds.get_positives()
         recalls = np.zeros(len(args.recall_values))
         pre_num = eval_ds.queries_num
         for query_index, pred in enumerate(predictions):
