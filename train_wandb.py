@@ -380,15 +380,14 @@ if __name__ == "__main__":
                         decoded_embeddings[batch_idx*(args.negs_num_per_query+1):(batch_idx+1)*(args.negs_num_per_query+1)] = thermal_dec
                     
                     # 5. infoNCE loss 계산
-                    # reconstructed = model.module.prediction_head(decoded_embeddings)
+                    infoNCE()
+                    decoded_embeddings.shape # (B*12,256,768)
 
                     # 5. descriptor 기반의 infoNCE loss
-                    decoded_embeddings.shape # (B*12,256,768)
                     
                     # GAP하고 infoNCE loss 계산(의미 있나?)
                     # 그리고 GAP를 한다는 것은 global한 레벨에서 본다는것
                     # 그럼 GeM pooling하는 방법과 다른게 무엇인가?
-                    breakpoint()
                     
 
                 # train_batch_size: 4, arg.negs_num_per_query: 10
@@ -407,7 +406,7 @@ if __name__ == "__main__":
                 batch_loss = overall_loss.item()
                 epoch_losses = np.append(epoch_losses, batch_loss)
 
-                # wandb 로깅 (batch 단위)
+                # wandb logging
                 wandb.log({
                     "train/overall_loss": overall_loss,
                     "train/triplet_loss(scaled)": triplet_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query),
