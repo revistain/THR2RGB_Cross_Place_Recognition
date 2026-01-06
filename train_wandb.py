@@ -21,6 +21,7 @@ import utils
 import datasets_T2R
 import inference
 import network
+import network_decode
 import random
 from croco.models.criterion import MaskedMSE
 from recon_vis import visualize_during_training
@@ -170,14 +171,31 @@ if __name__ == "__main__":
         test_ds_list.append(test_ds)
 
     '''Model'''
-    model = network.CrossModalVPR_Net(
-        pretrained_foundation = True,
-        foundation_model_path = args.foundation_model_path, 
-        use_GeMAdditionalLayer=args.use_GeMAdditionalLayer,
-        mask_ratio=args.croco_mask_ratio,
-        use_single_pass=args.use_single_pass, use_reduced_thermal_patch=args.use_reduced_thermal_patch,
-        num_decoder_depth=args.num_decoder_depth
-    )
+    if args.use_decode_mask:
+        model = network_decode.CrossModalVPR_Net(
+            pretrained_foundation = True,
+            foundation_model_path = args.foundation_model_path, 
+            use_GeMAdditionalLayer=args.use_GeMAdditionalLayer,
+            mask_ratio=args.croco_mask_ratio,
+            use_single_pass=args.use_single_pass, use_reduced_thermal_patch=args.use_reduced_thermal_patch,
+            num_decoder_depth=args.num_decoder_depth,
+            use_bireconstruction=args.use_bireconstruction,
+            use_only_cross_decoder=args.use_only_cross_decoder,
+            use_contrastive_recon_loss=args.use_contrastive_recon_loss
+        )
+    else:
+        model = network.CrossModalVPR_Net(
+            pretrained_foundation = True,
+            foundation_model_path = args.foundation_model_path, 
+            use_GeMAdditionalLayer=args.use_GeMAdditionalLayer,
+            mask_ratio=args.croco_mask_ratio,
+            use_single_pass=args.use_single_pass, use_reduced_thermal_patch=args.use_reduced_thermal_patch,
+            num_decoder_depth=args.num_decoder_depth,
+            use_feature_level_recon_loss=args.use_feature_level_recon_loss,
+            use_feature_loss=args.use_feature_level_recon_loss,
+            use_confidence_map=args.use_confidence_map,
+            use_only_cross_decoder=args.use_only_cross_decoder
+        )
     model = model.to(args.device)
     model = torch.nn.DataParallel(model)
 
@@ -302,6 +320,15 @@ if __name__ == "__main__":
                 flags = bundle_flags * curr_batch_len
                 
                 ### model을 통해, triplet의 descriptor와 patch embedding 추출
+                if args.use_pos_as_aligned_rgb:
+                    assert images.size(0) % args.train_batch_size == 0
+                    size_of_batch = int(images.size(0) / args.train_batch_size)
+                    train_batch_size = args.train_batch_size
+                    
+                    pos_rgbs = [images[idx] for idx in range(1, images.size(0), size_of_batch)]
+                    pos_rgbs = torch.stack(pos_rgbs)
+                    aligned_rgbs = pos_rgbs
+                    
                 global_features, patch_embedding, recon_loss, masks, masked_patch_embedding = model(
                     images.to(args.device),
                     flags=flags,
@@ -417,11 +444,14 @@ if __name__ == "__main__":
                 global_step += 1
 
                 del overall_loss, triplet_loss, recon_loss
+                # break # for fast debug
+            
             logging.info(f"Epoch[{epoch_num:02d}]({loop_num + 1}/{loops_num}): " +
                         f"current batch triplet loss = {batch_loss:.8f}, " +
                         f"average epoch triplet loss = {epoch_losses.mean():.8f}")
         
         visualize_during_training(
+            args,
             model, 
             triplets_dl, 
             args.device, 

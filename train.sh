@@ -1,4 +1,7 @@
-OMP_NUM_THREADS=6 CUDA_VISIBLE_DEVICES=4 python3 train_wandb.py \
+NCCL_P2P_DISABLE=1 \
+OMP_NUM_THREADS=8 \
+CUDA_VISIBLE_DEVICES=7 \
+python3 train_wandb.py \
     --save_dir './logs' \
     --features_dim 768 \
     --sequences KAIST \
@@ -7,14 +10,29 @@ OMP_NUM_THREADS=6 CUDA_VISIBLE_DEVICES=4 python3 train_wandb.py \
     --num_trainable_blocks_RGB 4 \
     --num_trainable_blocks_THERMAL 4 \
     --use_reduced_thermal_patch \
-    --comment "croco-0.5-alpha10.0-decDepth2" \
+    --comment "croco-0.8-alpha10.0-decDepth8-contrastiveReconLoss(mean)" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
-    --croco_mask_ratio 0.5 \
-    --num_decoder_depth 2 \
+    --croco_mask_ratio 0.8 \
+    --num_decoder_depth 8 \
     --recon_weight 10 \
-    --use_reranking
+    --use_contrastive_recon_loss
+    # --use_reranking \
+    # --use_pos_as_aligned_rgb \
+    # --use_decode_mask \
+
+    # --use_confidence_map \
+    # --num_workers 0 \
+    # --use_only_cross_decoder
+    # --use_confidence_map \
+    # --use_feature_level_recon_loss \
+    # --use_bireconstruction \
+
+    # confidence_map은 decodeMask에서는 구현안되어 있음 (주의!!)
+
+
+
     # --rerank_weight 1 \
     # --use_rerank_loss
     # --debug_subset 1000
@@ -34,3 +52,10 @@ OMP_NUM_THREADS=6 CUDA_VISIBLE_DEVICES=4 python3 train_wandb.py \
 # use_alignment_loss: alignment loss 사용 여부
 # use_sepearte_backbone_lr/backbone_lr: backbone과 나머지 모듈의 learning rate를 다르게 설정
 # use_GeMAdditionalLayer: GeM pooling 후에 Linear-ReLU-Linear 추가
+
+# reranking이 안되는 이유??
+# - reconstruction 결과가 다 뭉개짐(thermal이라서?)
+# - thermal의 normalization 문제? (히스토그램 shift)
+# - reconstruction이 다 뭉개지니까 pixel level에서 명확한 비교가 안됨
+# - decoder가 가벼우니까, encoder에서 최대한 압축된 정보를 만들어내려고함
+# - 그럼 pixel 레벨 다 버려짐 

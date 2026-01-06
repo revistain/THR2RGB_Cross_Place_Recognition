@@ -1,3 +1,5 @@
+## 일단 보류
+
 # network.py
 import torch
 from torch import nn
@@ -11,116 +13,35 @@ import torchvision.models as models
 
 from croco.models.masking import RandomMask
 from croco.models.criterion import MaskedMSE
-        
-class CroCoDecoderBlock(nn.Module):
-    """
-    CroCo 원본 Decoder Block
-    
-    구조:
-    1. Self-Attention: decoder 내부 token들 간 정보 혼합
-    2. Cross-Attention: RGB encoder output 참조
-    3. MLP: Position-wise feed-forward
-    
-    모두 Pre-LayerNorm + Residual connection 사용
-    """
-    def __init__(self, dim=768, num_heads=12, mlp_ratio=4.0):
-        super().__init__()
-        
-        # Self-Attention components
-        self.norm1 = nn.LayerNorm(dim)
-        self.self_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
-        
-        # Cross-Attention components
-        self.norm2 = nn.LayerNorm(dim)
-        self.norm_cross = nn.LayerNorm(dim)
-        self.cross_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
-        
-        # MLP components
-        self.norm3 = nn.LayerNorm(dim)
-        mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, mlp_hidden_dim),
-            nn.GELU(),
-            nn.Linear(mlp_hidden_dim, dim)
-        )
-        
-    def forward(self, x, y):
-        """
-        Args:
-            x: [B, N, D] - decoder input (thermal + mask tokens)
-            encoder_output: [B, M, D] - RGB encoder output (참조할 정보)
-        Returns:
-            x: [B, N, D] - updated decoder features
-        """
-        # Step 1: Self-Attention
-        x_norm = self.norm1(x)
-        x = x + self.self_attn(x_norm, x_norm, x_norm)[0]
-        
-        # Step 2: Cross-Attention
-        x_norm = self.norm2(x)
-        encoder_norm = self.norm_cross(y)
-        x = x + self.cross_attn(
-            query=x_norm,
-            key=encoder_norm,
-            value=encoder_norm
-        )[0]
-        
-        # Step 3: MLP
-        x = x + self.mlp(self.norm3(x))
-        
-        return x
+from croco.models.blocks import *
+from croco.models.pos_embed import *
 
-class CroCoOnlyCrossDecoderBlock(nn.Module):
-    """
-    CroCo 원본 Decoder Block
-    
-    구조:
-    1. Self-Attention: decoder 내부 token들 간 정보 혼합
-    2. Cross-Attention: RGB encoder output 참조
-    3. MLP: Position-wise feed-forward
-    
-    모두 Pre-LayerNorm + Residual connection 사용
-    """
-    def __init__(self, dim=768, num_heads=12, mlp_ratio=4.0):
+from itertools import repeat
+from functools import partial
+import collections.abc
+
+
+class OrignalCroCoDecoderBlock(nn.Module):
+    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0.,
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, norm_mem=True, rope=None):
         super().__init__()
-        
-        # Self-Attention components
-        self.norm1 = nn.LayerNorm(dim)
-        self.norm_cross = nn.LayerNorm(dim)
-        self.cross_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
+        self.norm1 = norm_layer(dim)
+        self.attn = Attention(dim, rope=rope, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
+        self.cross_attn = CrossAttention(dim, rope=rope, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
-        
-        # MLP components
-        self.norm2 = nn.LayerNorm(dim)
+        self.norm2 = norm_layer(dim)
+        self.norm3 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, mlp_hidden_dim),
-            nn.GELU(),
-            nn.Linear(mlp_hidden_dim, dim)
-        )
-        
-    def forward(self, x, y):
-        """
-        Args:
-            x: [B, N, D] - decoder input (thermal + mask tokens)
-            encoder_output: [B, M, D] - RGB encoder output (참조할 정보)
-        Returns:
-            x: [B, N, D] - updated decoder features
-        """
-        # Step 1: Cross-Attention
-        x_norm = self.norm1(x)
-        encoder_norm = self.norm_cross(y)
-        x = x + self.cross_attn(
-            query=x_norm,
-            key=encoder_norm,
-            value=encoder_norm
-        )[0]
-        
-        # Step 2: MLP
-        x = x + self.mlp(self.norm2(x))
-        
-        return x
+        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        self.norm_y = norm_layer(dim) if norm_mem else nn.Identity()
 
+    def forward(self, x, y, xpos, ypos):
+        x = x + self.drop_path(self.attn(self.norm1(x), xpos))
+        y_ = self.norm_y(y)
+        x = x + self.drop_path(self.cross_attn(self.norm2(x), y_, y_, xpos, ypos))
+        x = x + self.drop_path(self.mlp(self.norm3(x)))
+        return x, y
+    
 class GeM(nn.Module):
     def __init__(self, p=3, eps=1e-6, work_with_tokens=False):
         super().__init__()
@@ -176,10 +97,9 @@ class CrossModalVPR_Net(nn.Module):
                  use_alignment_proj=False, use_GeMAdditionalLayer=False, mask_ratio=0.5,
                  use_single_pass=False, use_reduced_thermal_patch=True, num_decoder_depth=8,
                  use_feature_level_recon_loss=False,use_feature_loss=False,
-                 use_confidence_map=False, use_only_cross_decoder=False,
-                 use_contrastive_recon_loss=False):
-        # NOTE: 그냥 args를 넘기는게 편하다는건 알지만, 이미 늦어버렸습니다...
+                 use_confidence_map=False, use_only_cross_decoder=False):
         super().__init__()
+        self._set_patch_embed()
 
         # 1. 두 개의 독립적인 Backbone 생성 (Weights Unshared)
         # Cross-modal에서는 모달리티 간 특성이 다르므로 가중치를 공유하지 않는 것이 일반적입니다.
@@ -193,22 +113,16 @@ class CrossModalVPR_Net(nn.Module):
         self.use_feature_level_recon_loss = use_feature_level_recon_loss
         self.use_confidence_map = use_confidence_map
         self.use_only_cross_decdoer = use_only_cross_decoder
-        self.use_contrastive_recon_loss = use_contrastive_recon_loss
                
         # Croco settings
         dec_depth = num_decoder_depth
         dec_num_heads = 16
-        if use_only_cross_decoder:
-            self.decoder_blocks = nn.ModuleList([
-                CroCoOnlyCrossDecoderBlock(self.output_dim, dec_num_heads) 
-                for _ in range(dec_depth)
-            ])
-        else:
-            self.decoder_blocks = nn.ModuleList([
-                CroCoDecoderBlock(self.output_dim, dec_num_heads) 
-                for _ in range(dec_depth)
-            ])
-        self.decoder_norm = nn.LayerNorm(self.output_dim)
+        self.decoder_blocks = nn.ModuleList([
+            DecoderBlock(self.output_dim, dec_num_heads, mlp_ratio=4., qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), norm_mem=True, rope=self.rope)
+        for i in range(dec_depth)])
+        self.decoder_norm = partial(nn.LayerNorm, eps=1e-6)(self.output_dim)
+        
+        self.decoder_embed = nn.Linear(self.output_dim, self.output_dim, bias=True)
         
         self.mask_token = None
         self._set_mask_token(self.output_dim)
@@ -218,7 +132,6 @@ class CrossModalVPR_Net(nn.Module):
         self._set_confidence_head(self.output_dim, 16*16)
         
         if use_confidence_map:
-            # FIXME: 왜 이따구로 짰었지, 걍 forward에서 None들어오는지로 판단하게 바꾸기(언젠가))
             self.reconstruction_criterion = MaskedMSE(
                 norm_pix_loss=False,
                 masked=True,
@@ -254,20 +167,37 @@ class CrossModalVPR_Net(nn.Module):
         self.mask_token = nn.Parameter(torch.zeros(1, 1, dec_embed_dim))
         nn.init.normal_(self.mask_token, std=.02)
 
-    def _set_confidence_head(self, dec_embed_dim, hidden_dim=256):
+    def _set_patch_embed(self, img_size=224, patch_size=16, enc_embed_dim=768):
+        self.patch_embed = PatchEmbed(img_size, patch_size, 3, enc_embed_dim)
+        
+    def _set_confidence_head(self, dec_embed_dim, patch_dim):
         self.confidence_head = nn.Sequential(
-            nn.Linear(dec_embed_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, 1),
+            nn.Linear(dec_embed_dim, patch_dim),
             nn.Sigmoid()
         )
 
-        nn.init.xavier_uniform_(self.confidence_head[0].weight)
+        nn.init.zeros_(self.confidence_head[0].weight)
         nn.init.zeros_(self.confidence_head[0].bias)
         
-    def _set_decode_positional_embedding(self, dec_embed_dim):
-        self.decoder_pos_embed = nn.Parameter(torch.zeros(1, 256, dec_embed_dim))
-        nn.init.trunc_normal_(self.decoder_pos_embed, std=0.02)
+    def _set_decode_positional_embedding(self, enc_embed_dim, dec_embed_dim, pos_embed='cosine'):
+        self.pos_embed = pos_embed
+        if pos_embed=='cosine':
+            # positional embedding of the encoder 
+            enc_pos_embed = get_2d_sincos_pos_embed(enc_embed_dim, self.patch_embed.grid_size, n_cls_token=0)
+            self.register_buffer('enc_pos_embed', torch.from_numpy(enc_pos_embed).float())
+            # positional embedding of the decoder  
+            dec_pos_embed = get_2d_sincos_pos_embed(dec_embed_dim, self.patch_embed.grid_size, n_cls_token=0)
+            self.register_buffer('dec_pos_embed', torch.from_numpy(dec_pos_embed).float())
+            # pos embedding in each block
+            self.rope = None # nothing for cosine 
+        elif pos_embed.startswith('RoPE'): # eg RoPE100 
+            self.enc_pos_embed = None # nothing to add in the encoder with RoPE
+            self.dec_pos_embed = None # nothing to add in the decoder with RoPE
+            if RoPE2D is None: raise ImportError("Cannot find cuRoPE2D, please install it following the README instructions")
+            freq = float(pos_embed[len('RoPE'):])
+            self.rope = RoPE2D(freq=freq)
+        else:
+            raise NotImplementedError('Unknown pos_embed '+pos_embed)
     
     def _set_mask_generator(self, num_patches, mask_ratio):
         """Random masking generator 초기화"""
@@ -394,82 +324,36 @@ class CrossModalVPR_Net(nn.Module):
                     thermal_full_dec = blk(thermal_full_dec, rgb_full)
                 thermal_full_dec = self.decoder_norm(thermal_full_dec)
                 
-                def calculate_contrastive_recon_loss(pred_pos, pred_negs, mask, target, confidence_map=None, method='MEAN'):
-                    """
-                    pred_pos: [B, 256, 588] - positive reconstruction
-                    pred_negs: [B, N, 256, 588] - N negative reconstructions
-                    mask: [B, 256]
-                    target: [B, 256, 588]
-                    """
-                    # Positive loss
-                    loss_pos = self.reconstruction_criterion(
-                        pred=pred_pos,
-                        mask=mask,
-                        target=target,
-                        confidence_map=confidence_map
-                    )  # [B] or scalar
-                    
-                    # Negative losses
-                    B, N = pred_negs.shape[:2]
-                    loss_negs = []
-                    
-                    for n in range(N):
-                        loss_neg = self.reconstruction_criterion(
-                            pred=pred_negs[:, n],  # [B, 256, 588]
-                            mask=mask,
-                            target=target,
-                            confidence_map=confidence_map
-                        )  # [B] or scalar
-                        loss_negs.append(loss_neg)
-                    
-                    loss_negs = torch.stack(loss_negs, dim=0)  # [N, B] or [N]
-                    
-                    loss_method = method
-                    if loss_method == 'MEAN':
-                        # Simple difference
-                        loss = loss_pos - loss_negs.mean(dim=0)
-                    elif loss_method == 'infoNCE':
-                        # InfoNCE (loss → similarity score via negative)
-                        # Lower loss = higher similarity
-                        sim_pos = torch.exp(-loss_pos)  # [B]
-                        sim_negs = torch.exp(-loss_negs)  # [N, B]
-                        
-                        denominator = sim_pos + sim_negs.sum(dim=0)  # [B]
-                        loss = -torch.log(sim_pos / denominator)  # [B]
-                    
-                    return loss # 이거 mean해야함? 체크하기
-                    
-                
-                def calculate_recon_loss(pred, mask, target, confidence_map=None):
-                    recon_loss = self.reconstruction_criterion(
-                        pred=pred,        # [B, 256, 768]
-                        mask=mask,        # [B, 256]
-                        target=target,    # [B, 3, 256, 768]
-                        confidence_map=confidence_map
-                    )
-                    return recon_loss
-
-                if self.use_contrastive_recon_loss:
-                    recon_loss_fn = calculate_contrastive_recon_loss
-                else:
-                    recon_loss_fn = calculate_recon_loss
-                
                 # 9. Prediction Head
                 if self.use_feature_level_recon_loss:
                     out = self.thermal_backbone(x)
                     thermal_not_masked_enc = out["x_norm_patchtokens"]
                     
                     # 10. Reconstruction loss 계산
-                    recon_loss = recon_loss_fn(thermal_full_dec, mask, thermal_not_masked_enc)
+                    recon_loss = self.reconstruction_criterion(
+                        pred=thermal_full_dec,        # [B, 256, 768]
+                        mask=mask,                    # [B, 256]
+                        target=thermal_not_masked_enc,# [B, 3, 256, 768]
+                    )
                 else:
                     reconstructed_patches = self.prediction_head(thermal_full_dec)
                     target_patches = self.patchify(x)
                     
                     # 10. Reconstruction loss 계산
-                    confidence_scores = None
                     if self.use_confidence_map:
                         confidence_scores = self.confidence_head(thermal_full_dec) # [B, 256]
-                    recon_loss = recon_loss_fn(reconstructed_patches, mask, target_patches, confidence_scores)
+                        recon_loss = self.reconstruction_criterion(
+                            pred=reconstructed_patches,  # [B, 256, 768]
+                            mask=mask,                   # [B, 256]
+                            target=target_patches,       # [B, 3, 256, 768]
+                            confidence=confidence_scores # [B, 256]
+                        )
+                    else:
+                        recon_loss = self.reconstruction_criterion(
+                            pred=reconstructed_patches,  # [B, 256, 768]
+                            mask=mask,                   # [B, 256]
+                            target=target_patches,       # [B, 3, 256, 768]
+                        )
                     
                     # 11. VPR용 patch tokens
                     if return_masked_patch:
@@ -544,9 +428,7 @@ class CrossModalVPR_Net(nn.Module):
                 if return_masked_patch:
                     masked_patch_emb = masked_patch_thermal # torch.Size([4, 256, 768])
         except Exception as e:
-            import traceback
-            print(f"ERROR caught: {e}")
-            traceback.print_exc()  # 전체 stack trace 출력
+            print(e)
             breakpoint()
         
         if return_masked_patch:
@@ -563,211 +445,3 @@ def get_backbone(pretrained_foundation, foundation_model_path):
         model_dict.update(state_dict.items())
         backbone.load_state_dict(model_dict)
     return backbone
-
-
-
-
-
-
-
-#####
-from itertools import repeat
-import collections.abc
-
-
-def _ntuple(n):
-    def parse(x):
-        if isinstance(x, collections.abc.Iterable) and not isinstance(x, str):
-            return x
-        return tuple(repeat(x, n))
-    return parse
-to_2tuple = _ntuple(2)
-
-def drop_path(x, drop_prob: float = 0., training: bool = False, scale_by_keep: bool = True):
-    """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks).
-    """
-    if drop_prob == 0. or not training:
-        return x
-    keep_prob = 1 - drop_prob
-    shape = (x.shape[0],) + (1,) * (x.ndim - 1)  # work with diff dim tensors, not just 2D ConvNets
-    random_tensor = x.new_empty(shape).bernoulli_(keep_prob)
-    if keep_prob > 0.0 and scale_by_keep:
-        random_tensor.div_(keep_prob)
-    return x * random_tensor
-
-class DropPath(nn.Module):
-    """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
-    """
-    def __init__(self, drop_prob: float = 0., scale_by_keep: bool = True):
-        super(DropPath, self).__init__()
-        self.drop_prob = drop_prob
-        self.scale_by_keep = scale_by_keep
-
-    def forward(self, x):
-        return drop_path(x, self.drop_prob, self.training, self.scale_by_keep)
-
-    def extra_repr(self):
-        return f'drop_prob={round(self.drop_prob,3):0.3f}'
-
-class Mlp(nn.Module):
-    """ MLP as used in Vision Transformer, MLP-Mixer and related networks"""
-    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, bias=True, drop=0.):
-        super().__init__()
-        out_features = out_features or in_features
-        hidden_features = hidden_features or in_features
-        bias = to_2tuple(bias)
-        drop_probs = to_2tuple(drop)
-
-        self.fc1 = nn.Linear(in_features, hidden_features, bias=bias[0])
-        self.act = act_layer()
-        self.drop1 = nn.Dropout(drop_probs[0])
-        self.fc2 = nn.Linear(hidden_features, out_features, bias=bias[1])
-        self.drop2 = nn.Dropout(drop_probs[1])
-
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.act(x)
-        x = self.drop1(x)
-        x = self.fc2(x)
-        x = self.drop2(x)
-        return x
-
-class Attention(nn.Module):
-
-    def __init__(self, dim, rope=None, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0.):
-        super().__init__()
-        self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = head_dim ** -0.5
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
-        self.rope = rope 
-
-    def forward(self, x, xpos):
-        B, N, C = x.shape
-
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).transpose(1,3)
-        q, k, v = [qkv[:,:,i] for i in range(3)]
-        # q,k,v = qkv.unbind(2)  # make torchscript happy (cannot use tensor as tuple)
-               
-        if self.rope is not None:
-            q = self.rope(q, xpos)
-            k = self.rope(k, xpos)
-               
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
-
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x
-    
-class CrossAttention(nn.Module):
-    
-    def __init__(self, dim, rope=None, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0.):
-        super().__init__()
-        self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = head_dim ** -0.5
-
-        self.projq = nn.Linear(dim, dim, bias=qkv_bias)
-        self.projk = nn.Linear(dim, dim, bias=qkv_bias)
-        self.projv = nn.Linear(dim, dim, bias=qkv_bias)
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
-        
-        self.rope = rope
-        
-    def forward(self, query, key, value, qpos, kpos):
-        B, Nq, C = query.shape
-        Nk = key.shape[1]
-        Nv = value.shape[1]
-        
-        q = self.projq(query).reshape(B,Nq,self.num_heads, C// self.num_heads).permute(0, 2, 1, 3)
-        k = self.projk(key).reshape(B,Nk,self.num_heads, C// self.num_heads).permute(0, 2, 1, 3)
-        v = self.projv(value).reshape(B,Nv,self.num_heads, C// self.num_heads).permute(0, 2, 1, 3)
-        
-        if self.rope is not None:
-            q = self.rope(q, qpos)
-            k = self.rope(k, kpos)
-            
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
-
-        x = (attn @ v).transpose(1, 2).reshape(B, Nq, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x
-
-class OrignalCroCoDecoderBlock(nn.Module):
-    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, norm_mem=True, rope=None):
-        super().__init__()
-        self.norm1 = norm_layer(dim)
-        self.attn = Attention(dim, rope=rope, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
-        self.cross_attn = CrossAttention(dim, rope=rope, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
-        self.norm2 = norm_layer(dim)
-        self.norm3 = norm_layer(dim)
-        mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
-        self.norm_y = norm_layer(dim) if norm_mem else nn.Identity()
-
-    def forward(self, x, y, xpos, ypos):
-        x = x + self.drop_path(self.attn(self.norm1(x), xpos))
-        y_ = self.norm_y(y)
-        x = x + self.drop_path(self.cross_attn(self.norm2(x), y_, y_, xpos, ypos))
-        x = x + self.drop_path(self.mlp(self.norm3(x)))
-        return x, y
-# patch embedding
-class PositionGetter(object):
-    """ return positions of patches """
-
-    def __init__(self):
-        self.cache_positions = {}
-        
-    def __call__(self, b, h, w, device):
-        if not (h,w) in self.cache_positions:
-            x = torch.arange(w, device=device)
-            y = torch.arange(h, device=device)
-            self.cache_positions[h,w] = torch.cartesian_prod(y, x) # (h, w, 2)
-        pos = self.cache_positions[h,w].view(1, h*w, 2).expand(b, -1, 2).clone()
-        return pos
-
-class PatchEmbed(nn.Module):
-    """ just adding _init_weights + position getter compared to timm.models.layers.patch_embed.PatchEmbed"""
-
-    def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768, norm_layer=None, flatten=True):
-        super().__init__()
-        img_size = to_2tuple(img_size)
-        patch_size = to_2tuple(patch_size)
-        self.img_size = img_size
-        self.patch_size = patch_size
-        self.grid_size = (img_size[0] // patch_size[0], img_size[1] // patch_size[1])
-        self.num_patches = self.grid_size[0] * self.grid_size[1]
-        self.flatten = flatten
-
-        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
-        self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
-        
-        self.position_getter = PositionGetter()
-        
-    def forward(self, x):
-        B, C, H, W = x.shape
-        torch._assert(H == self.img_size[0], f"Input image height ({H}) doesn't match model ({self.img_size[0]}).")
-        torch._assert(W == self.img_size[1], f"Input image width ({W}) doesn't match model ({self.img_size[1]}).")
-        x = self.proj(x)
-        pos = self.position_getter(B, x.size(2), x.size(3), x.device)
-        if self.flatten:
-            x = x.flatten(2).transpose(1, 2)  # BCHW -> BNC
-        x = self.norm(x)
-        return x, pos
-        
-    def _init_weights(self):
-        w = self.proj.weight.data
-        torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1])) 

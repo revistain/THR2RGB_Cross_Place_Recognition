@@ -155,7 +155,7 @@ def unpatchify_visual(patches, patch_size=14):
 
 
 # ===== Training Loop에서 사용 =====
-def visualize_during_training(model, triplets_dl, device, epoch, save_dir='./visualizations', comment="default"):
+def visualize_during_training(args, model, triplets_dl, device, epoch, save_dir='./visualizations', comment="default"):
     """Training 중간에 주기적으로 시각화"""
     import os
     timestamp = get_timestamp()
@@ -166,7 +166,15 @@ def visualize_during_training(model, triplets_dl, device, epoch, save_dir='./vis
     
     # 첫 번째 batch 가져오기
     images, _, _, aligned_rgbs = next(iter(triplets_dl))
-    
+    if args.use_contrastive_recon_loss:
+        assert images.size(0) % args.train_batch_size == 0
+        size_of_batch = int(images.size(0) / args.train_batch_size)
+        train_batch_size = args.train_batch_size
+        
+        pos_rgbs = [images[idx] for idx in range(1, images.size(0), size_of_batch)]
+        pos_rgbs = torch.stack(pos_rgbs)
+        aligned_rgbs = pos_rgbs
+        
     # Thermal query 1개만 추출 (첫 번째 thermal)
     thermal_img = images[0:1].to(device)  # [1, 3, 224, 224]
     aligned_rgb = aligned_rgbs[0:1].to(device)  # [1, 3, 224, 224]
@@ -175,7 +183,7 @@ def visualize_during_training(model, triplets_dl, device, epoch, save_dir='./vis
     visualize_reconstruction(model, thermal_img, aligned_rgb, device, save_path)
     
     model.train()
-
+    
 def visualize_reranking_comparison(args, eval_ds, 
                                    original_predictions, 
                                    reranked_predictions,
@@ -187,7 +195,7 @@ def visualize_reranking_comparison(args, eval_ds,
                                    save_dir='./rerank_visualizations',
                                    num_samples=2):
     """
-    Reranking 전/후를 비교하는 시각화 + Loss 평균 추적
+    Reranking 전/후를 비교하는 시각화 + Loss 통계
     """
     import os
     import matplotlib.pyplot as plt
@@ -196,97 +204,57 @@ def visualize_reranking_comparison(args, eval_ds,
     
     os.makedirs(save_dir, exist_ok=True)
     
-    # ===== Loss 평균 계산 =====
+    # ===== Loss 통계 계산 =====
     all_losses = []
-    pos_losses = []  # Positive matches
-    neg_losses = []  # Negative matches
     
     for query_idx, losses in reconstruction_losses_dict.items():
         all_losses.extend(losses)
-        
-        positives = positives_per_query[query_idx]
-        reranked_top5 = reranked_predictions[query_idx, :5]
-        
-        for db_idx, loss in zip(reranked_top5, losses):
-            if db_idx in positives:
-                pos_losses.append(loss)
-            else:
-                neg_losses.append(loss)
     
     all_losses = np.array(all_losses)
-    pos_losses = np.array(pos_losses) if len(pos_losses) > 0 else np.array([0])
-    neg_losses = np.array(neg_losses) if len(neg_losses) > 0 else np.array([0])
     
     # 통계량
     stats = {
         'epoch': epoch,
-        'all_mean': all_losses.mean(),
-        'pos_mean': pos_losses.mean(),
-        'neg_mean': neg_losses.mean(),
-        'separation': neg_losses.mean() - pos_losses.mean(),
+        'mean': all_losses.mean(),
+        'std': all_losses.std(),
     }
     
-    # ===== CSV로 저장 =====
-    csv_path = os.path.join(save_dir, 'loss_stats_all_epochs.csv')
+    # ===== CSV 저장 =====
+    csv_path = os.path.join(save_dir, 'loss_stats.csv')
     file_exists = os.path.exists(csv_path)
     
     with open(csv_path, 'a', newline='') as f:
-        fieldnames = ['epoch', 'all_mean', 'pos_mean', 'neg_mean', 'separation']
+        fieldnames = ['epoch', 'mean', 'std']
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         
         if not file_exists:
             writer.writeheader()
         writer.writerow(stats)
     
-    # ===== 전체 epoch 추이 그래프 =====
+    # ===== 그래프 =====
     import pandas as pd
     df = pd.read_csv(csv_path)
     
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    
-    # 1. Loss trend
-    ax = axes[0]
-    ax.plot(df['epoch'], df['all_mean'], 'o-', linewidth=2, label='Overall', color='blue')
-    ax.plot(df['epoch'], df['pos_mean'], 'o-', linewidth=2, label='Positive', color='green')
-    ax.plot(df['epoch'], df['neg_mean'], 'o-', linewidth=2, label='Negative', color='red')
+    fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+    ax.errorbar(df['epoch'], df['mean'], yerr=df['std'],
+                fmt='o-', linewidth=2, capsize=5, color='blue')
     ax.set_xlabel('Epoch', fontsize=12)
-    ax.set_ylabel('Mean Reconstruction Loss', fontsize=12)
-    ax.set_title('Reconstruction Loss Trend', fontsize=14, fontweight='bold')
-    ax.legend()
+    ax.set_ylabel('Reconstruction Loss', fontsize=12)
+    ax.set_title('Loss Mean ± Std per Epoch', fontsize=14, fontweight='bold')
     ax.grid(alpha=0.3)
-    
-    # 2. Separation trend
-    ax = axes[1]
-    ax.plot(df['epoch'], df['separation'], 'o-', linewidth=2, color='purple')
-    ax.axhline(0, color='black', linestyle='--', linewidth=1)
-    ax.fill_between(df['epoch'], 0, df['separation'], 
-                     where=(df['separation'] > 0), alpha=0.3, color='green')
-    ax.fill_between(df['epoch'], 0, df['separation'], 
-                     where=(df['separation'] <= 0), alpha=0.3, color='red')
-    ax.set_xlabel('Epoch', fontsize=12)
-    ax.set_ylabel('Separation (Neg - Pos)', fontsize=12)
-    ax.set_title('Loss Separation Trend', fontsize=14, fontweight='bold')
-    ax.grid(alpha=0.3)
-    
     plt.tight_layout()
-    trend_plot_path = os.path.join(save_dir, 'loss_trend.png')
-    plt.savefig(trend_plot_path, dpi=120, bbox_inches='tight')
+    plt.savefig(os.path.join(save_dir, 'loss_trend.png'), dpi=120)
     plt.close()
     
     # ===== 콘솔 출력 =====
     print(f"\n{'='*60}")
-    print(f"Epoch {epoch} Loss Statistics:")
-    print(f"  Overall Mean:  {stats['all_mean']:.6f}")
-    print(f"  Positive Mean: {stats['pos_mean']:.6f}")
-    print(f"  Negative Mean: {stats['neg_mean']:.6f}")
-    print(f"  Separation:    {stats['separation']:.6f} {'✓' if stats['separation'] > 0 else '✗'}")
+    print(f"Epoch {epoch} Loss: {stats['mean']:.6f} ± {stats['std']:.6f}")
     print(f"{'='*60}\n")
     
-    # ===== 1. 샘플링 전략 개선 =====
-    # Top-1이 바뀐 query 분류
-    improved_queries = []  # Top-1 바뀌고 + 정답 맞춤
-    worsened_queries = []  # Top-1 바뀌고 + 정답 틀림
-    unchanged_queries = []  # Top-1 안 바뀜
+    # ===== 샘플링 전략 =====
+    improved_queries = []
+    worsened_queries = []
+    unchanged_queries = []
     
     for q_idx in range(eval_ds.queries_num):
         orig_top1 = original_predictions[q_idx, 0]
@@ -294,37 +262,31 @@ def visualize_reranking_comparison(args, eval_ds,
         positives = positives_per_query[q_idx]
         
         if orig_top1 != rerank_top1:
-            # Top-1 changed
             if rerank_top1 in positives:
-                improved_queries.append(q_idx)  # 개선됨!
+                improved_queries.append(q_idx)
             else:
-                worsened_queries.append(q_idx)  # 악화됨
+                worsened_queries.append(q_idx)
         else:
             unchanged_queries.append(q_idx)
     
-    # 샘플링: 개선된 것 우선, 악화된 것, 그 다음 랜덤
+    # 샘플링
     sample_indices = []
     
-    # 개선된 것 최대 절반
     if len(improved_queries) > 0:
         n_improved = min(num_samples // 2, len(improved_queries))
         sample_indices.extend(np.random.choice(improved_queries, n_improved, replace=False))
     
-    # 악화된 것 (디버깅용)
     if len(sample_indices) < num_samples and len(worsened_queries) > 0:
         n_worsened = min(num_samples - len(sample_indices), len(worsened_queries))
         sample_indices.extend(np.random.choice(worsened_queries, n_worsened, replace=False))
     
-    # 나머지는 랜덤
     if len(sample_indices) < num_samples:
         remaining = num_samples - len(sample_indices)
         all_remaining = list(set(range(eval_ds.queries_num)) - set(sample_indices))
         sample_indices.extend(np.random.choice(all_remaining, remaining, replace=False))
     
-    # ===== 2. 시각화 =====
+    # ===== 시각화 =====
     for sample_num, query_idx in enumerate(sample_indices):
-        # Figure: 3 rows (Query, Before, After) × 7 columns (1 query + 5 results + 1 legend)
-        # Reconstruction 이미지 포함 시 4 rows
         n_rows = 4 if reconstructed_images is not None else 3
         fig = plt.figure(figsize=(22, 6*n_rows//3))
         gs = fig.add_gridspec(n_rows, 7, hspace=0.35, wspace=0.3)
@@ -336,14 +298,14 @@ def visualize_reranking_comparison(args, eval_ds,
         
         positives = positives_per_query[query_idx]
         
-        # ===== Row 0: Query only =====
+        # Row 0: Query
         ax_query = fig.add_subplot(gs[0, :])
         ax_query.imshow(query_img)
         ax_query.set_title(f'Query #{query_idx} (Thermal)\nPositives in DB: {len(positives)}', 
                           fontsize=14, fontweight='bold')
         ax_query.axis('off')
         
-        # ===== Row 1: Original (Faiss) =====
+        # Row 1: Original (Faiss)
         for rank in range(5):
             ax = fig.add_subplot(gs[1, rank+1])
             
@@ -352,10 +314,9 @@ def visualize_reranking_comparison(args, eval_ds,
             db_img = cv2.resize(db_img, (224, 224))
             db_img = cv2.cvtColor(db_img, cv2.COLOR_BGR2RGB)
             
-            # ===== 정답 체크 개선 =====
             is_correct = pred_idx in positives
             
-            # GPS 거리 계산 (optional)
+            # GPS 거리
             if hasattr(eval_ds, 'database_utms') and hasattr(eval_ds, 'queries_utms'):
                 query_gps = eval_ds.queries_utms[query_idx]
                 db_gps = eval_ds.database_utms[pred_idx]
@@ -363,36 +324,27 @@ def visualize_reranking_comparison(args, eval_ds,
             else:
                 gps_distance = None
             
-            # Border 색상
-            if is_correct:
-                border_color = 'green'
-                border_width = 4
-            else:
-                border_color = 'red'
-                border_width = 2
+            # Border
+            border_color = 'green' if is_correct else 'red'
+            border_width = 4 if is_correct else 2
             
             ax.imshow(db_img)
-            
-            # Border
             rect = Rectangle((0, 0), 223, 223, linewidth=border_width, 
                            edgecolor=border_color, facecolor='none')
             ax.add_patch(rect)
             
-            # Title with distances
+            # Title
             title = f'Rank {rank+1}'
             if is_correct:
                 title += ' ✓'
             
-            # Faiss L2 distance
             if distances is not None:
                 title += f'\nL2: {distances[query_idx, rank]:.2f}'
             
-            # GPS distance
             if gps_distance is not None:
                 title += f'\nGPS: {gps_distance:.1f}m'
             
-            ax.set_title(title, fontsize=10, fontweight='bold', 
-                        color=border_color)
+            ax.set_title(title, fontsize=10, fontweight='bold', color=border_color)
             ax.axis('off')
         
         # Legend
@@ -403,13 +355,13 @@ def visualize_reranking_comparison(args, eval_ds,
                        style='italic', va='center')
         ax_legend1.axis('off')
         
-        # Label for row
+        # Label
         ax_label1 = fig.add_subplot(gs[1, 0])
         ax_label1.text(0.5, 0.5, 'Original\nRetrieval', fontsize=12,
                       fontweight='bold', ha='center', va='center')
         ax_label1.axis('off')
         
-        # ===== Row 2: Reranked =====
+        # Row 2: Reranked
         for rank in range(5):
             ax = fig.add_subplot(gs[2, rank+1])
             
@@ -428,20 +380,16 @@ def visualize_reranking_comparison(args, eval_ds,
             else:
                 gps_distance = None
             
-            # 원래 순위 찾기
+            # 원래 순위
             orig_rank = np.where(original_predictions[query_idx, :5] == pred_idx)[0]
             if len(orig_rank) > 0:
                 rank_change = f"(R{orig_rank[0]+1}→R{rank+1})"
             else:
-                rank_change = "(new in top5)"
+                rank_change = "(new)"
             
             # Border
-            if is_correct:
-                border_color = 'green'
-                border_width = 4
-            else:
-                border_color = 'red'
-                border_width = 2
+            border_color = 'green' if is_correct else 'red'
+            border_width = 4 if is_correct else 2
             
             ax.imshow(db_img)
             rect = Rectangle((0, 0), 223, 223, linewidth=border_width,
@@ -458,12 +406,10 @@ def visualize_reranking_comparison(args, eval_ds,
             recon_losses = reconstruction_losses_dict.get(query_idx, [0]*5)
             title += f'\nRecon: {recon_losses[rank]:.3f}'
             
-            # GPS distance
             if gps_distance is not None:
                 title += f'\nGPS: {gps_distance:.1f}m'
             
-            ax.set_title(title, fontsize=10, fontweight='bold',
-                        color=border_color)
+            ax.set_title(title, fontsize=10, fontweight='bold', color=border_color)
             ax.axis('off')
         
         # Legend
@@ -480,19 +426,17 @@ def visualize_reranking_comparison(args, eval_ds,
                       fontweight='bold', ha='center', va='center')
         ax_label2.axis('off')
         
-        # ===== Row 3: Reconstructed images (optional) =====
+        # Row 3: Reconstructed (optional)
         if reconstructed_images is not None and query_idx in reconstructed_images:
             for rank in range(5):
                 ax = fig.add_subplot(gs[3, rank+1])
                 
-                # Reconstructed image
-                recon_img = reconstructed_images[query_idx][rank]  # [3, 224, 224] or [224, 224, 3]
+                recon_img = reconstructed_images[query_idx][rank]
                 
-                # Normalize to [0, 1]
                 if isinstance(recon_img, torch.Tensor):
                     recon_img = recon_img.cpu().numpy()
                 
-                if recon_img.shape[0] == 3:  # [3, H, W]
+                if recon_img.shape[0] == 3:
                     recon_img = recon_img.transpose(1, 2, 0)
                 
                 recon_img = np.clip(recon_img, 0, 1)
@@ -501,7 +445,6 @@ def visualize_reranking_comparison(args, eval_ds,
                 ax.set_title(f'Reconstructed R{rank+1}', fontsize=10)
                 ax.axis('off')
             
-            # Label
             ax_label3 = fig.add_subplot(gs[3, 0])
             ax_label3.text(0.5, 0.5, 'Reconstructed\nThermal', fontsize=12,
                           fontweight='bold', ha='center', va='center')
@@ -512,7 +455,7 @@ def visualize_reranking_comparison(args, eval_ds,
                            style='italic', va='center')
             ax_legend3.axis('off')
         
-        # ===== Overall title with statistics =====
+        # Overall title
         orig_top1 = original_predictions[query_idx, 0]
         rerank_top1 = reranked_predictions[query_idx, 0]
         
@@ -544,7 +487,7 @@ def visualize_reranking_comparison(args, eval_ds,
         
         print(f"Saved: {save_path}")
     
-    # ===== 3. Summary statistics =====
+    # ===== Summary =====
     summary_path = os.path.join(save_dir, f'epoch_{epoch:03d}_summary.txt')
     with open(summary_path, 'w') as f:
         f.write(f"Reranking Summary - Epoch {epoch}\n")
@@ -552,7 +495,6 @@ def visualize_reranking_comparison(args, eval_ds,
         f.write(f"Total queries: {eval_ds.queries_num}\n")
         f.write(f"Improved (wrong→correct): {len(improved_queries)}\n")
         f.write(f"Worsened (correct→wrong): {len(worsened_queries)}\n")
-        f.write(f"Changed but still wrong: {len([q for q in range(eval_ds.queries_num) if original_predictions[q,0] != reranked_predictions[q,0] and reranked_predictions[q,0] not in positives_per_query[q] and original_predictions[q,0] not in positives_per_query[q]])}\n")
         f.write(f"Unchanged: {len(unchanged_queries)}\n\n")
         
         # Top-1 accuracy

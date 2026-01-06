@@ -98,8 +98,13 @@ class Parser():
         self.parser.add_argument("--use_rerank_loss", action='store_true', default=False)
         self.parser.add_argument("--num_decoder_depth", type=int, default=8, help="_")
         self.parser.add_argument('--debug_subset', type=int, default=None, help='For quick testing, limit dataset size')
-        
-        
+        self.parser.add_argument("--use_decode_mask", action='store_true', default=False)
+        self.parser.add_argument("--use_bireconstruction", action='store_true', default=False)
+        self.parser.add_argument("--use_feature_level_recon_loss", action='store_true', default=False)
+        self.parser.add_argument("--use_confidence_map", action='store_true', default=False)
+        self.parser.add_argument("--use_only_cross_decoder", action='store_true', default=False)
+        self.parser.add_argument("--use_pos_as_aligned_rgb", action='store_true', default=False)
+        self.parser.add_argument("--use_contrastive_recon_loss", action='store_true', default=False)
     
     def parse_arguments(self):
         args = self.parser.parse_args()
