@@ -184,13 +184,15 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                 database_dataloader = DataLoader(dataset=database_subset_ds, num_workers=args.num_workers,
                                                 batch_size=args.infer_batch_size, pin_memory=(args.device=="cuda"))
             
+                database_mask = np.empty((eval_ds.queries_num, 256), dtype="bool")
                 masked_database_embedding = np.empty((eval_ds.database_num, 256, args.features_dim), dtype="float32")
-                model.module.use_masked_inference = True
                 for inputs, indices, flags in tqdm(database_dataloader, ncols=100):
-                    features = model(inputs.to(args.device), flags)
-                    encoded_features = features[1].reshape(inputs.size(0), 256, -1).cpu().numpy()
-                    masked_database_embedding[indices.numpy(), :, :] = encoded_features
-                model.module.use_masked_inference = False
+                    rgb_visible, mask, patch_B, patch_N, patch_D = model.module.croco_like_encoder(inputs.to(args.device))
+                    rgb_full = model.module.croco_encoded_mask_expension(rgb_visible, mask, patch_B, patch_N, patch_D)
+                    rgb_full_dec = rgb_full + model.module.decoder_pos_embed # [B, 256, 768]
+                    out = rgb_full_dec.cpu().numpy()
+                    masked_database_embedding[indices.numpy(), :, :] = out
+                    database_mask[indices.numpy()-eval_ds.database_num,:] = features[3].detach().cpu().numpy()
 
                 logging.info(f"Finished extracting (FOR RERANK) {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
 
@@ -201,15 +203,11 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                 queries_dataloader = DataLoader(dataset=queries_subset_ds, num_workers=args.num_workers,
                                                 batch_size=queries_infer_batch_size, pin_memory=(args.device=="cuda"))
 
-                queries_mask = np.empty((eval_ds.queries_num, 256), dtype="bool")
-                masked_queries_embedding = np.empty((eval_ds.queries_num, 256, args.features_dim), dtype="float32")
-                model.module.use_masked_inference = True
+                thermal_embedding = np.empty((eval_ds.queries_num, 256, args.features_dim), dtype="float32")
                 for inputs, indices, flags in tqdm(queries_dataloader, ncols=100):
                     features = model(inputs.to(args.device), flags, return_mask=True)
-                    encoded_features = features[1].reshape(inputs.size(0), 256, -1).cpu().numpy()
-                    masked_queries_embedding[indices.numpy()-eval_ds.database_num,:,:] = encoded_features
-                    queries_mask[indices.numpy()-eval_ds.database_num,:] = features[3].detach().cpu().numpy()
-                model.module.use_masked_inference = False
+                    encoded_features = (features[1].reshape(inputs.size(0), 256, -1)+ model.module.decoder_pos_embed).cpu().numpy()
+                    thermal_embedding[indices.numpy()-eval_ds.database_num,:,:] = encoded_features
 
                 logging.info(f"Finished extracting (FOR RERANK) {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
                         
@@ -238,7 +236,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                     batch_size = end_idx - start_idx
                     
                     # a. Query thermal encoding (batch)
-                    encoded_queries = masked_queries_embedding[start_idx:end_idx]  # [B, 256, 768]
+                    encoded_queries = masked_database_embedding[start_idx:end_idx]  # [B, 256, 768]
                     encoded_queries = torch.tensor(encoded_queries, dtype=torch.float32).to('cuda')
                     
                     # b. Top-K database RGB encoding (batch)
@@ -246,7 +244,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                     
                     # c. r@N rgb 배치화 과정
                     all_db_indices = top_k_db_indices_batch.flatten()  # [B*K]
-                    encoded_dbs_flat = masked_database_embedding[all_db_indices]  # [B*K, 256, 768]
+                    encoded_dbs_flat = thermal_embedding[all_db_indices]  # [B*K, 256, 768]
                     encoded_dbs_flat = torch.tensor(encoded_dbs_flat, dtype=torch.float32).to('cuda')
                     encoded_dbs = encoded_dbs_flat.reshape(batch_size, RERANKING_TOP_K, 256, -1)  # [B, K, 256, 768]
                     
@@ -272,7 +270,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                     target_patches = patchify(query_imgs_flat)  # [B*K, 256, 588]
                     
                     # g. Masks (batch)
-                    masks_batch = queries_mask[start_idx:end_idx]  # [B, 256]
+                    masks_batch = database_mask[start_idx:end_idx]  # [B, 256]
                     masks_batch = torch.tensor(masks_batch, dtype=torch.bool).to('cuda')
                     masks_flat = masks_batch.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1)  # [B, K, 256]
                     masks_flat = masks_flat.reshape(-1, 256)  # [B*K, 256]

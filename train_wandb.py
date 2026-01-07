@@ -129,7 +129,7 @@ if __name__ == "__main__":
     else:
         best_r1 = start_epoch_num = not_improved_num = 0
 
-    bundle_flags =  ['thermal'] + ['rgb'] * (1 + args.negs_num_per_query)
+    bundle_flags =  ['thermal'] + ['rgb_pos'] + ['rgb_neg'] * (args.negs_num_per_query)
     num_bundle_flags = len(bundle_flags)
 
     '''Training'''
@@ -173,7 +173,7 @@ if __name__ == "__main__":
                 curr_batch_len = len(images) // num_bundle_flags
                 flags = bundle_flags * curr_batch_len
                 
-                ### model을 통해, triplet의 descriptor와 patch embedding 추출
+                # model을 통해, triplet의 descriptor와 patch embedding 추출
                 if args.use_pos_as_aligned_rgb:
                     assert images.size(0) % args.train_batch_size == 0
                     size_of_batch = int(images.size(0) / args.train_batch_size)
@@ -186,7 +186,6 @@ if __name__ == "__main__":
                 global_features, patch_embedding, recon_loss, masks, masked_patch_embedding = model(
                     images.to(args.device),
                     flags=flags,
-                    aligned_rgb=aligned_rgbs.to(args.device),
                     return_mask=True,
                     return_masked_patch=True
                 )
@@ -237,7 +236,7 @@ if __name__ == "__main__":
                 global_step += 1
 
                 del overall_loss, triplet_loss, recon_loss
-                break # for fast debug
+                # break # for fast debug
             
             logging.info(f"Epoch[{epoch_num:02d}]({loop_num + 1}/{loops_num}): " +
                         f"current batch triplet loss = {batch_loss:.8f}, " +
