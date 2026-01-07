@@ -85,27 +85,13 @@ class Parser():
         
         # custom settings
         self.parser.add_argument('--comment', type=str)
-        self.parser.add_argument("--use_alignment_loss", action='store_true', default=False)
-        self.parser.add_argument("--use_GeMAdditionalLayer", action='store_true', default=False)
-        self.parser.add_argument("--use_sepearte_backbone_lr", action='store_true', default=False)
-        self.parser.add_argument("--backbone_lr", type=float, default=0.00001, help="_")
         self.parser.add_argument("--croco_mask_ratio", type=float, default=0.75, help="_")
         self.parser.add_argument("--recon_weight", type=float, default=1, help="_")
-        self.parser.add_argument("--rerank_weight", type=float, default=1, help="_")
-        self.parser.add_argument("--use_single_pass", action='store_true', default=False)
-        self.parser.add_argument("--use_reduced_thermal_patch", action='store_true', default=False)
         self.parser.add_argument("--use_reranking", action='store_true', default=False)
         self.parser.add_argument("--use_rerank_loss", action='store_true', default=False)
         self.parser.add_argument("--num_decoder_depth", type=int, default=8, help="_")
-        self.parser.add_argument('--debug_subset', type=int, default=None, help='For quick testing, limit dataset size')
         self.parser.add_argument("--use_decode_mask", action='store_true', default=False)
-        self.parser.add_argument("--use_bireconstruction", action='store_true', default=False)
-        self.parser.add_argument("--use_feature_level_recon_loss", action='store_true', default=False)
-        self.parser.add_argument("--use_confidence_map", action='store_true', default=False)
-        self.parser.add_argument("--use_only_cross_decoder", action='store_true', default=False)
         self.parser.add_argument("--use_pos_as_aligned_rgb", action='store_true', default=False)
-        self.parser.add_argument("--use_contrastive_recon_loss", action='store_true', default=False)
-        self.parser.add_argument("--use_ssim_recon_loss", action='store_true', default=False)
         
     
     def parse_arguments(self):

@@ -184,14 +184,6 @@ def visualize_during_training(args, model, triplets_dl, device, epoch, save_dir=
     
     # 첫 번째 batch 가져오기
     images, _, _, aligned_rgbs = next(iter(triplets_dl))
-    if args.use_contrastive_recon_loss:
-        assert images.size(0) % args.train_batch_size == 0
-        size_of_batch = int(images.size(0) / args.train_batch_size)
-        train_batch_size = args.train_batch_size
-        
-        pos_rgbs = [images[idx] for idx in range(1, images.size(0), size_of_batch)]
-        pos_rgbs = torch.stack(pos_rgbs)
-        aligned_rgbs = pos_rgbs
         
     # Thermal query 1개만 추출 (첫 번째 thermal)
     thermal_img = images[0:1].to(device)  # [1, 3, 224, 224]
