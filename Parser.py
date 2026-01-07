@@ -105,6 +105,8 @@ class Parser():
         self.parser.add_argument("--use_only_cross_decoder", action='store_true', default=False)
         self.parser.add_argument("--use_pos_as_aligned_rgb", action='store_true', default=False)
         self.parser.add_argument("--use_contrastive_recon_loss", action='store_true', default=False)
+        self.parser.add_argument("--use_ssim_recon_loss", action='store_true', default=False)
+        
     
     def parse_arguments(self):
         args = self.parser.parse_args()

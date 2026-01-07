@@ -88,7 +88,7 @@ class CroCoOnlyCrossDecoderBlock(nn.Module):
         self.norm1 = nn.LayerNorm(dim)
         self.norm_cross = nn.LayerNorm(dim)
         self.cross_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        # self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         
         # MLP components
         self.norm2 = nn.LayerNorm(dim)
@@ -177,7 +177,7 @@ class CrossModalVPR_Net(nn.Module):
                  use_single_pass=False, use_reduced_thermal_patch=True, num_decoder_depth=8,
                  use_feature_level_recon_loss=False,use_feature_loss=False,
                  use_confidence_map=False, use_only_cross_decoder=False,
-                 use_contrastive_recon_loss=False):
+                 use_contrastive_recon_loss=False, use_ssim_recon_loss=False):
         # NOTE: 그냥 args를 넘기는게 편하다는건 알지만, 이미 늦어버렸습니다...
         super().__init__()
 
@@ -194,6 +194,7 @@ class CrossModalVPR_Net(nn.Module):
         self.use_confidence_map = use_confidence_map
         self.use_only_cross_decdoer = use_only_cross_decoder
         self.use_contrastive_recon_loss = use_contrastive_recon_loss
+        self.use_ssim_recon_loss = use_ssim_recon_loss
                
         # Croco settings
         dec_depth = num_decoder_depth
@@ -223,11 +224,13 @@ class CrossModalVPR_Net(nn.Module):
                 norm_pix_loss=False,
                 masked=True,
                 confidence=True,
+                use_ssim=self.use_ssim_recon_loss
             )
         else:
             self.reconstruction_criterion = MaskedMSE(
                 norm_pix_loss=False,
                 masked=True,
+                use_ssim=self.use_ssim_recon_loss
             )
 
         # 2. Aggregation Layer (각각 따로 두는 것을 추천)
@@ -711,7 +714,7 @@ class OrignalCroCoDecoderBlock(nn.Module):
         self.norm1 = norm_layer(dim)
         self.attn = Attention(dim, rope=rope, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
         self.cross_attn = CrossAttention(dim, rope=rope, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        # self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         self.norm3 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)

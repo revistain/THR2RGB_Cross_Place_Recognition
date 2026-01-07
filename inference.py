@@ -165,7 +165,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                 # break # for fast debug
 
             logging.info(f"Finished extracting {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
-        
+
         # queries_features = all_features[eval_ds.database_num:]
         # database_features = all_features[:eval_ds.database_num]
 
@@ -338,7 +338,6 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                     
                     # 추가! confidence score 패치 시각화 추가
                     if args.use_confidence_map:
-                        # decoder masking에서는 implement안되어 있음
                         confidence_score_map = model.module.confidence_head(thermal_full_dec)  # [B, 256]
                     # confidence_map 시각화(grayscale), rgb/thermal 시각화, rgb/thermal과 confidence map 겹친 사진 시각화
                     

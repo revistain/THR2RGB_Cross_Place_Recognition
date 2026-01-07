@@ -57,7 +57,14 @@ def visualize_reconstruction(model, thermal_img, aligned_rgb, device='cuda', sav
         for blk in model.module.decoder_blocks:
             thermal_full = blk(thermal_full, rgb_full)
         thermal_full = model.module.decoder_norm(thermal_full)
-        
+
+        # ========== Confidence Map 추가 ==========
+        if hasattr(model.module, 'confidence_head'):
+            confidence_map = model.module.confidence_head(thermal_full).squeeze().cpu()  # [256]
+        else:
+            confidence_map = None
+        # ==========================================
+
         # 9. Prediction
         reconstructed_patches = model.module.prediction_head(thermal_full)  # [1, 256, 588]
         
@@ -136,6 +143,17 @@ def visualize_reconstruction(model, thermal_img, aligned_rgb, device='cuda', sav
         plt.close()
     else:
         plt.show()
+    
+    # ========== Confidence 시각화 추가 (맨 끝) ==========
+    if confidence_map is not None and save_path is not None:
+        conf_save_path = save_path.replace('.png', '_confidence.png')
+        save_confidence_vis_simple(
+            thermal_img=thermal_img[0],
+            rgb_img=aligned_rgb[0],
+            confidence_map=confidence_map,
+            save_path=conf_save_path
+        )
+    # ==================================================
     
     return hybrid_img_denorm
 
@@ -507,3 +525,43 @@ def visualize_reranking_comparison(args, eval_ds,
         f.write(f"  Delta:  {rerank_correct-orig_correct:+d} ({100*(rerank_correct-orig_correct)/eval_ds.queries_num:+.2f}%)\n")
     
     print(f"Saved summary: {summary_path}")
+    
+# inference.py 최상단
+def save_confidence_vis_simple(thermal_img, rgb_img, confidence_map, save_path):
+    """
+    최소 코드로 3개 이미지 시각화
+    
+    Args:
+        thermal_img: [3, 224, 224] normalized tensor
+        rgb_img: [3, 224, 224] normalized tensor
+        confidence_map: [256] tensor
+        save_path: str
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib import cm
+    import os
+    
+    # ========== 수정: device 맞추기 ==========
+    device = thermal_img.device
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1).to(device)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1).to(device)
+    # =========================================
+    
+    thermal = ((thermal_img * std + mean).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+    rgb = ((rgb_img * std + mean).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+    
+    # Confidence map
+    conf_map = confidence_map.cpu().numpy().reshape(16, 16)
+    conf_resized = cv2.resize(conf_map, (224, 224))
+    conf_colored = (cm.jet(conf_resized)[:, :, :3] * 255).astype(np.uint8)
+    
+    # Plot
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+    axes[0].imshow(thermal); axes[0].set_title('Query Thermal'); axes[0].axis('off')
+    axes[1].imshow(conf_colored); axes[1].set_title(f'Confidence (mean: {conf_map.mean():.3f})'); axes[1].axis('off')
+    axes[2].imshow(rgb); axes[2].set_title('Top-1 RGB'); axes[2].axis('off')
+    
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=100, bbox_inches='tight')
+    plt.close()

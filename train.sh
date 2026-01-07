@@ -10,22 +10,23 @@ python3 train_wandb.py \
     --num_trainable_blocks_RGB 4 \
     --num_trainable_blocks_THERMAL 4 \
     --use_reduced_thermal_patch \
-    --comment "croco-0.8-alpha10.0-decDepth8-contrastiveReconLoss(mean)" \
+    --comment "croco-0.8-alpha10.0-decDepth8-SSIM0.5" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
     --croco_mask_ratio 0.8 \
     --num_decoder_depth 8 \
     --recon_weight 10 \
-    --use_contrastive_recon_loss
+    --use_ssim_recon_loss
+    # --use_confidence_map
+    # --use_ssim_recon_loss
     # --use_reranking \
+    # --use_only_cross_decoder
+    # --use_contrastive_recon_loss
     # --use_pos_as_aligned_rgb \
     # --use_decode_mask \
 
-    # --use_confidence_map \
     # --num_workers 0 \
-    # --use_only_cross_decoder
-    # --use_confidence_map \
     # --use_feature_level_recon_loss \
     # --use_bireconstruction \
 
