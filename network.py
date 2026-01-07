@@ -397,7 +397,7 @@ class CrossModalVPR_Net(nn.Module):
                     thermal_full_dec = blk(thermal_full_dec, rgb_full)
                 thermal_full_dec = self.decoder_norm(thermal_full_dec)
                 
-                def calculate_contrastive_recon_loss(pred_pos, pred_negs, mask, target, confidence_map=None, method='MEAN'):
+                def calculate_contrastive_recon_loss(pred_pos, pred_negs, mask, target, confidence_map=None, method='infoNCE'):
                     """
                     pred_pos: [B, 256, 588] - positive reconstruction
                     pred_negs: [B, N, 256, 588] - N negative reconstructions

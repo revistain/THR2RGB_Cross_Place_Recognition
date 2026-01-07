@@ -166,9 +166,6 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
 
             logging.info(f"Finished extracting {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
 
-        # queries_features = all_features[eval_ds.database_num:]
-        # database_features = all_features[:eval_ds.database_num]
-
         # 3. faiss를 이용하여, L2 distance로 가까운 descriptor 찾기
         faiss_index = faiss.IndexFlatL2(args.features_dim)
         faiss_index.add(database_features)
