@@ -11,6 +11,7 @@
 import torch
 from info_nce import InfoNCE, info_nce
 from pytorch_msssim import ms_ssim
+from focal_frequency_loss import FocalFrequencyLoss as FFL
 
 # croco의 코드는 github에서 관리 안됨
 
@@ -55,11 +56,17 @@ def unpatchify(x, patch_size=14, channels=3):
     return imgs
     
 class MaskedMSE(torch.nn.Module):
-    def __init__(self, norm_pix_loss=False, masked=True, reduction='mean'):
+    def __init__(self, loss_type, norm_pix_loss=False, masked=True, reduction='mean'):
         super().__init__()
+        loss_type = loss_type[0]
+        assert loss_type in ['MSE', 'MAE', 'FFLLoss']
+        
         self.norm_pix_loss = norm_pix_loss
         self.masked = masked
         self.reduction = reduction
+        self.loss_type = loss_type
+        if self.loss_type == 'FFLLoss':
+            self.ffl = FFL(loss_weight=1.0, alpha=1.0)
         
     def forward(self, pred, mask, target):
         if self.norm_pix_loss:
@@ -67,9 +74,16 @@ class MaskedMSE(torch.nn.Module):
             var = target.var(dim=-1, keepdim=True)
             target = (target - mean) / (var + 1.e-6)**.5
         
-        loss = (pred - target) ** 2  # [B, 256, 768]
-        loss = loss.mean(dim=-1)     # [B, 256]
-        
+        if self.loss_type == 'MSE':
+            loss = (pred - target) ** 2  # [B, 256, 768]
+            loss = loss.mean(dim=-1)     # [B, 256]
+        elif self.loss_type == 'MAE':
+            loss = (pred - target).abs()  # [B, 256, 768]
+            loss = loss.mean(dim=-1) 
+        elif self.loss_type == 'FFLLoss':
+            loss = self.ffl(unpatchify(pred), unpatchify(target))  # calculate focal frequency loss
+            return loss # masking 계산 x
+                    
         # MSE
         if self.masked:
             loss = (loss * mask).sum(dim=-1) / mask.sum(dim=-1)  # [B]

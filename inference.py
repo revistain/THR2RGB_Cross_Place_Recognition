@@ -218,7 +218,8 @@ def inference(args, eval_ds, model, scene_name="", pca=None, k=1, use_cuda=True,
             reconstruction_criterion = MaskedMSE(
                 norm_pix_loss=False,
                 masked=True,
-                reduction='none'
+                reduction='none',
+                loss_type=args.recon_loss_fn_type
             )
             reconstruction_losses_dict = {}
             

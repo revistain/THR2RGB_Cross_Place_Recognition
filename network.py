@@ -122,7 +122,6 @@ class AggregationHead(nn.Module):
 
 class CrossModalVPR_Net(nn.Module):
     def __init__(self, args, pretrained_foundation=False, foundation_model_path=None, mask_ratio=0.5, num_decoder_depth=8):
-        # NOTE: 그냥 args를 넘기는게 편하다는건 알지만, 이미 늦어버렸습니다...
         super().__init__()
 
         # 1. 두 개의 독립적인 Backbone 생성 (Weights Unshared)
@@ -149,6 +148,7 @@ class CrossModalVPR_Net(nn.Module):
         self.reconstruction_criterion = MaskedMSE(
             norm_pix_loss=False,
             masked=True,
+            loss_type=args.recon_loss_fn_type,
         )
 
         # 2. Aggregation Layer (각각 따로 두는 것을 추천)

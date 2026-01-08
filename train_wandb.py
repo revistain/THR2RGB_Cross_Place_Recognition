@@ -35,7 +35,7 @@ def set_seed(seed=42):
     random.seed(seed)
 
 if __name__ == "__main__":
-    import lovely_tensors as lt; lt.monkey_patch()
+    # import lovely_tensors as lt; lt.monkey_patch()
     '''Setup'''
     set_seed()
     parser = Parser()
