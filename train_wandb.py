@@ -175,7 +175,7 @@ if __name__ == "__main__":
                 flags = bundle_flags * curr_batch_len
                 
                 # model을 통해, triplet의 descriptor와 patch embedding 추출
-                if args.use_pos_as_aligned_rgb:
+                if args.use_pos_as_paired_rgb:
                     assert images.size(0) % args.train_batch_size == 0
                     size_of_batch = int(images.size(0) / args.train_batch_size)
                     train_batch_size = args.train_batch_size

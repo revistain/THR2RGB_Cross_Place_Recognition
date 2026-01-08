@@ -452,20 +452,20 @@ def visualize_reranking_comparison(args, eval_ds,
         
         if orig_top1 != rerank_top1:
             if rerank_top1 in positives:
-                status = "🎉 IMPROVED (Wrong → Correct)"
+                status = "IMPROVED (Wrong → Correct)"
                 color = 'darkgreen'
             elif orig_top1 in positives:
-                status = "⚠️ WORSENED (Correct → Wrong)"
+                status = "WORSENED (Correct → Wrong)"
                 color = 'darkred'
             else:
-                status = "🔄 CHANGED (Wrong → Wrong)"
+                status = "CHANGED (Wrong → Wrong)"
                 color = 'orange'
         else:
             if orig_top1 in positives:
-                status = "✓ MAINTAINED (Correct → Correct)"
+                status = "MAINTAINED (Correct → Correct)"
                 color = 'blue'
             else:
-                status = "− MAINTAINED (Wrong → Wrong)"
+                status = "MAINTAINED (Wrong → Wrong)"
                 color = 'gray'
         
         fig.suptitle(f'Query #{query_idx} - {status}', 
