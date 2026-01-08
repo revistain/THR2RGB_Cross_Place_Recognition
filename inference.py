@@ -100,7 +100,7 @@ def index_to_image_tensor(dataset, index):
 
 # TODO: can be less memory cost
 # TODO: finish the uncompleted parts
-def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
+def inference(args, eval_ds, model, scene_name="", pca=None, k=1, use_cuda=True, verbose=True):
     '''
     hard_resize: directly use the resized image
     single_query: use the resized image, and set query_infer_batchsize=1 (used when the query images have varying size)
@@ -190,9 +190,9 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                     rgb_visible, mask, patch_B, patch_N, patch_D = model.module.croco_like_encoder(inputs.to(args.device))
                     rgb_full = model.module.croco_encoded_mask_expension(rgb_visible, mask, patch_B, patch_N, patch_D)
                     rgb_full_dec = rgb_full + model.module.decoder_pos_embed # [B, 256, 768]
-                    out = rgb_full_dec.cpu().numpy()
-                    masked_database_embedding[indices.numpy(), :, :] = out
-                    database_mask[indices.numpy()-eval_ds.database_num,:] = features[3].detach().cpu().numpy()
+                    enc_features = rgb_full_dec.cpu().numpy()
+                    masked_database_embedding[indices.numpy(), :, :] = enc_features
+                    database_mask[indices.numpy()-eval_ds.database_num,:] = mask.detach().cpu().numpy()
 
                 logging.info(f"Finished extracting (FOR RERANK) {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
 
@@ -236,7 +236,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                     batch_size = end_idx - start_idx
                     
                     # a. Query thermal encoding (batch)
-                    encoded_queries = masked_database_embedding[start_idx:end_idx]  # [B, 256, 768]
+                    encoded_queries = thermal_embedding[start_idx:end_idx]  # [B, 256, 768]
                     encoded_queries = torch.tensor(encoded_queries, dtype=torch.float32).to('cuda')
                     
                     # b. Top-K database RGB encoding (batch)
@@ -244,7 +244,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                     
                     # c. r@N rgb 배치화 과정
                     all_db_indices = top_k_db_indices_batch.flatten()  # [B*K]
-                    encoded_dbs_flat = thermal_embedding[all_db_indices]  # [B*K, 256, 768]
+                    encoded_dbs_flat = masked_database_embedding[all_db_indices]  # [B*K, 256, 768]
                     encoded_dbs_flat = torch.tensor(encoded_dbs_flat, dtype=torch.float32).to('cuda')
                     encoded_dbs = encoded_dbs_flat.reshape(batch_size, RERANKING_TOP_K, 256, -1)  # [B, K, 256, 768]
                     
@@ -254,13 +254,19 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                     encoded_dbs_flat = encoded_dbs.reshape(-1, 256, encoded_dbs.size(-1))
                     
                     # d. Decoder 통과
-                    thermal_dec = encoded_query_flat
-                    for blk in model.module.decoder_blocks:
-                        thermal_dec = blk(thermal_dec, encoded_dbs_flat)
-                    thermal_full_dec = model.module.decoder_norm(thermal_dec)
+                    try:
+                        encoded_dbs_flat_dec = encoded_dbs_flat
+                        for blk in model.module.decoder_blocks:
+                            encoded_dbs_flat_dec = blk(encoded_dbs_flat_dec, encoded_query_flat)
+                        encoded_dbs_flat_dec = model.module.decoder_norm(encoded_dbs_flat_dec)
+                    except Exception as e:
+                        import traceback
+                        print(f"ERROR caught: {e}")
+                        traceback.print_exc()  # 전체 stack trace 출력
+                        breakpoint()
                     
                     # e. Reconstruction
-                    reconstructed_patches = model.module.prediction_head(thermal_full_dec)  # [B*K, 256, 588]
+                    reconstructed_patches = model.module.prediction_head(encoded_dbs_flat_dec)  # [B*K, 256, 588]
                     
                     # f. Target patches (batch)
                     query_abs_indices = list(range(eval_ds.database_num + start_idx, eval_ds.database_num + end_idx))
@@ -302,21 +308,21 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                 print(f"RERANK: changed {top1_change_count} / {total_count}")
                 
                 # ===== 시각화 호출 =====
-                if hasattr(args, 'current_epoch'):
-                    positives_per_query = eval_ds.get_positives()
-                    visualize_reranking_comparison(
-                        args, 
-                        eval_ds,
-                        original_predictions=original_predictions,
-                        reranked_predictions=reranked_predictions,
-                        reconstruction_losses_dict=reconstruction_losses_dict,
-                        positives_per_query=positives_per_query,
-                        epoch=args.current_epoch,
-                        distances=distances,
-                        reconstructed_images=None,
-                        save_dir=os.path.join(args.save_dir, 'rerank_vis'),
-                        num_samples=5
-                    )
+                positives_per_query = eval_ds.get_positives()
+                visualize_reranking_comparison(
+                    args, 
+                    eval_ds,
+                    original_predictions=original_predictions,
+                    reranked_predictions=reranked_predictions,
+                    reconstruction_losses_dict=reconstruction_losses_dict,
+                    positives_per_query=positives_per_query,
+                    epoch=args.current_epoch,
+                    distances=distances,
+                    reconstructed_images=None,
+                    save_dir=os.path.join(args.save_dir, 'rerank_vis'),
+                    num_samples=5,
+                    scene_name=scene_name
+                )
                 #########################
                 predictions = reranked_predictions
         

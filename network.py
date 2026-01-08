@@ -254,19 +254,21 @@ class CrossModalVPR_Net(nn.Module):
         mask = None
         masked_patch = None
         if modality == 'thermal':
+            # x: torch.Size([6, 3, 224, 224])
             out = self.thermal_backbone(x)
             agg_layer = self.thermal_aggregation
-        elif modality == 'rgb_neg':
+        elif modality == 'rgb' or modality == 'rgb_neg':
             out = self.rgb_backbone(x)
             agg_layer = self.rgb_aggregation
         elif modality == 'rgb_pos':
+            agg_layer = self.rgb_aggregation
             if self.training:
                 # 5. aligned RGB도 feature tokens 추출하기
-                thermal_full = self.thermal_backbone(paired_thermal)
+                thermal_full = self.thermal_backbone(paired_thermal) # [4, 256, 768]
                 thermal_full = thermal_full["x_norm_patchtokens"] 
                 
                 # 6. Mask token expansion
-                rgb_visible, mask, patch_B, patch_N, patch_D = self.croco_like_encoder(x)
+                rgb_visible, mask, patch_B, patch_N, patch_D = self.croco_like_encoder(x) # [4, 256*(1-mask_ratio), 768]
                 rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask, patch_B, patch_N, patch_D)
                 
                 # 7. Decoder Positional Encoding
@@ -301,22 +303,8 @@ class CrossModalVPR_Net(nn.Module):
                 out = self.rgb_backbone(x)
             else:
                 # when inference
-                # NOTE: 부르는 곳에 no_grad 호출하기
-                # if self.use_masked_inference:
-                #     # 1-4. masked rgb encoder
-                #     rgb_visible, mask, patch_B, patch_N, patch_D = self.croco_like_encoder(x)
-                    
-                #     # 5. Mask token expansion
-                #     rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask, patch_B, patch_N, patch_D)
-                    
-                #     # 6. Decoder Positional Encoding
-                #     rgb_full_dec = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
-                #     out = {"x_norm_patchtokens": rgb_full_dec}
-                # else:
                 out = self.rgb_backbone(x)
-            agg_layer = self.rgb_aggregation
         else:
-            print("modality: ", modality)
             raise ValueError("Modality must be 'rgb' or 'thermal'")
             
         # Backbone 출력 처리 (ViT 기준)
@@ -340,6 +328,7 @@ class CrossModalVPR_Net(nn.Module):
         is_thermal = torch.tensor([f == 'thermal' for f in flags], device=x.device)
         is_rgb_pos = torch.tensor([f == 'rgb_pos' for f in flags], device=x.device)
         is_rgb_neg = torch.tensor([f == 'rgb_neg' for f in flags], device=x.device)
+        is_rgb = torch.tensor([f == 'rgb' for f in flags], device=x.device)
         final_emb = torch.zeros((x.size(0), self.output_dim), device=x.device)
         patch_emb = torch.zeros((x.size(0), 256, self.output_dim), device=x.device)
         masks = torch.zeros((x.size(0), 256), dtype=torch.bool, device=x.device)
@@ -350,24 +339,33 @@ class CrossModalVPR_Net(nn.Module):
         masked_patch_emb = None
         try:
             if is_thermal.any():
-                global_emb, patch_rgb, _, _, _ = self.forward_model(
+                global_emb, patch_thermal, _, _, _ = self.forward_model(
                     x[is_thermal], modality='thermal', use_global_descriptor=use_global_descriptor)
                 if global_emb is not None: final_emb[is_thermal] = global_emb
-                patch_emb[is_thermal] = patch_rgb
+                patch_emb[is_thermal] = patch_thermal
+            if is_rgb.any():
+                global_emb, patch_rgb, _, _, _ = self.forward_model(
+                    x[is_rgb], modality='rgb', use_global_descriptor=use_global_descriptor)
+                if global_emb is not None: final_emb[is_rgb] = global_emb
+                patch_emb[is_rgb] = patch_rgb
             if is_rgb_neg.any():
                 global_emb, patch_rgb, _, _, _ = self.forward_model(
                     x[is_rgb_neg], modality='rgb_neg', use_global_descriptor=use_global_descriptor)
                 if global_emb is not None: final_emb[is_rgb_neg] = global_emb
                 patch_emb[is_rgb_neg] = patch_rgb
             if is_rgb_pos.any():
-                global_emb, patch_thermal, recon_loss, mask, masked_patch_thermal = self.forward_model(x[is_rgb_pos],
-                    modality='rgb_pos', paired_thermal=x[is_thermal],
-                    return_masked_patch=return_masked_patch,use_global_descriptor=use_global_descriptor)
+                global_emb, patch_rgb, recon_loss, mask, masked_patch_rgb = self.forward_model(
+                    x[is_rgb_pos],
+                    modality='rgb_pos',
+                    paired_thermal=x[is_thermal],
+                    return_masked_patch=return_masked_patch,
+                    use_global_descriptor=use_global_descriptor
+                )
                 if global_emb is not None: final_emb[is_rgb_pos] = global_emb
-                patch_emb[is_rgb_pos] = patch_thermal
+                patch_emb[is_rgb_pos] = patch_rgb
                 if return_mask: masks[is_rgb_pos] = mask
                 if return_masked_patch:
-                    masked_patch_emb = masked_patch_thermal # torch.Size([4, 256, 768])
+                    masked_patch_emb = masked_patch_rgb # torch.Size([4, 256, 768])
         except Exception as e:
             import traceback
             print(f"ERROR caught: {e}")

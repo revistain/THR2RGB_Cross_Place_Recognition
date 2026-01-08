@@ -6,130 +6,121 @@ from torchvision.utils import make_grid
 from utils import get_timestamp
 import cv2
 
-def visualize_reconstruction(model, thermal_img, aligned_rgb, device='cuda', save_path=None):
+def visualize_reconstruction(model, thermal_img, paired_rgb, device='cuda', save_path=None):
     """
     Args:
         model: CrossModalVPR_Net
-        thermal_img: [1, 3, 224, 224] - single thermal image
-        aligned_rgb: [1, 3, 224, 224] - aligned RGB image
+        thermal_img: [1, 3, 224, 224] - paired thermal image (참조용)
+        paired_rgb: [1, 3, 224, 224] - RGB image (마스킹 대상)
         device: 'cuda' or 'cpu'
         save_path: Optional path to save the figure
     """
     model.eval()
     
     with torch.no_grad():
-        # 1. Patch embedding
-        thermal_patch = model.module.thermal_backbone.patch_embed(thermal_img)
-        B, N, D = thermal_patch.shape  # [1, 256, 768]
+        # 1. Patch embedding (RGB)
+        rgb_patch = model.module.rgb_backbone.patch_embed(paired_rgb)
+        B, N, D = rgb_patch.shape  # [1, 256, 768]
         
         # 2. Positional embedding
-        pos_tokens = model.module.thermal_backbone.pos_embed[:, 1:, :]
+        pos_tokens = model.module.rgb_backbone.pos_embed[:, 1:, :]
         pos_embed_grid = pos_tokens.reshape(1, 37, 37, 768).permute(0, 3, 1, 2)
         pos_embed_resized = torch.nn.functional.interpolate(
             pos_embed_grid, size=(16, 16), mode='bicubic', align_corners=False
         )
         pos_embed_final = pos_embed_resized.permute(0, 2, 3, 1).flatten(1, 2)
-        thermal_patch = thermal_patch + pos_embed_final
+        rgb_patch = rgb_patch + pos_embed_final
         
         # 3. Masking
-        mask = model.module.mask_generator(thermal_patch)  # [1, 256]
-        thermal_visible = thermal_patch[~mask].reshape(B, -1, D)
+        mask = model.module.mask_generator(rgb_patch)  # [1, 256]
+        rgb_visible = rgb_patch[~mask].reshape(B, -1, D)
         
         # 4. Encoder (visible only)
-        for blk in model.module.thermal_backbone.blocks:
-            thermal_visible = blk(thermal_visible)
-        thermal_visible = model.module.thermal_backbone.norm(thermal_visible)
+        for blk in model.module.rgb_backbone.blocks:
+            rgb_visible = blk(rgb_visible)
+        rgb_visible = model.module.rgb_backbone.norm(rgb_visible)
         
-        # 5. RGB features
-        rgb_full = model.module.rgb_backbone(aligned_rgb)
-        rgb_full = rgb_full["x_norm_patchtokens"]
+        # 5. Thermal features (참조용)
+        thermal_full = model.module.thermal_backbone(thermal_img)
+        thermal_full = thermal_full["x_norm_patchtokens"]
         
         # 6. Mask token expansion
         mask_tokens = model.module.mask_token.expand(B, N, -1)
-        thermal_full = mask_tokens.clone()
-        thermal_full[0, ~mask[0]] = thermal_visible[0]
+        rgb_full = mask_tokens.clone()
+        rgb_full[0, ~mask[0]] = rgb_visible[0]
         
         # 7. Decoder positional encoding
-        thermal_full = thermal_full + model.module.decoder_pos_embed
         rgb_full = rgb_full + model.module.decoder_pos_embed
+        thermal_full = thermal_full + model.module.decoder_pos_embed
         
-        # 8. Decoder
+        # 8. Decoder (RGB를 thermal 참조해서 복원)
         for blk in model.module.decoder_blocks:
-            thermal_full = blk(thermal_full, rgb_full)
-        thermal_full = model.module.decoder_norm(thermal_full)
-
-        # ========== Confidence Map 추가 ==========
-        if hasattr(model.module, 'confidence_head'):
-            confidence_map = model.module.confidence_head(thermal_full).squeeze().cpu()  # [256]
-        else:
-            confidence_map = None
-        # ==========================================
+            rgb_full = blk(rgb_full, thermal_full)  # ← 순서만 바뀜!
+        rgb_full = model.module.decoder_norm(rgb_full)
 
         # 9. Prediction
-        reconstructed_patches = model.module.prediction_head(thermal_full)  # [1, 256, 588]
+        reconstructed_patches = model.module.prediction_head(rgb_full)  # [1, 256, 588]
         
         # 10. Unpatchify
         reconstructed_img = unpatchify_visual(reconstructed_patches, patch_size=14)  # [1, 3, 224, 224]
         
         # 11. 원본 이미지도 patchify
-        original_patches = model.module.patchify(thermal_img)  # [1, 256, 588]
+        original_patches = model.module.patchify(paired_rgb)  # ← RGB target
         
     # Denormalize (ImageNet stats 사용했다고 가정)
     mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(device)
     std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(device)
     
     thermal_img_denorm = thermal_img * std + mean
-    aligned_rgb_denorm = aligned_rgb * std + mean
+    paired_rgb_denorm = paired_rgb * std + mean
     reconstructed_img_denorm = reconstructed_img * std + mean
     
     # ===== 핵심: Visible + Reconstructed 합치기 =====
-    # Visible patches는 원본, Masked patches는 reconstruction 사용
     hybrid_patches = original_patches.clone()  # [1, 256, 588]
-    hybrid_patches[mask] = reconstructed_patches[mask]  # Masked 위치만 reconstruction으로 교체
+    hybrid_patches[mask] = reconstructed_patches[mask]
     
-    hybrid_img = unpatchify_visual(hybrid_patches, patch_size=14)  # [1, 3, 224, 224]
+    hybrid_img = unpatchify_visual(hybrid_patches, patch_size=14)
     hybrid_img_denorm = hybrid_img * std + mean
     
     # Mask 시각화 (16x16 grid)
-    mask_2d = mask.reshape(1, 16, 16).float()  # [1, 16, 16]
+    mask_2d = mask.reshape(1, 16, 16).float()
     mask_img = torch.nn.functional.interpolate(
         mask_2d.unsqueeze(1), size=(224, 224), mode='nearest'
-    ).squeeze(1)  # [1, 224, 224]
+    ).squeeze(1)
     
-    # Plot
+    # ========== Plot (제목만 수정) ==========
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
     
     # Row 1
-    axes[0, 0].imshow(thermal_img_denorm[0].cpu().permute(1, 2, 0).clip(0, 1))
-    axes[0, 0].set_title('Original Thermal', fontsize=14, fontweight='bold')
+    axes[0, 0].imshow(paired_rgb_denorm[0].cpu().permute(1, 2, 0).clip(0, 1))
+    axes[0, 0].set_title('Original RGB (Masked)', fontsize=14, fontweight='bold')  # ← 수정
     axes[0, 0].axis('off')
     
     axes[0, 1].imshow(mask_img[0].cpu(), cmap='RdYlGn_r', vmin=0, vmax=1)
     axes[0, 1].set_title(f'Mask (Masked={mask.float().mean()*100:.1f}%)', fontsize=14, fontweight='bold')
     axes[0, 1].axis('off')
     
-    # ★ 핵심: Hybrid 이미지 (Visible + Reconstructed)
     axes[0, 2].imshow(hybrid_img_denorm[0].cpu().permute(1, 2, 0).clip(0, 1))
     axes[0, 2].set_title('Hybrid (Vis+Recon)', fontsize=14, fontweight='bold', color='red')
     axes[0, 2].axis('off')
     
     # Row 2
-    axes[1, 0].imshow(aligned_rgb_denorm[0].cpu().permute(1, 2, 0).clip(0, 1))
-    axes[1, 0].set_title('Aligned RGB (Reference)', fontsize=14, fontweight='bold')
+    axes[1, 0].imshow(thermal_img_denorm[0].cpu().permute(1, 2, 0).clip(0, 1))
+    axes[1, 0].set_title('Paired Thermal (Reference)', fontsize=14, fontweight='bold')  # ← 수정
     axes[1, 0].axis('off')
     
     # Reconstruction only (masked 영역만)
     recon_only = reconstructed_img_denorm.clone()
-    mask_expanded = mask_img.unsqueeze(1).expand(-1, 3, -1, -1)  # [1, 3, 224, 224]
-    recon_only[mask_expanded < 0.5] = 0  # Visible region = black
+    mask_expanded = mask_img.unsqueeze(1).expand(-1, 3, -1, -1)
+    recon_only[mask_expanded < 0.5] = 0
     axes[1, 1].imshow(recon_only[0].cpu().permute(1, 2, 0).clip(0, 1))
     axes[1, 1].set_title('Reconstructed (Masked Only)', fontsize=14, fontweight='bold')
     axes[1, 1].axis('off')
     
     # Reconstruction error (masked 영역에서만)
-    error = (thermal_img_denorm - reconstructed_img_denorm).abs().mean(dim=1)  # [1, 224, 224]
+    error = (paired_rgb_denorm - reconstructed_img_denorm).abs().mean(dim=1)  # ← RGB 기준
     error_masked = error.clone()
-    error_masked[mask_img < 0.5] = 0  # Visible 영역은 0으로
+    error_masked[mask_img < 0.5] = 0
     im = axes[1, 2].imshow(error_masked[0].cpu(), cmap='hot', vmin=0, vmax=0.3)
     axes[1, 2].set_title('Error (Masked Only)', fontsize=14, fontweight='bold')
     axes[1, 2].axis('off')
@@ -143,17 +134,6 @@ def visualize_reconstruction(model, thermal_img, aligned_rgb, device='cuda', sav
         plt.close()
     else:
         plt.show()
-    
-    # ========== Confidence 시각화 추가 (맨 끝) ==========
-    if confidence_map is not None and save_path is not None:
-        conf_save_path = save_path.replace('.png', '_confidence.png')
-        save_confidence_vis_simple(
-            thermal_img=thermal_img[0],
-            rgb_img=aligned_rgb[0],
-            confidence_map=confidence_map,
-            save_path=conf_save_path
-        )
-    # ==================================================
     
     return hybrid_img_denorm
 
@@ -187,10 +167,10 @@ def visualize_during_training(args, model, triplets_dl, device, epoch, save_dir=
         
     # Thermal query 1개만 추출 (첫 번째 thermal)
     thermal_img = images[0:1].to(device)  # [1, 3, 224, 224]
-    aligned_rgb = aligned_rgbs[0:1].to(device)  # [1, 3, 224, 224]
+    paired_rgb = aligned_rgbs[0:1].to(device)  # [1, 3, 224, 224]
     
     save_path = f"{save_subdir}/epoch_{epoch:03d}.png"
-    visualize_reconstruction(model, thermal_img, aligned_rgb, device, save_path)
+    visualize_reconstruction(model, thermal_img, paired_rgb, device, save_path)
     
     model.train()
     
@@ -203,7 +183,8 @@ def visualize_reranking_comparison(args, eval_ds,
                                    distances=None,
                                    reconstructed_images=None,
                                    save_dir='./rerank_visualizations',
-                                   num_samples=2):
+                                   num_samples=2,
+                                   scene_name=""):
     """
     Reranking 전/후를 비교하는 시각화 + Loss 통계
     """
@@ -491,14 +472,14 @@ def visualize_reranking_comparison(args, eval_ds,
                     fontsize=16, fontweight='bold', color=color)
         
         # Save
-        save_path = os.path.join(save_dir, f'epoch_{epoch:03d}_query_{query_idx:05d}.png')
+        save_path = os.path.join(save_dir, f'epoch_{epoch:03d}_{scene_name}_query_{query_idx:05d}.png')
         plt.savefig(save_path, dpi=120, bbox_inches='tight')
         plt.close()
         
         print(f"Saved: {save_path}")
     
     # ===== Summary =====
-    summary_path = os.path.join(save_dir, f'epoch_{epoch:03d}_summary.txt')
+    summary_path = os.path.join(save_dir, f'epoch_{epoch:03d}_{scene_name}_summary.txt')
     with open(summary_path, 'w') as f:
         f.write(f"Reranking Summary - Epoch {epoch}\n")
         f.write("="*50 + "\n\n")

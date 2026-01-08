@@ -35,6 +35,7 @@ def set_seed(seed=42):
     random.seed(seed)
 
 if __name__ == "__main__":
+    import lovely_tensors as lt; lt.monkey_patch()
     '''Setup'''
     set_seed()
     parser = Parser()
@@ -82,10 +83,10 @@ if __name__ == "__main__":
 
     backbone_params = []
     other_params    = []
-    print("="*30)
+    print("=" * 30)
     print("- Tuning RGB backbone layers: ", args.num_trainable_blocks_RGB)
     print("- Tuning THERMAL backbone layers: ", args.num_trainable_blocks_THERMAL)
-    print("="*30)
+    print("=" * 30)
     for name, param in model.module.rgb_backbone.named_parameters():
         if "adapter" not in name:
             param.requires_grad = False
@@ -210,7 +211,6 @@ if __name__ == "__main__":
                     
                     # triplet_loss
                     overall_loss += triplet_loss
-                
 
                 # train_batch_size: 4, arg.negs_num_per_query: 10
                 recon_weight = args.recon_weight
@@ -261,7 +261,7 @@ if __name__ == "__main__":
         for seq, test_ds in zip(test_sequences, test_ds_list):
             logging.info(f"===== Evaluating Sequence: {seq} =====")
             args.current_epoch = epoch_num # 시각화
-            recalls, recalls_str = inference.inference(args, test_ds, model)
+            recalls, recalls_str = inference.inference(args, test_ds, model, scene_name=seq)
             logging.info(f"Recalls for {seq}: {recalls_str}")
             logging.info(f"================================================")
             current_epoch_r1_list.append(recalls[0])

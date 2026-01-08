@@ -55,16 +55,13 @@ def unpatchify(x, patch_size=14, channels=3):
     return imgs
     
 class MaskedMSE(torch.nn.Module):
-    def __init__(self, norm_pix_loss=False, masked=True, reduction='mean', confidence=None, use_ssim=False):
+    def __init__(self, norm_pix_loss=False, masked=True, reduction='mean'):
         super().__init__()
         self.norm_pix_loss = norm_pix_loss
         self.masked = masked
         self.reduction = reduction
-        self.confidence_map = None
-        self.use_ssim = use_ssim
-        self.internal_count = 0
         
-    def forward(self, pred, mask, target, confidence_map=None):
+    def forward(self, pred, mask, target):
         if self.norm_pix_loss:
             mean = target.mean(dim=-1, keepdim=True)
             var = target.var(dim=-1, keepdim=True)
@@ -73,34 +70,18 @@ class MaskedMSE(torch.nn.Module):
         loss = (pred - target) ** 2  # [B, 256, 768]
         loss = loss.mean(dim=-1)     # [B, 256]
         
-        # 일단 시각화만 해보기
-        confidence_map = None
-
         # MSE
         if self.masked:
             loss = (loss * mask).sum(dim=-1) / mask.sum(dim=-1)  # [B]
         else:
             loss = loss.mean(dim=-1)  # [B]
-            
-        # SSIM loss
-        if self.use_ssim:
-            pred_unpatched = unpatchify(pred)
-            target_unpatched = unpatchify(target)
-            ssim_losses = ms_ssim(pred_unpatched, target_unpatched, data_range=1.0, size_average=False) # [B]
-            ssim_losses = 1 - ssim_losses # 1.0일수록 좋음
-            if self.internal_count % 100 == 0:
-                print(f"loss: {loss} / SSIM_losses: {ssim_losses}")
-            self.internal_count += 1
-            loss = (loss + ssim_losses) / 2
-        
+
         if self.reduction == 'none':
             return loss  # [B]
         elif self.reduction == 'mean':
             return loss.mean()  # scalar
         else:
             return loss.sum()  # scalar
-        
-        
         
 '''
         # Confidence weighting with normalization
