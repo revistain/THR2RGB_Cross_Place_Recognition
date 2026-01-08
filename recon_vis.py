@@ -1,4 +1,5 @@
 # recon_vis.py
+import os
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
@@ -163,11 +164,18 @@ def visualize_during_training(args, model, triplets_dl, device, epoch, save_dir=
     model.eval()
     
     # 첫 번째 batch 가져오기
-    images, _, _, aligned_rgbs = next(iter(triplets_dl))
+    images, _, _, paired_rgbs = next(iter(triplets_dl))
+    if args.use_pos_as_paired_rgb:
+        assert images.size(0) % args.train_batch_size == 0
+        size_of_batch = int(images.size(0) / args.train_batch_size)
+        
+        pos_rgbs = [images[idx] for idx in range(1, images.size(0), size_of_batch)]
+        pos_rgbs = torch.stack(pos_rgbs)
+        paired_rgbs = pos_rgbs
         
     # Thermal query 1개만 추출 (첫 번째 thermal)
     thermal_img = images[0:1].to(device)  # [1, 3, 224, 224]
-    paired_rgb = aligned_rgbs[0:1].to(device)  # [1, 3, 224, 224]
+    paired_rgb = paired_rgbs[0:1].to(device)  # [1, 3, 224, 224]
     
     save_path = f"{save_subdir}/epoch_{epoch:03d}.png"
     visualize_reconstruction(model, thermal_img, paired_rgb, device, save_path)
@@ -499,42 +507,64 @@ def visualize_reranking_comparison(args, eval_ds,
     
     print(f"Saved summary: {summary_path}")
     
-# inference.py 최상단
-def save_confidence_vis_simple(thermal_img, rgb_img, confidence_map, save_path):
+def save_confidence_vis_simple(thermal_img, rgb_imgs, confidence_map, save_path):
     """
-    최소 코드로 3개 이미지 시각화
-    
-    Args:
-        thermal_img: [3, 224, 224] normalized tensor
-        rgb_img: [3, 224, 224] normalized tensor
-        confidence_map: [256] tensor
-        save_path: str
+    thermal_img: (3, 224, 224) Tensor
+    rgb_imgs: (5, 3, 224, 224) Tensor (Top-5 results)
+    confidence_map: (5, 256) Tensor (Top-5 confidence scores)
     """
-    import matplotlib.pyplot as plt
-    from matplotlib import cm
-    import os
     
-    # ========== 수정: device 맞추기 ==========
-    device = thermal_img.device
-    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1).to(device)
-    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1).to(device)
-    # =========================================
+    # 텐서를 numpy로 변환
+    if torch.is_tensor(confidence_map):
+        confidence_map = confidence_map.detach().cpu().numpy()
+    if torch.is_tensor(rgb_imgs):
+        rgb_imgs = rgb_imgs.detach().cpu().numpy()
+    if torch.is_tensor(thermal_img):
+        thermal_img = thermal_img.detach().cpu().numpy().transpose(1, 2, 0)
+        
+    # 시각화 준비 (1행: Query, 2행: Retrieved RGB, 3행: Confidence Map)
+    n_results = confidence_map.shape[0] # 5
+    fig, axes = plt.subplots(3, n_results + 1, figsize=(15, 8))
     
-    thermal = ((thermal_img * std + mean).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-    rgb = ((rgb_img * std + mean).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+    # 1. Query Image (맨 앞에 표시)
+    # thermal_img 정규화 해제 및 클리핑 (필요시)
+    thermal_img = (thermal_img - thermal_img.min()) / (thermal_img.max() - thermal_img.min())
+    axes[0, 0].imshow(thermal_img)
+    axes[0, 0].set_title("Query (Thermal)")
+    axes[0, 0].axis('off')
     
-    # Confidence map
-    conf_map = confidence_map.cpu().numpy().reshape(16, 16)
-    conf_resized = cv2.resize(conf_map, (224, 224))
-    conf_colored = (cm.jet(conf_resized)[:, :, :3] * 255).astype(np.uint8)
-    
-    # Plot
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-    axes[0].imshow(thermal); axes[0].set_title('Query Thermal'); axes[0].axis('off')
-    axes[1].imshow(conf_colored); axes[1].set_title(f'Confidence (mean: {conf_map.mean():.3f})'); axes[1].axis('off')
-    axes[2].imshow(rgb); axes[2].set_title('Top-1 RGB'); axes[2].axis('off')
-    
+    # 나머지는 빈칸 처리
+    for i in range(1, 3):
+        axes[i, 0].axis('off')
+
+    # 2. Top-5 결과 순회
+    for i in range(n_results):
+        col = i + 1 # 첫 번째 열은 Query가 썼으므로 +1
+        
+        # --- [A] RGB Image 시각화 ---
+        rgb = rgb_imgs[i].transpose(1, 2, 0)
+        rgb = (rgb - rgb.min()) / (rgb.max() - rgb.min())
+        axes[1, col].imshow(rgb)
+        axes[1, col].set_title(f"Top-{i+1} RGB")
+        axes[1, col].axis('off')
+
+        # --- [B] Confidence Map 시각화 (여기가 핵심!) ---
+        # (5, 256)에서 i번째인 (256,)를 꺼내서 (16, 16)으로 변환
+        cur_conf = confidence_map[i]  # shape: (256,)
+        
+        # ★ 1280 에러 해결: 하나씩 꺼내서 reshape ★
+        heatmap = cur_conf.reshape(16, 16) 
+        
+        # 224x224로 업스케일링 (보기에 좋게)
+        heatmap_resized = cv2.resize(heatmap, (224, 224), interpolation=cv2.INTER_NEAREST)
+        
+        axes[2, col].imshow(heatmap_resized, cmap='jet') # jet, viridis 등 사용
+        axes[2, col].set_title(f"Conf Map {i+1}")
+        axes[2, col].axis('off')
+
     plt.tight_layout()
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    plt.savefig(save_path, dpi=100, bbox_inches='tight')
+    plt.savefig(save_path)
     plt.close()
+    
+    print(f"* Conf Map saved to {save_path}")

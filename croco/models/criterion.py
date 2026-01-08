@@ -56,40 +56,44 @@ def unpatchify(x, patch_size=14, channels=3):
     return imgs
     
 class MaskedMSE(torch.nn.Module):
-    def __init__(self, loss_type, norm_pix_loss=False, masked=True, reduction='mean'):
+    def __init__(self, norm_pix_loss=False, masked=True, reduction='mean', confidence=None):
         super().__init__()
-        loss_type = loss_type[0]
-        assert loss_type in ['MSE', 'MAE', 'FFLLoss']
-        
         self.norm_pix_loss = norm_pix_loss
         self.masked = masked
         self.reduction = reduction
-        self.loss_type = loss_type
-        if self.loss_type == 'FFLLoss':
-            self.ffl = FFL(loss_weight=1.0, alpha=1.0)
+        self.confidence_map = None
+        self.internal_count = 0
         
-    def forward(self, pred, mask, target):
+    def forward(self, pred, mask, target, confidence_map=None):
         if self.norm_pix_loss:
             mean = target.mean(dim=-1, keepdim=True)
             var = target.var(dim=-1, keepdim=True)
             target = (target - mean) / (var + 1.e-6)**.5
         
-        if self.loss_type == 'MSE':
-            loss = (pred - target) ** 2  # [B, 256, 768]
-            loss = loss.mean(dim=-1)     # [B, 256]
-        elif self.loss_type == 'MAE':
-            loss = (pred - target).abs()  # [B, 256, 768]
-            loss = loss.mean(dim=-1) 
-        elif self.loss_type == 'FFLLoss':
-            loss = self.ffl(unpatchify(pred), unpatchify(target))  # calculate focal frequency loss
-            return loss # masking 계산 x
-                    
-        # MSE
-        if self.masked:
-            loss = (loss * mask).sum(dim=-1) / mask.sum(dim=-1)  # [B]
+        loss = (pred - target) ** 2  # [B, 256, 768]
+        loss = loss.mean(dim=-1)     # [B, 256]
+        
+        # Confidence weighting with normalization
+        if confidence_map is not None:
+            confidence_map = confidence_map.squeeze(-1)
+            loss = loss * confidence_map  # [B, 256]
+            
+            if self.masked:
+                # Scale-preserving: normalize by confidence sum
+                conf_sum = (confidence_map * mask).sum(dim=-1, keepdim=True) + 1e-8  # [B, 1]
+                loss = (loss * mask).sum(dim=-1, keepdim=True) / conf_sum  # [B, 1]
+                loss = loss.squeeze(-1)  # [B]
+            else:
+                conf_sum = confidence_map.sum(dim=-1, keepdim=True) + 1e-8  # [B, 1]
+                loss = loss.sum(dim=-1, keepdim=True) / conf_sum  # [B, 1]
+                loss = loss.squeeze(-1)  # [B]
         else:
-            loss = loss.mean(dim=-1)  # [B]
-
+            # MSE
+            if self.masked:
+                loss = (loss * mask).sum(dim=-1) / mask.sum(dim=-1)  # [B]
+            else:
+                loss = loss.mean(dim=-1)  # [B]
+            
         if self.reduction == 'none':
             return loss  # [B]
         elif self.reduction == 'mean':

@@ -144,11 +144,12 @@ class CrossModalVPR_Net(nn.Module):
         self._set_decode_positional_embedding(self.output_dim)
         self._set_mask_generator(16*16, mask_ratio)
         self._set_prediction_head(self.output_dim, 14)
+        self._set_confidence_head(self.output_dim, 16*16)
         
         self.reconstruction_criterion = MaskedMSE(
             norm_pix_loss=False,
             masked=True,
-            loss_type=args.recon_loss_fn_type,
+            confidence=True,
         )
 
         # 2. Aggregation Layer (각각 따로 두는 것을 추천)
@@ -175,7 +176,18 @@ class CrossModalVPR_Net(nn.Module):
     def _set_mask_generator(self, num_patches, mask_ratio):
         """Random masking generator 초기화"""
         self.mask_generator = RandomMask(num_patches, mask_ratio)
-
+        
+    def _set_confidence_head(self, dec_embed_dim, hidden_dim=256):
+        self.confidence_head = nn.Sequential(
+            nn.Linear(dec_embed_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid()
+        )
+        
+        nn.init.normal_(self.confidence_head[0].weight, std=0.02)
+        nn.init.zeros_(self.confidence_head[0].bias)
+        
     def _set_prediction_head(self, dec_embed_dim, patch_size):
         self.prediction_head = nn.Sequential(
             nn.Linear(dec_embed_dim, patch_size**2 * 3), # 768 → 588
@@ -282,21 +294,18 @@ class CrossModalVPR_Net(nn.Module):
                     rgb_full_dec = blk(rgb_full_dec, thermal_full)
                 rgb_full_dec = self.decoder_norm(rgb_full_dec)
                 
-                def calculate_recon_loss(pred, mask, target):
-                    recon_loss = self.reconstruction_criterion(
-                        pred=pred,        # [B, 256, 768]
-                        mask=mask,        # [B, 256]
-                        target=target,    # [B, 3, 256, 768]
-                    )
-                    return recon_loss
-                recon_loss_fn = calculate_recon_loss
-                
                 # 9. Prediction Head
                 reconstructed_patches = self.prediction_head(rgb_full_dec)
+                confidence_map_flat = self.confidence_head(rgb_full_dec)
                 target_patches = self.patchify(x)
                 
                 # 10. Reconstruction loss 계산
-                recon_loss = recon_loss_fn(reconstructed_patches, mask, target_patches)
+                recon_loss = self.reconstruction_criterion(
+                    pred=reconstructed_patches,        # [B, 256, 768]
+                    mask=mask,        # [B, 256]
+                    target=target_patches,    # [B, 3, 256, 768]
+                    confidence_map=confidence_map_flat
+                )
                 
                 # 11. VPR용 patch tokens
                 if return_masked_patch: masked_patch = rgb_full

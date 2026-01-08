@@ -101,16 +101,6 @@ def index_to_image_tensor(dataset, index):
 # TODO: can be less memory cost
 # TODO: finish the uncompleted parts
 def inference(args, eval_ds, model, scene_name="", pca=None, k=1, use_cuda=True, verbose=True):
-    '''
-    hard_resize: directly use the resized image
-    single_query: use the resized image, and set query_infer_batchsize=1 (used when the query images have varying size)
-    central_crop: Take the biggest central crop of size self.resize. Preserves ratio.
-    five_crops: use five crops of the image, and take the average of the features
-    nearest_crop: use five crops of the image, 
-    maj_voting: calculate features of five crops of the image, then use the nearest features
-    * hard_size method for all database images
-    * selected test_method for all query images
-    '''
     try:
         test_method = args.test_method
         model = model.eval()
@@ -129,7 +119,6 @@ def inference(args, eval_ds, model, scene_name="", pca=None, k=1, use_cuda=True,
                 features = outputs[0].view(-1, args.features_dim)
                 features = features.cpu().numpy()
                 database_features[indices.numpy(), :] = features
-                
 
             logging.info(f"Finished extracting {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
 
@@ -150,8 +139,6 @@ def inference(args, eval_ds, model, scene_name="", pca=None, k=1, use_cuda=True,
                 features = features.cpu().numpy()
                 queries_features[indices.numpy()-eval_ds.database_num, :] = features
 
-                # break # for fast debug
-
             logging.info(f"Finished extracting {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
 
         # 3. faiss를 이용하여, L2 distance로 가까운 descriptor 찾기
@@ -161,13 +148,18 @@ def inference(args, eval_ds, model, scene_name="", pca=None, k=1, use_cuda=True,
         
         start_time = time.time()
         distances, predictions = faiss_index.search(queries_features, max(args.recall_values))
-        del queries_features # predictions: [Query, top20]
+        del queries_features
         del faiss_index
         import gc; gc.collect()
         
         #########################
         ### RERANKING Process ###
         #########################
+        # ========== 시각화용 변수 초기화 ==========
+        confidence_map_for_vis = None
+        top5_predictions_for_vis = predictions[:, :5].copy()  # [num_queries, 5]
+        # ==========================================
+        
         start_time = time.time()
         if args.use_reranking:                
             torch.cuda.empty_cache()
@@ -177,22 +169,21 @@ def inference(args, eval_ds, model, scene_name="", pca=None, k=1, use_cuda=True,
             ##################
             with torch.no_grad():
                 # rerank1. RGB database 전부 추출 (before decoder)
-                # FIXME: 이거 위에꺼 이용해서 합칠 수 있는데, 일단 그렇게 느리지 않으니 일단 두기
                 start_time = time.time()
 
                 database_subset_ds = Subset(eval_ds, list(range(eval_ds.database_num)))
                 database_dataloader = DataLoader(dataset=database_subset_ds, num_workers=args.num_workers,
                                                 batch_size=args.infer_batch_size, pin_memory=(args.device=="cuda"))
             
-                database_mask = np.empty((eval_ds.queries_num, 256), dtype="bool")
+                database_mask = np.empty((eval_ds.database_num, 256), dtype="bool")  # ← 수정!
                 masked_database_embedding = np.empty((eval_ds.database_num, 256, args.features_dim), dtype="float32")
                 for inputs, indices, flags in tqdm(database_dataloader, ncols=100):
                     rgb_visible, mask, patch_B, patch_N, patch_D = model.module.croco_like_encoder(inputs.to(args.device))
                     rgb_full = model.module.croco_encoded_mask_expension(rgb_visible, mask, patch_B, patch_N, patch_D)
-                    rgb_full_dec = rgb_full + model.module.decoder_pos_embed # [B, 256, 768]
+                    rgb_full_dec = rgb_full + model.module.decoder_pos_embed
                     enc_features = rgb_full_dec.cpu().numpy()
                     masked_database_embedding[indices.numpy(), :, :] = enc_features
-                    database_mask[indices.numpy()-eval_ds.database_num,:] = mask.detach().cpu().numpy()
+                    database_mask[indices.numpy(), :] = mask.detach().cpu().numpy()  # ← 수정!
 
                 logging.info(f"Finished extracting (FOR RERANK) {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
 
@@ -214,7 +205,7 @@ def inference(args, eval_ds, model, scene_name="", pca=None, k=1, use_cuda=True,
             # rerank3. Decoder 쭉쭉 태워서 rerank 진행하기
             RERANKING_TOP_K = 5
             RERANK_BATCH_SIZE = 32
-            reranked_predictions = predictions.copy()  # 원본 보존
+            reranked_predictions = predictions.copy()
             reconstruction_criterion = MaskedMSE(
                 norm_pix_loss=False,
                 masked=True,
@@ -226,71 +217,57 @@ def inference(args, eval_ds, model, scene_name="", pca=None, k=1, use_cuda=True,
             top1_change_count = 0
             total_count = 0
             with torch.no_grad():
-                # Batch 단위로 처리
                 num_queries = eval_ds.queries_num
                 num_batches = (num_queries + RERANK_BATCH_SIZE - 1) // RERANK_BATCH_SIZE
                 
                 for batch_idx in tqdm(range(num_batches), desc="Reranking", ncols=100):
-                    # Batch 범위
                     start_idx = batch_idx * RERANK_BATCH_SIZE
                     end_idx = min(start_idx + RERANK_BATCH_SIZE, num_queries)
                     batch_size = end_idx - start_idx
                     
-                    # a. Query thermal encoding (batch)
-                    encoded_queries = thermal_embedding[start_idx:end_idx]  # [B, 256, 768]
+                    encoded_queries = thermal_embedding[start_idx:end_idx]
                     encoded_queries = torch.tensor(encoded_queries, dtype=torch.float32).to('cuda')
                     
-                    # b. Top-K database RGB encoding (batch)
-                    top_k_db_indices_batch = predictions[start_idx:end_idx, :RERANKING_TOP_K]  # [B, K]
+                    top_k_db_indices_batch = predictions[start_idx:end_idx, :RERANKING_TOP_K]
                     
-                    # c. r@N rgb 배치화 과정
-                    all_db_indices = top_k_db_indices_batch.flatten()  # [B*K]
-                    encoded_dbs_flat = masked_database_embedding[all_db_indices]  # [B*K, 256, 768]
+                    all_db_indices = top_k_db_indices_batch.flatten()
+                    encoded_dbs_flat = masked_database_embedding[all_db_indices]
                     encoded_dbs_flat = torch.tensor(encoded_dbs_flat, dtype=torch.float32).to('cuda')
-                    encoded_dbs = encoded_dbs_flat.reshape(batch_size, RERANKING_TOP_K, 256, -1)  # [B, K, 256, 768]
+                    encoded_dbs = encoded_dbs_flat.reshape(batch_size, RERANKING_TOP_K, 256, -1)
                     
-                    # c. query를 배치화 과정 및 decoder전 flatten
-                    encoded_query_batch = encoded_queries.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1)  # [B, K, 256, 768]
-                    encoded_query_flat = encoded_query_batch.reshape(-1, 256, encoded_queries.size(-1)) # Reshape for decoder: [B*K, 256, 768]
+                    encoded_query_batch = encoded_queries.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1)
+                    encoded_query_flat = encoded_query_batch.reshape(-1, 256, encoded_queries.size(-1))
                     encoded_dbs_flat = encoded_dbs.reshape(-1, 256, encoded_dbs.size(-1))
                     
-                    # d. Decoder 통과
-                    try:
-                        encoded_dbs_flat_dec = encoded_dbs_flat
-                        for blk in model.module.decoder_blocks:
-                            encoded_dbs_flat_dec = blk(encoded_dbs_flat_dec, encoded_query_flat)
-                        encoded_dbs_flat_dec = model.module.decoder_norm(encoded_dbs_flat_dec)
-                    except Exception as e:
-                        import traceback
-                        print(f"ERROR caught: {e}")
-                        traceback.print_exc()  # 전체 stack trace 출력
-                        breakpoint()
+                    encoded_dbs_flat_dec = encoded_dbs_flat
+                    for blk in model.module.decoder_blocks:
+                        encoded_dbs_flat_dec = blk(encoded_dbs_flat_dec, encoded_query_flat)
+                    encoded_dbs_flat_dec = model.module.decoder_norm(encoded_dbs_flat_dec)
                     
-                    # e. Reconstruction
-                    reconstructed_patches = model.module.prediction_head(encoded_dbs_flat_dec)  # [B*K, 256, 588]
+                    reconstructed_patches = model.module.prediction_head(encoded_dbs_flat_dec)
                     
-                    # f. Target patches (batch)
+                    # ========== Confidence map 계산 (첫 배치만) ==========
+                    if batch_idx == 0 and hasattr(model.module, 'confidence_head'):
+                        confidence_map_for_vis = model.module.confidence_head(encoded_dbs_flat_dec[:5])  # [5, 256, 1]
+                        confidence_map_for_vis = confidence_map_for_vis.squeeze(-1)  # [5, 256]
+                    # ====================================================
+                    
                     query_abs_indices = list(range(eval_ds.database_num + start_idx, eval_ds.database_num + end_idx))
-                    query_imgs = torch.stack([eval_ds[idx][0] for idx in query_abs_indices]).to('cuda')  # [B, 3, 224, 224]
-                    query_imgs_batch = query_imgs.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1, -1)  # [B, K, 3, 224, 224]
-                    query_imgs_flat = query_imgs_batch.reshape(-1, *query_imgs.shape[1:])  # [B*K, 3, 224, 224]
-                    target_patches = patchify(query_imgs_flat)  # [B*K, 256, 588]
+                    query_imgs = torch.stack([eval_ds[idx][0] for idx in query_abs_indices]).to('cuda')
+                    query_imgs_batch = query_imgs.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1, -1)
+                    query_imgs_flat = query_imgs_batch.reshape(-1, *query_imgs.shape[1:])
+                    target_patches = patchify(query_imgs_flat)
                     
-                    # g. Masks (batch)
-                    masks_batch = database_mask[start_idx:end_idx]  # [B, 256]
+                    masks_batch = database_mask[all_db_indices]  # ← 수정!
                     masks_batch = torch.tensor(masks_batch, dtype=torch.bool).to('cuda')
-                    masks_flat = masks_batch.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1)  # [B, K, 256]
-                    masks_flat = masks_flat.reshape(-1, 256)  # [B*K, 256]
                     
-                    # h. Reconstruction loss
                     loss = reconstruction_criterion(
                         pred=reconstructed_patches,
-                        mask=masks_flat,
+                        mask=masks_batch,
                         target=target_patches
-                    )  # [B*K]
+                    )
                     
-                    # i. Reshape and rerank
-                    loss = loss.reshape(batch_size, RERANKING_TOP_K)  # [B, K]
+                    loss = loss.reshape(batch_size, RERANKING_TOP_K)
                     
                     for i, query_idx in enumerate(range(start_idx, end_idx)):
                         reconstruction_losses = loss[i].cpu().numpy()
@@ -307,8 +284,8 @@ def inference(args, eval_ds, model, scene_name="", pca=None, k=1, use_cuda=True,
 
                 logging.info(f"Reranking completed in {time.time() - start_time:.2f} s")
                 print(f"RERANK: changed {top1_change_count} / {total_count}")
-                
-                # ===== 시각화 호출 =====
+                    
+                # Reranking comparison visualization
                 positives_per_query = eval_ds.get_positives()
                 visualize_reranking_comparison(
                     args, 
@@ -321,16 +298,15 @@ def inference(args, eval_ds, model, scene_name="", pca=None, k=1, use_cuda=True,
                     distances=distances,
                     reconstructed_images=None,
                     save_dir=os.path.join(args.save_dir, 'rerank_vis'),
-                    num_samples=5,
-                    scene_name=scene_name
+                    num_samples=5
                 )
-                #########################
+                
                 predictions = reranked_predictions
+                top5_predictions_for_vis = reranked_predictions[:, :5].copy()
         
-        # 4. positive query(정답)가 몇 번째 top-N에 속하는지 검사하기
+        # 4. Recall 계산
         positives_per_query = eval_ds.get_positives()
         recalls = np.zeros(len(args.recall_values))
-        pre_num = eval_ds.queries_num
         for query_index, pred in enumerate(predictions):
             for i, n in enumerate(args.recall_values):
                 if np.any(np.in1d(pred[:n], positives_per_query[query_index])):
@@ -340,11 +316,55 @@ def inference(args, eval_ds, model, scene_name="", pca=None, k=1, use_cuda=True,
         
         logging.info(f"recalls: {','.join(map(str, recalls))}")
         recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, recalls)])
-        print(pre_num, eval_ds.queries_num)
+
+        # ========== 시각화 (Reranking 여부 무관) ==========
+        if hasattr(args, 'current_epoch'):
+            try:
+                # 첫 번째 query 사용
+                query_idx = 0
+                
+                # Thermal query
+                thermal_abs_idx = eval_ds.database_num + query_idx
+                thermal_img = eval_ds[thermal_abs_idx][0].to('cuda')  # [3, 224, 224]
+                
+                # Top-5 RGB (reranking 했으면 reranked, 안 했으면 original)
+                top5_rgb_indices = top5_predictions_for_vis[query_idx]  # [5]
+                top5_rgb_imgs = []
+                for db_idx in top5_rgb_indices:
+                    rgb_tensor = eval_ds[int(db_idx)][0]
+                    top5_rgb_imgs.append(rgb_tensor)
+                top5_rgb_imgs = torch.stack(top5_rgb_imgs).to('cuda')  # [5, 3, 224, 224]
+                
+                # Confidence map (reranking 했을 때만 존재)
+                if confidence_map_for_vis is not None:
+                    top5_conf = confidence_map_for_vis[:5]  # [5, 256]
+                else:
+                    # Dummy confidence (균일)
+                    top5_conf = torch.ones(5, 256).to('cuda') * 0.5
+                
+                save_path = os.path.join(
+                    args.save_dir,
+                    'confidence_maps',
+                    f'epoch_{args.current_epoch:03d}_{scene_name}_confMap.png'
+                )
+                
+                save_confidence_vis_simple(
+                    thermal_img=thermal_img,
+                    rgb_imgs=top5_rgb_imgs,
+                    confidence_map=top5_conf,
+                    save_path=save_path
+                )
+                
+                logging.info(f"Saved confidence visualization: {save_path}")
+            except Exception as e:
+                logging.warning(f"Failed to save confidence visualization: {e}")
+        # ==================================================
         
         return recalls, recalls_str
+        
     except Exception as e:
         import traceback
         print(f"ERROR caught: {e}")
-        traceback.print_exc()  # 전체 stack trace 출력
-        breakpoint()
+        traceback.print_exc()
+        breakpoint()      
+        
