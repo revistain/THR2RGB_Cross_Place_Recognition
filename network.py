@@ -44,26 +44,52 @@ class CroCoDecoderBlock(nn.Module):
             nn.Linear(mlp_hidden_dim, dim)
         )
         
-    def forward(self, x, y):
+        # ========== Attention 저장용 ==========
+        self.self_attn_weights = None
+        self.cross_attn_weights = None
+        # ======================================
+        
+    def forward(self, x, y, return_attention=False):
         """
         Args:
-            x: [B, N, D] - decoder input (thermal + mask tokens)
-            encoder_output: [B, M, D] - RGB encoder output (참조할 정보)
+            x: [B, N, D] - decoder input (RGB masked)
+            y: [B, M, D] - encoder output (Thermal reference)
+            return_attention: bool - attention map 반환 여부
         Returns:
             x: [B, N, D] - updated decoder features
         """
         # Step 1: Self-Attention
         x_norm = self.norm1(x)
-        x = x + self.self_attn(x_norm, x_norm, x_norm)[0]
+        if return_attention:
+            self_out, self_attn_weights = self.self_attn(
+                x_norm, x_norm, x_norm, 
+                need_weights=True, 
+                average_attn_weights=True  # [B, N, N]
+            )
+            self.self_attn_weights = self_attn_weights
+        else:
+            self_out = self.self_attn(x_norm, x_norm, x_norm)[0]
+        x = x + self_out
         
         # Step 2: Cross-Attention
         x_norm = self.norm2(x)
         encoder_norm = self.norm_cross(y)
-        x = x + self.cross_attn(
-            query=x_norm,
-            key=encoder_norm,
-            value=encoder_norm
-        )[0]
+        if return_attention:
+            cross_out, cross_attn_weights = self.cross_attn(
+                query=x_norm,
+                key=encoder_norm,
+                value=encoder_norm,
+                need_weights=True,
+                average_attn_weights=True  # [B, N, M]
+            )
+            self.cross_attn_weights = cross_attn_weights
+        else:
+            cross_out = self.cross_attn(
+                query=x_norm,
+                key=encoder_norm,
+                value=encoder_norm
+            )[0]
+        x = x + cross_out
         
         # Step 3: MLP
         x = x + self.mlp(self.norm3(x))

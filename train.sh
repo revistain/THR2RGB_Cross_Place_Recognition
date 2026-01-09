@@ -1,7 +1,7 @@
 # branch: BASELINE
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
-CUDA_VISIBLE_DEVICES=1 \
+CUDA_VISIBLE_DEVICES=4 \
 python3 train_wandb.py \
     --save_dir './logs' \
     --features_dim 768 \
@@ -16,8 +16,8 @@ python3 train_wandb.py \
     --negs_num_per_query 10 \
     --croco_mask_ratio 0.8 \
     --num_decoder_depth 8 \
-    --recon_weight 10 \
-    --use_reranking
+    --recon_weight 10
+    # --use_reranking
 
 # croco-0.8-alpha10.0-decDepth8-contrastiveReconLoss-rerank
     # --use_ssim_recon_loss

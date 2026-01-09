@@ -6,7 +6,9 @@ from torchvision.utils import make_grid
 from utils import get_timestamp
 import cv2
 
-def visualize_reconstruction(model, thermal_img, aligned_rgb, device='cuda', save_path=None):
+# recon_vis.py
+
+def visualize_reconstruction(model, thermal_img, aligned_rgb, device='cuda', save_path=None, return_attention=False):
     """
     Args:
         model: CrossModalVPR_Net
@@ -14,6 +16,7 @@ def visualize_reconstruction(model, thermal_img, aligned_rgb, device='cuda', sav
         aligned_rgb: [1, 3, 224, 224] - aligned RGB image
         device: 'cuda' or 'cpu'
         save_path: Optional path to save the figure
+        return_attention: bool - Attention map 시각화 여부
     """
     model.eval()
     
@@ -53,10 +56,18 @@ def visualize_reconstruction(model, thermal_img, aligned_rgb, device='cuda', sav
         thermal_full = thermal_full + model.module.decoder_pos_embed
         rgb_full = rgb_full + model.module.decoder_pos_embed
         
-        # 8. Decoder
-        for blk in model.module.decoder_blocks:
-            thermal_full = blk(thermal_full, rgb_full)
+        # ========== 8. Decoder (Attention 수집) ==========
+        attention_maps = []
+        for layer_idx, blk in enumerate(model.module.decoder_blocks):
+            thermal_full = blk(thermal_full, rgb_full, return_attention=return_attention)
+            
+            # 마지막 3개 layer의 attention만 저장
+            if return_attention and layer_idx >= len(model.module.decoder_blocks) - 3:
+                if hasattr(blk, 'cross_attn_weights') and blk.cross_attn_weights is not None:
+                    attention_maps.append(blk.cross_attn_weights.detach().cpu())
+        
         thermal_full = model.module.decoder_norm(thermal_full)
+        # =================================================
 
         # ========== Confidence Map 추가 ==========
         if hasattr(model.module, 'confidence_head'):
@@ -83,57 +94,143 @@ def visualize_reconstruction(model, thermal_img, aligned_rgb, device='cuda', sav
     reconstructed_img_denorm = reconstructed_img * std + mean
     
     # ===== 핵심: Visible + Reconstructed 합치기 =====
-    # Visible patches는 원본, Masked patches는 reconstruction 사용
     hybrid_patches = original_patches.clone()  # [1, 256, 588]
-    hybrid_patches[mask] = reconstructed_patches[mask]  # Masked 위치만 reconstruction으로 교체
+    hybrid_patches[mask] = reconstructed_patches[mask]
     
-    hybrid_img = unpatchify_visual(hybrid_patches, patch_size=14)  # [1, 3, 224, 224]
+    hybrid_img = unpatchify_visual(hybrid_patches, patch_size=14)
     hybrid_img_denorm = hybrid_img * std + mean
     
     # Mask 시각화 (16x16 grid)
-    mask_2d = mask.reshape(1, 16, 16).float()  # [1, 16, 16]
+    mask_2d = mask.reshape(1, 16, 16).float()
     mask_img = torch.nn.functional.interpolate(
         mask_2d.unsqueeze(1), size=(224, 224), mode='nearest'
-    ).squeeze(1)  # [1, 224, 224]
+    ).squeeze(1)
     
-    # Plot
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    
-    # Row 1
-    axes[0, 0].imshow(thermal_img_denorm[0].cpu().permute(1, 2, 0).clip(0, 1))
-    axes[0, 0].set_title('Original Thermal', fontsize=14, fontweight='bold')
-    axes[0, 0].axis('off')
-    
-    axes[0, 1].imshow(mask_img[0].cpu(), cmap='RdYlGn_r', vmin=0, vmax=1)
-    axes[0, 1].set_title(f'Mask (Masked={mask.float().mean()*100:.1f}%)', fontsize=14, fontweight='bold')
-    axes[0, 1].axis('off')
-    
-    # ★ 핵심: Hybrid 이미지 (Visible + Reconstructed)
-    axes[0, 2].imshow(hybrid_img_denorm[0].cpu().permute(1, 2, 0).clip(0, 1))
-    axes[0, 2].set_title('Hybrid (Vis+Recon)', fontsize=14, fontweight='bold', color='red')
-    axes[0, 2].axis('off')
-    
-    # Row 2
-    axes[1, 0].imshow(aligned_rgb_denorm[0].cpu().permute(1, 2, 0).clip(0, 1))
-    axes[1, 0].set_title('Aligned RGB (Reference)', fontsize=14, fontweight='bold')
-    axes[1, 0].axis('off')
-    
-    # Reconstruction only (masked 영역만)
-    recon_only = reconstructed_img_denorm.clone()
-    mask_expanded = mask_img.unsqueeze(1).expand(-1, 3, -1, -1)  # [1, 3, 224, 224]
-    recon_only[mask_expanded < 0.5] = 0  # Visible region = black
-    axes[1, 1].imshow(recon_only[0].cpu().permute(1, 2, 0).clip(0, 1))
-    axes[1, 1].set_title('Reconstructed (Masked Only)', fontsize=14, fontweight='bold')
-    axes[1, 1].axis('off')
-    
-    # Reconstruction error (masked 영역에서만)
-    error = (thermal_img_denorm - reconstructed_img_denorm).abs().mean(dim=1)  # [1, 224, 224]
-    error_masked = error.clone()
-    error_masked[mask_img < 0.5] = 0  # Visible 영역은 0으로
-    im = axes[1, 2].imshow(error_masked[0].cpu(), cmap='hot', vmin=0, vmax=0.3)
-    axes[1, 2].set_title('Error (Masked Only)', fontsize=14, fontweight='bold')
-    axes[1, 2].axis('off')
-    plt.colorbar(im, ax=axes[1, 2], fraction=0.046, pad=0.04)
+    # ========== Plot (Attention 포함 여부에 따라) ==========
+    if return_attention and len(attention_maps) > 0:
+        # Attention 있으면 3x4 grid
+        fig = plt.figure(figsize=(20, 15))
+        gs = fig.add_gridspec(3, 4, hspace=0.3, wspace=0.3)
+        
+        # Row 1: 기본 시각화
+        ax00 = fig.add_subplot(gs[0, 0])
+        ax00.imshow(thermal_img_denorm[0].cpu().permute(1, 2, 0).clip(0, 1))
+        ax00.set_title('Original Thermal', fontsize=14, fontweight='bold')
+        ax00.axis('off')
+        
+        ax01 = fig.add_subplot(gs[0, 1])
+        ax01.imshow(mask_img[0].cpu(), cmap='RdYlGn_r', vmin=0, vmax=1)
+        ax01.set_title(f'Mask ({mask.float().mean()*100:.1f}%)', fontsize=14, fontweight='bold')
+        ax01.axis('off')
+        
+        ax02 = fig.add_subplot(gs[0, 2])
+        ax02.imshow(hybrid_img_denorm[0].cpu().permute(1, 2, 0).clip(0, 1))
+        ax02.set_title('Hybrid (Vis+Recon)', fontsize=14, fontweight='bold', color='red')
+        ax02.axis('off')
+        
+        ax03 = fig.add_subplot(gs[0, 3])
+        ax03.imshow(aligned_rgb_denorm[0].cpu().permute(1, 2, 0).clip(0, 1))
+        ax03.set_title('Aligned RGB', fontsize=14, fontweight='bold')
+        ax03.axis('off')
+        
+        # Row 2: Reconstruction + Error + Token PCA
+        ax10 = fig.add_subplot(gs[1, 0])
+        recon_only = reconstructed_img_denorm.clone()
+        mask_expanded = mask_img.unsqueeze(1).expand(-1, 3, -1, -1)
+        recon_only[mask_expanded < 0.5] = 0
+        ax10.imshow(recon_only[0].cpu().permute(1, 2, 0).clip(0, 1))
+        ax10.set_title('Reconstructed (Masked)', fontsize=14, fontweight='bold')
+        ax10.axis('off')
+        
+        ax11 = fig.add_subplot(gs[1, 1])
+        error = (thermal_img_denorm - reconstructed_img_denorm).abs().mean(dim=1)
+        error_masked = error.clone()
+        error_masked[mask_img < 0.5] = 0
+        im = ax11.imshow(error_masked[0].cpu(), cmap='hot', vmin=0, vmax=0.3)
+        ax11.set_title('Error (Masked)', fontsize=14, fontweight='bold')
+        ax11.axis('off')
+        plt.colorbar(im, ax=ax11, fraction=0.046, pad=0.04)
+        
+        # Token PCA
+        ax12 = fig.add_subplot(gs[1, 2])
+        tokens = thermal_full[0].cpu().numpy()  # [256, 768]
+        from sklearn.decomposition import PCA
+        pca = PCA(n_components=3)
+        tokens_pca = pca.fit_transform(tokens)
+        tokens_pca = (tokens_pca - tokens_pca.min()) / (tokens_pca.max() - tokens_pca.min() + 1e-8)
+        tokens_pca_img = tokens_pca.reshape(16, 16, 3)
+        tokens_pca_img = cv2.resize(tokens_pca_img, (224, 224), interpolation=cv2.INTER_NEAREST)
+        ax12.imshow(tokens_pca_img)
+        ax12.set_title(f'Token PCA\n(Var: {pca.explained_variance_ratio_.sum():.2f})', fontsize=12)
+        ax12.axis('off')
+        
+        # Confidence
+        if confidence_map is not None:
+            ax13 = fig.add_subplot(gs[1, 3])
+            from matplotlib import cm as mpl_cm
+            conf_map_2d = confidence_map.numpy().reshape(16, 16)
+            conf_resized = cv2.resize(conf_map_2d, (224, 224), interpolation=cv2.INTER_NEAREST)
+            conf_colored = (mpl_cm.jet(conf_resized)[:, :, :3] * 255).astype(np.uint8)
+            ax13.imshow(conf_colored)
+            ax13.set_title(f'Confidence\n(μ={conf_map_2d.mean():.3f})', fontsize=12)
+            ax13.axis('off')
+        
+        # Row 3: Attention Maps (마지막 3 layers)
+        for i, attn in enumerate(attention_maps):
+            ax = fig.add_subplot(gs[2, i])
+            
+            # [1, 256, 256] → [256, 256]
+            attn_map = attn[0].numpy()
+            
+            # Average over query positions
+            attn_avg = attn_map.mean(axis=0).reshape(16, 16)
+            attn_resized = cv2.resize(attn_avg, (224, 224), interpolation=cv2.INTER_NEAREST)
+            
+            im = ax.imshow(attn_resized, cmap='hot', vmin=0, vmax=attn_avg.max())
+            layer_num = len(model.module.decoder_blocks) - 3 + i
+            ax.set_title(f'Cross-Attn L{layer_num+1}\n(Thermal→RGB)', fontsize=12)
+            ax.axis('off')
+            plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        
+        plt.suptitle('Decoder Analysis with Attention Maps', fontsize=16, fontweight='bold')
+        
+    else:
+        # Attention 없으면 기존 2x3 grid
+        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+        
+        # Row 1
+        axes[0, 0].imshow(thermal_img_denorm[0].cpu().permute(1, 2, 0).clip(0, 1))
+        axes[0, 0].set_title('Original Thermal', fontsize=14, fontweight='bold')
+        axes[0, 0].axis('off')
+        
+        axes[0, 1].imshow(mask_img[0].cpu(), cmap='RdYlGn_r', vmin=0, vmax=1)
+        axes[0, 1].set_title(f'Mask (Masked={mask.float().mean()*100:.1f}%)', fontsize=14, fontweight='bold')
+        axes[0, 1].axis('off')
+        
+        axes[0, 2].imshow(hybrid_img_denorm[0].cpu().permute(1, 2, 0).clip(0, 1))
+        axes[0, 2].set_title('Hybrid (Vis+Recon)', fontsize=14, fontweight='bold', color='red')
+        axes[0, 2].axis('off')
+        
+        # Row 2
+        axes[1, 0].imshow(aligned_rgb_denorm[0].cpu().permute(1, 2, 0).clip(0, 1))
+        axes[1, 0].set_title('Aligned RGB (Reference)', fontsize=14, fontweight='bold')
+        axes[1, 0].axis('off')
+        
+        recon_only = reconstructed_img_denorm.clone()
+        mask_expanded = mask_img.unsqueeze(1).expand(-1, 3, -1, -1)
+        recon_only[mask_expanded < 0.5] = 0
+        axes[1, 1].imshow(recon_only[0].cpu().permute(1, 2, 0).clip(0, 1))
+        axes[1, 1].set_title('Reconstructed (Masked Only)', fontsize=14, fontweight='bold')
+        axes[1, 1].axis('off')
+        
+        error = (thermal_img_denorm - reconstructed_img_denorm).abs().mean(dim=1)
+        error_masked = error.clone()
+        error_masked[mask_img < 0.5] = 0
+        im = axes[1, 2].imshow(error_masked[0].cpu(), cmap='hot', vmin=0, vmax=0.3)
+        axes[1, 2].set_title('Error (Masked Only)', fontsize=14, fontweight='bold')
+        axes[1, 2].axis('off')
+        plt.colorbar(im, ax=axes[1, 2], fraction=0.046, pad=0.04)
+    # ======================================================
     
     plt.tight_layout()
     
@@ -145,7 +242,7 @@ def visualize_reconstruction(model, thermal_img, aligned_rgb, device='cuda', sav
         plt.show()
     
     # ========== Confidence 시각화 추가 (맨 끝) ==========
-    if confidence_map is not None and save_path is not None:
+    if hasattr(model.module, 'confidence_head') and save_path is not None and not return_attention:
         conf_save_path = save_path.replace('.png', '_confidence.png')
         save_confidence_vis_simple(
             thermal_img=thermal_img[0],
@@ -183,14 +280,27 @@ def visualize_during_training(args, model, triplets_dl, device, epoch, save_dir=
     model.eval()
     
     # 첫 번째 batch 가져오기
-    images, _, _, aligned_rgbs = next(iter(triplets_dl))
+    images, _, _, paired_rgbs = next(iter(triplets_dl))
+    if args.use_pos_as_aligned_rgb:
+        assert images.size(0) % args.train_batch_size == 0
+        size_of_batch = int(images.size(0) / args.train_batch_size)
+        pos_rgbs = [images[idx] for idx in range(1, images.size(0), size_of_batch)]
+        pos_rgbs = torch.stack(pos_rgbs)
+        paired_rgbs = pos_rgbs
         
     # Thermal query 1개만 추출 (첫 번째 thermal)
     thermal_img = images[0:1].to(device)  # [1, 3, 224, 224]
-    aligned_rgb = aligned_rgbs[0:1].to(device)  # [1, 3, 224, 224]
+    aligned_rgb = paired_rgbs[0:1].to(device)  # [1, 3, 224, 224]
     
     save_path = f"{save_subdir}/epoch_{epoch:03d}.png"
-    visualize_reconstruction(model, thermal_img, aligned_rgb, device, save_path)
+    visualize_reconstruction(
+        model, 
+        thermal_img, 
+        aligned_rgb, 
+        device, 
+        save_path,
+        return_attention=True
+    )
     
     model.train()
     
@@ -518,7 +628,6 @@ def visualize_reranking_comparison(args, eval_ds,
     
     print(f"Saved summary: {summary_path}")
     
-# inference.py 최상단
 def save_confidence_vis_simple(thermal_img, rgb_img, confidence_map, save_path):
     """
     최소 코드로 3개 이미지 시각화
