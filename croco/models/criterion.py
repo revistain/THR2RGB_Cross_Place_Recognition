@@ -76,17 +76,17 @@ class MaskedMSE(torch.nn.Module):
         # Confidence weighting with normalization
         if confidence_map is not None:
             confidence_map = confidence_map.squeeze(-1)
-            loss = loss * confidence_map  # [B, 256]
-            
+            uncertainty = 1.0 - confidence_map  # 또는 -log(confidence)
+            loss = loss * uncertainty
+
+            # 정규화된 가중 평균
             if self.masked:
-                # Scale-preserving: normalize by confidence sum
-                conf_sum = (confidence_map * mask).sum(dim=-1, keepdim=True) + 1e-8  # [B, 1]
-                loss = (loss * mask).sum(dim=-1, keepdim=True) / conf_sum  # [B, 1]
-                loss = loss.squeeze(-1)  # [B]
+                weight_sum = (uncertainty * mask).sum(dim=-1) + 1e-8
+                loss = (loss * uncertainty * mask).sum(dim=-1) / weight_sum
             else:
-                conf_sum = confidence_map.sum(dim=-1, keepdim=True) + 1e-8  # [B, 1]
-                loss = loss.sum(dim=-1, keepdim=True) / conf_sum  # [B, 1]
-                loss = loss.squeeze(-1)  # [B]
+                weight_sum = uncertainty.sum(dim=-1) + 1e-8
+                loss = (loss * uncertainty).sum(dim=-1) / weight_sum
+            loss = loss.squeeze(-1)  # [B]
         else:
             # MSE
             if self.masked:

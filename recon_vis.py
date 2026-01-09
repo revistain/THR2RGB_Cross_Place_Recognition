@@ -6,6 +6,7 @@ import numpy as np
 from torchvision.utils import make_grid
 from utils import get_timestamp
 import cv2
+from sklearn.decomposition import PCA
 
 def visualize_reconstruction(model, thermal_img, paired_rgb, device='cuda', save_path=None):
     """
@@ -18,10 +19,11 @@ def visualize_reconstruction(model, thermal_img, paired_rgb, device='cuda', save
     """
     model.eval()
     
+    attention_maps = []
     with torch.no_grad():
         # 1. Patch embedding (RGB)
-        rgb_patch = model.module.rgb_backbone.patch_embed(paired_rgb)
-        B, N, D = rgb_patch.shape  # [1, 256, 768]
+        rgb_patch_original = model.module.rgb_backbone.patch_embed(paired_rgb)
+        B, N, D = rgb_patch_original.shape  # [1, 256, 768]
         
         # 2. Positional embedding
         pos_tokens = model.module.rgb_backbone.pos_embed[:, 1:, :]
@@ -30,7 +32,7 @@ def visualize_reconstruction(model, thermal_img, paired_rgb, device='cuda', save
             pos_embed_grid, size=(16, 16), mode='bicubic', align_corners=False
         )
         pos_embed_final = pos_embed_resized.permute(0, 2, 3, 1).flatten(1, 2)
-        rgb_patch = rgb_patch + pos_embed_final
+        rgb_patch = rgb_patch_original + pos_embed_final
         
         # 3. Masking
         mask = model.module.mask_generator(rgb_patch)  # [1, 256]
@@ -43,7 +45,7 @@ def visualize_reconstruction(model, thermal_img, paired_rgb, device='cuda', save
         
         # 5. Thermal features (참조용)
         thermal_full = model.module.thermal_backbone(thermal_img)
-        thermal_full = thermal_full["x_norm_patchtokens"]
+        thermal_original = thermal_original["x_norm_patchtokens"]
         
         # 6. Mask token expansion
         mask_tokens = model.module.mask_token.expand(B, N, -1)
@@ -52,15 +54,17 @@ def visualize_reconstruction(model, thermal_img, paired_rgb, device='cuda', save
         
         # 7. Decoder positional encoding
         rgb_full = rgb_full + model.module.decoder_pos_embed
-        thermal_full = thermal_full + model.module.decoder_pos_embed
+        thermal_full = thermal_original + model.module.decoder_pos_embed
         
         # 8. Decoder (RGB를 thermal 참조해서 복원)
         for blk in model.module.decoder_blocks:
-            rgb_full = blk(rgb_full, thermal_full)  # ← 순서만 바뀜!
+            rgb_full = blk(rgb_full, thermal_full, return_attention=True)  # ← 순서만 바뀜!
+            attention_maps.append(blk.cross_attn_weights.detach().cpu())
         rgb_full = model.module.decoder_norm(rgb_full)
 
         # 9. Prediction
         reconstructed_patches = model.module.prediction_head(rgb_full)  # [1, 256, 588]
+        confidence_patches = model.module.confidence_head(rgb_full)
         
         # 10. Unpatchify
         reconstructed_img = unpatchify_visual(reconstructed_patches, patch_size=14)  # [1, 3, 224, 224]
@@ -90,7 +94,7 @@ def visualize_reconstruction(model, thermal_img, paired_rgb, device='cuda', save
     ).squeeze(1)
     
     # ========== Plot (제목만 수정) ==========
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    fig, axes = plt.subplots(3, 3, figsize=(15, 10))
     
     # Row 1
     axes[0, 0].imshow(paired_rgb_denorm[0].cpu().permute(1, 2, 0).clip(0, 1))
@@ -105,27 +109,81 @@ def visualize_reconstruction(model, thermal_img, paired_rgb, device='cuda', save
     axes[0, 2].set_title('Hybrid (Vis+Recon)', fontsize=14, fontweight='bold', color='red')
     axes[0, 2].axis('off')
     
+    if attention_maps:
+        last_attn = attention_maps[-1]  # [1, H, 256, 256]
+        # 2. Query(모든 RGB 패치)에 대해 평균 -> [1, 256(K)]
+        # 의미: "Thermal 이미지의 각 패치가 RGB 복원에 얼마나 기여했는가?"
+        attn_heatmap = last_attn.mean(dim=1)
+        
+        # 3. Reshape & Interpolate
+        attn_heatmap = attn_heatmap.reshape(1, 16, 16)
+        attn_img = torch.nn.functional.interpolate(
+            attn_heatmap.unsqueeze(0), size=(224, 224), mode='bilinear'
+        ).squeeze()
+        
+        # 4. Plot
+        axes[1, 0].imshow(thermal_img_denorm[0].cpu().permute(1, 2, 0).clip(0, 1), alpha=1.0) # 배경 Thermal
+        im_attn = axes[1, 0].imshow(attn_img.cpu(), cmap='jet', alpha=0.5) # Heatmap 오버레이
+        axes[1, 0].set_title('Cross-Attn (on Thermal)', fontsize=14, fontweight='bold')
+        axes[1, 0].axis('off')
+        # plt.colorbar(im_attn, ax=axes[0, 3], fraction=0.046, pad=0.04) # 공간 부족시 생략
+    else:
+        axes[1, 0].text(0.5, 0.5, 'No Attn Map', ha='center')
+        axes[1, 0].axis('off')
+
     # Row 2
-    axes[1, 0].imshow(thermal_img_denorm[0].cpu().permute(1, 2, 0).clip(0, 1))
-    axes[1, 0].set_title('Paired Thermal (Reference)', fontsize=14, fontweight='bold')  # ← 수정
-    axes[1, 0].axis('off')
+    axes[1, 1].imshow(thermal_img_denorm[0].cpu().permute(1, 2, 0).clip(0, 1))
+    axes[1, 1].set_title('Paired Thermal (Reference)', fontsize=14, fontweight='bold')  # ← 수정
+    axes[1, 1].axis('off')
     
     # Reconstruction only (masked 영역만)
     recon_only = reconstructed_img_denorm.clone()
     mask_expanded = mask_img.unsqueeze(1).expand(-1, 3, -1, -1)
     recon_only[mask_expanded < 0.5] = 0
-    axes[1, 1].imshow(recon_only[0].cpu().permute(1, 2, 0).clip(0, 1))
-    axes[1, 1].set_title('Reconstructed (Masked Only)', fontsize=14, fontweight='bold')
-    axes[1, 1].axis('off')
-    
-    # Reconstruction error (masked 영역에서만)
-    error = (paired_rgb_denorm - reconstructed_img_denorm).abs().mean(dim=1)  # ← RGB 기준
-    error_masked = error.clone()
-    error_masked[mask_img < 0.5] = 0
-    im = axes[1, 2].imshow(error_masked[0].cpu(), cmap='hot', vmin=0, vmax=0.3)
-    axes[1, 2].set_title('Error (Masked Only)', fontsize=14, fontweight='bold')
+    axes[1, 2].imshow(recon_only[0].cpu().permute(1, 2, 0).clip(0, 1))
+    axes[1, 2].set_title('Reconstructed (Masked Only)', fontsize=14, fontweight='bold')
     axes[1, 2].axis('off')
-    plt.colorbar(im, ax=axes[1, 2], fraction=0.046, pad=0.04)
+    
+    # # Reconstruction error (masked 영역에서만)
+    # error = (paired_rgb_denorm - reconstructed_img_denorm).abs().mean(dim=1)  # ← RGB 기준
+    # error_masked = error.clone()
+    # error_masked[mask_img < 0.5] = 0
+    # im = axes[2, 0].imshow(error_masked[0].cpu(), cmap='hot', vmin=0, vmax=0.3)
+    # axes[2, 0].set_title('Error (Masked Only)', fontsize=14, fontweight='bold')
+    # axes[2, 0].axis('off')
+    # plt.colorbar(im, ax=axes[2, 0], fraction=0.046, pad=0.04)
+    
+    # PCA (n_components=3)
+    features_thermal = thermal_original[0].cpu().numpy() # [256, 768]
+    pca = PCA(n_components=3)
+    pca_features = pca.fit_transform(features_thermal) # [256, 3]
+    pca_features = (pca_features - pca_features.min(0)) / (pca_features.max(0) - pca_features.min(0) + 1e-6)
+    pca_img = pca_features.reshape(16, 16, 3)
+    pca_img_resized = cv2.resize(pca_img, (224, 224), interpolation=cv2.INTER_NEAREST)
+    
+    axes[2, 0].imshow(pca_img_resized)
+    axes[2, 0].set_title('Thermal Feature PCA', fontsize=14, fontweight='bold')
+    axes[2, 0].axis('off')
+    
+    # PCA (n_components=3)
+    features_rgb = rgb_patch_original[0].cpu().numpy() # [256, 768]
+    pca = PCA(n_components=3)
+    pca_features = pca.fit_transform(features_rgb) # [256, 3]
+    pca_features = (pca_features - pca_features.min(0)) / (pca_features.max(0) - pca_features.min(0) + 1e-6)
+    pca_img = pca_features.reshape(16, 16, 3)
+    pca_img_resized = cv2.resize(pca_img, (224, 224), interpolation=cv2.INTER_NEAREST)
+    
+    axes[2, 1].imshow(pca_img_resized)
+    axes[2, 1].set_title('Recon RGB Feature PCA', fontsize=14, fontweight='bold')
+    axes[2, 1].axis('off')
+    
+    confidence_patches = confidence_patches.reshape(1, 16, 16)
+    conf_img = torch.nn.functional.interpolate(confidence_patches.unsqueeze(0), size=(224, 224), mode='bilinear').squeeze()
+    
+    # 4. Plot
+    axes[2, 2].imshow(conf_img.cpu(), cmap='jet', alpha=0.5)
+    axes[2, 2].set_title('Confidence Map', fontsize=14, fontweight='bold')
+    axes[2, 2].axis('off')
     
     plt.tight_layout()
     

@@ -10,7 +10,7 @@ python3 train_wandb.py \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 4 \
     --num_trainable_blocks_THERMAL 4 \
-    --comment "CroCo-RGBrecon-maskRatio0.8-reconWeight10-decDepth8-confMapTest" \
+    --comment "CroCo-RGBrecon-maskRatio0.8-reconWeight10-decDepth8-totalVis" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
@@ -30,9 +30,6 @@ python3 train_wandb.py \
     # --num_workers 0 \
     # --use_feature_level_recon_loss \
     # --use_bireconstruction \
-
-    # confidence_map은 decodeMask에서는 구현안되어 있음 (주의!!)
-
 
 
     # --rerank_weight 1 \

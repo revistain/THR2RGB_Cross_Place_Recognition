@@ -11,19 +11,12 @@ import torchvision.models as models
 
 from croco.models.masking import RandomMask
 from croco.models.criterion import MaskedMSE
-        
+from timm.models.layers import DropPath
+
+# network.py
+
 class CroCoDecoderBlock(nn.Module):
-    """
-    CroCo 원본 Decoder Block
-    
-    구조:
-    1. Self-Attention: decoder 내부 token들 간 정보 혼합
-    2. Cross-Attention: RGB encoder output 참조
-    3. MLP: Position-wise feed-forward
-    
-    모두 Pre-LayerNorm + Residual connection 사용
-    """
-    def __init__(self, dim=768, num_heads=12, mlp_ratio=4.0):
+    def __init__(self, dim=768, num_heads=12, mlp_ratio=4.0, drop_path=0.0):
         super().__init__()
         
         # Self-Attention components
@@ -44,32 +37,58 @@ class CroCoDecoderBlock(nn.Module):
             nn.Linear(mlp_hidden_dim, dim)
         )
         
-    def forward(self, x, y):
+        # ========== Attention 저장용 ==========
+        self.self_attn_weights = None
+        self.cross_attn_weights = None
+        # ======================================
+        
+    def forward(self, x, y, return_attention=False):
         """
         Args:
-            x: [B, N, D] - decoder input (thermal + mask tokens)
-            encoder_output: [B, M, D] - RGB encoder output (참조할 정보)
+            x: [B, N, D] - decoder input (RGB masked)
+            y: [B, M, D] - encoder output (Thermal reference)
+            return_attention: bool - attention map 반환 여부
         Returns:
             x: [B, N, D] - updated decoder features
         """
         # Step 1: Self-Attention
         x_norm = self.norm1(x)
-        x = x + self.self_attn(x_norm, x_norm, x_norm)[0]
+        if return_attention:
+            self_out, self_attn_weights = self.self_attn(
+                x_norm, x_norm, x_norm, 
+                need_weights=True, 
+                average_attn_weights=True  # [B, N, N]
+            )
+            self.self_attn_weights = self_attn_weights
+        else:
+            self_out = self.self_attn(x_norm, x_norm, x_norm)[0]
+        x = x + self_out
         
         # Step 2: Cross-Attention
         x_norm = self.norm2(x)
         encoder_norm = self.norm_cross(y)
-        x = x + self.cross_attn(
-            query=x_norm,
-            key=encoder_norm,
-            value=encoder_norm
-        )[0]
+        if return_attention:
+            cross_out, cross_attn_weights = self.cross_attn(
+                query=x_norm,
+                key=encoder_norm,
+                value=encoder_norm,
+                need_weights=True,
+                average_attn_weights=True  # [B, N, M]
+            )
+            self.cross_attn_weights = cross_attn_weights
+        else:
+            cross_out = self.cross_attn(
+                query=x_norm,
+                key=encoder_norm,
+                value=encoder_norm
+            )[0]
+        x = x + cross_out
         
         # Step 3: MLP
         x = x + self.mlp(self.norm3(x))
         
         return x
-
+    
 class GeM(nn.Module):
     def __init__(self, p=3, eps=1e-6, work_with_tokens=False):
         super().__init__()
@@ -177,16 +196,19 @@ class CrossModalVPR_Net(nn.Module):
         """Random masking generator 초기화"""
         self.mask_generator = RandomMask(num_patches, mask_ratio)
         
-    def _set_confidence_head(self, dec_embed_dim, hidden_dim=256):
+    def _set_confidence_head(self, dec_embed_dim, hidden_dim=192):
         self.confidence_head = nn.Sequential(
             nn.Linear(dec_embed_dim, hidden_dim),
-            nn.GELU(),
+            nn.ReLU(),
             nn.Linear(hidden_dim, 1),
             nn.Sigmoid()
         )
         
         nn.init.normal_(self.confidence_head[0].weight, std=0.02)
         nn.init.zeros_(self.confidence_head[0].bias)
+
+        nn.init.zeros_(self.confidence_head[2].weight)
+        nn.init.zeros_(self.confidence_head[2].bias)
         
     def _set_prediction_head(self, dec_embed_dim, patch_size):
         self.prediction_head = nn.Sequential(
