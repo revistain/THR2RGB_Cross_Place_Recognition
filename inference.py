@@ -122,21 +122,15 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                                             batch_size=args.infer_batch_size, pin_memory=(args.device=="cuda"))
         
             database_features = np.empty((eval_ds.database_num, args.features_dim), dtype="float32")
-            if args.use_decode_mask:
-                database_patch_tokens = np.empty((eval_ds.database_num, 256, args.features_dim), dtype="float32")
-            
+            database_patch_features = np.empty((eval_ds.database_num, 16*16, args.features_dim), dtype="float32")
             for inputs, indices, flags in tqdm(database_dataloader, ncols=100):
                 outputs = model(inputs.to(args.device), flags)
                 
                 features = outputs[0].view(-1, args.features_dim)
-                features = features.cpu().numpy()
-                database_features[indices.numpy(), :] = features
+                patch_features = outputs[1].view(-1, 16*16, args.features_dim)
+                database_features[indices.numpy(), :] = features.cpu().numpy()
+                database_patch_features[indices.numpy(), :, :] = patch_features.cpu().numpy()
                 
-                if args.use_decode_mask: 
-                    patches = outputs[1]
-                    patches = patches.cpu().numpy()
-                    database_patch_tokens[indices.numpy(), :] = patches
-
             logging.info(f"Finished extracting {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
 
             ### Extract query features
@@ -148,34 +142,25 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                                             batch_size=queries_infer_batch_size, pin_memory=(args.device=="cuda"))
 
             queries_features = np.empty((eval_ds.queries_num, args.features_dim), dtype="float32")
-            if args.use_decode_mask:
-                queries_patch_tokens = np.empty((eval_ds.queries_num, 256, args.features_dim), dtype="float32")
-
+            queries_patch_features = np.empty((eval_ds.queries_num, 16*16, args.features_dim), dtype="float32")
             for inputs, indices, flags in tqdm(queries_dataloader, ncols=100):
                 outputs = model(inputs.to(args.device), flags)
                 
                 features = outputs[0].view(-1, args.features_dim)
-                features = features.cpu().numpy()
-                queries_features[indices.numpy()-eval_ds.database_num, :] = features
-
-                if args.use_decode_mask:
-                    patches = outputs[1]
-                    patches = patches.cpu().numpy()
-                    queries_patch_tokens[indices.numpy()-eval_ds.database_num, :] = patches
+                patch_features = outputs[1].view(-1, 16*16, args.features_dim)
+                queries_features[indices.numpy()-eval_ds.database_num, :] = features.cpu().numpy()
+                queries_patch_features[indices.numpy()-eval_ds.database_num, :, :] = patch_features.cpu().numpy()
                 # break # for fast debug
-
+                
             logging.info(f"Finished extracting {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
 
         # 3. faiss를 이용하여, L2 distance로 가까운 descriptor 찾기
         faiss_index = faiss.IndexFlatL2(args.features_dim)
         faiss_index.add(database_features)
-        del database_features
         
         start_time = time.time()
         distances, predictions = faiss_index.search(queries_features, max(args.recall_values))
-        del queries_features # predictions: [Query, top20]
         del faiss_index
-        import gc; gc.collect()
         
         #########################
         ### RERANKING Process ###
@@ -184,195 +169,176 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
         if args.use_reranking:                
             torch.cuda.empty_cache()
             ##### 시각화용 #####
-            original_distances = distances.copy()
             original_predictions = predictions.copy()
+            
             ##################
-            with torch.no_grad():
-                # NOTE: decoder에 들어가기 완전 직전 상태를 저장해놔야함
-                if not args.use_decode_mask:
-                    # rerank1. RGB database 전부 추출 (before decoder)
-                    # FIXME: 이거 위에꺼 이용해서 합칠 수 있는데, 일단 그렇게 느리지 않으니 일단 두기
-                    start_time = time.time()
-
-                    database_subset_ds = Subset(eval_ds, list(range(eval_ds.database_num)))
-                    database_dataloader = DataLoader(dataset=database_subset_ds, num_workers=args.num_workers,
-                                                    batch_size=args.infer_batch_size, pin_memory=(args.device=="cuda"))
-                
-                    masked_database_features = np.empty((eval_ds.database_num, 256, args.features_dim), dtype="float32")
-                    model.module.use_masked_inference = True
-                    for inputs, indices, flags in tqdm(database_dataloader, ncols=100):
-                        features = model(inputs.to(args.device), flags)
-                        encoded_features = features[1].reshape(inputs.size(0), 256, -1).cpu().numpy()
-                        masked_database_features[indices.numpy(), :, :] = encoded_features
-                    model.module.use_masked_inference = False
-
-                    logging.info(f"Finished extracting (FOR RERANK) {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
-
-                    # rerank2. masked된 query 전부 추출 (before decoder)
-                    start_time = time.time()
-                    queries_infer_batch_size = args.infer_batch_size
-                    queries_subset_ds = Subset(eval_ds, list(range(eval_ds.database_num, len(eval_ds))))
-                    queries_dataloader = DataLoader(dataset=queries_subset_ds, num_workers=args.num_workers,
-                                                    batch_size=queries_infer_batch_size, pin_memory=(args.device=="cuda"))
-
-                    queries_features_mask = np.empty((eval_ds.queries_num, 256), dtype="bool")
-                    masked_queries_features = np.empty((eval_ds.queries_num, 256, args.features_dim), dtype="float32")
-                    model.module.use_masked_inference = True
-                    for inputs, indices, flags in tqdm(queries_dataloader, ncols=100):
-                        features = model(inputs.to(args.device), flags, return_mask=True)
-                        encoded_features = features[1].reshape(inputs.size(0), 256, -1).cpu().numpy()
-                        masked_queries_features[indices.numpy()-eval_ds.database_num,:,:] = encoded_features
-                        queries_features_mask[indices.numpy()-eval_ds.database_num,:] = features[3].detach().cpu().numpy()
-                    model.module.use_masked_inference = False
-
-                    logging.info(f"Finished extracting (FOR RERANK) {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
-                else:
-                    queries_features_mask = np.empty((eval_ds.queries_num, 256), dtype="bool")
-                    # 뽑아놓은 encoded feature에 masking, token 채우기, pos_emb 넣기
-                    # 1. database feature들 추출
-                    start_time = time.time()
-                    inf_batch_size = args.infer_batch_size
-                    database_subset_ds = Subset(eval_ds, list(range(eval_ds.database_num)))
-
-                    for i in tqdm(range(0, len(database_subset_ds), inf_batch_size), desc="Prep DB for Rerank"):
-                        # RAM에서 배치만큼 가져오기
-                        batch_np = database_patch_tokens[i : i + inf_batch_size]
-                        
-                        # GPU로 올려서 연산 (Pos Embed 더하기)
-                        batch_tensor = torch.from_numpy(batch_np).to(args.device)
-                        batch_encoded = batch_tensor + model.module.decoder_pos_embed
-                        
-                        # 다시 RAM에 저장
-                        database_patch_tokens[i : i + inf_batch_size] = batch_encoded.cpu().numpy()
-                        
-                    masked_database_features = database_patch_tokens
-                    logging.info(f"Finished Adding Decode things {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
-                       
-                    ######
-                    start_time = time.time()
-                    queries_subset_ds = Subset(eval_ds, list(range(eval_ds.database_num, len(eval_ds))))
-
-                    for i in tqdm(range(0, len(queries_subset_ds), inf_batch_size), desc="Prep Query for Rerank", ncols=100):
-                        batch_np = queries_patch_tokens[i : i + inf_batch_size]
-                        
-                        # 2. GPU로 올리기
-                        batch_tensor = torch.from_numpy(batch_np).to(args.device) # [B, 256, 768]
-                        current_batch_size = batch_tensor.shape[0]
-                        
-                        # 3. Masking 생성
-                        # model.mask_generator 사용
-                        mask = model.module.mask_generator(batch_tensor) # [B, 256]
-                        queries_features_mask[i : i + inf_batch_size,:] = mask.detach().cpu()
-                        
-                        # 4. Add Mask Token (Token 교체)
-                        # mask_token 확장: [1, 1, 768] -> [B, 256, 768]
-                        mask_token_expanded = model.module.mask_token.expand(current_batch_size, 256, args.features_dim)
-                        
-                        batch_visible = batch_tensor.clone()
-                        batch_visible[mask] = mask_token_expanded[mask] # True인 곳을 마스크 토큰으로 덮어쓰기
-                        
-                        # 5. Add Pos Emb
-                        batch_encoded = batch_visible + model.module.decoder_pos_embed
-
-                        # 6. Save to RAM (Feature & Mask)
-                        queries_patch_tokens[i : i + inf_batch_size] = batch_encoded.cpu().numpy()
-                    masked_queries_features = queries_patch_tokens
-                    logging.info(f"Finished Adding Decode things {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")                    
-                        
             # rerank3. Decoder 쭉쭉 태워서 rerank 진행하기
             # masked_database_features.shape: [1197, 256, 768]
             RERANKING_TOP_K = 5
             RERANK_BATCH_SIZE = 32
             reranked_predictions = predictions.copy()  # 원본 보존
-            reconstruction_criterion = MaskedMSE(
-                norm_pix_loss=False,
-                masked=True,
-                reduction='none'
-            )
             reconstruction_losses_dict = {}
             
-            top1_change_count = 0
             total_count = 0
+            top1_change_count = 0
             with torch.no_grad():
                 # Batch 단위로 처리
                 num_queries = eval_ds.queries_num
                 num_batches = (num_queries + RERANK_BATCH_SIZE - 1) // RERANK_BATCH_SIZE
                 
-                for batch_idx in tqdm(range(num_batches), desc="Reranking", ncols=100):
-                    # Batch 범위
-                    start_idx = batch_idx * RERANK_BATCH_SIZE
-                    end_idx = min(start_idx + RERANK_BATCH_SIZE, num_queries)
-                    batch_size = end_idx - start_idx
-                    
-                    # a. Query thermal encoding (batch)
-                    encoded_queries = masked_queries_features[start_idx:end_idx]  # [B, 256, 768]
-                    encoded_queries = torch.tensor(encoded_queries, dtype=torch.float32).to('cuda')
-                    
-                    # b. Top-K database RGB encoding (batch)
-                    top_k_db_indices_batch = predictions[start_idx:end_idx, :RERANKING_TOP_K]  # [B, K]
-                    
-                    # Flatten indices to fetch all at once
-                    all_db_indices = top_k_db_indices_batch.flatten()  # [B*K]
-                    encoded_dbs_flat = masked_database_features[all_db_indices]  # [B*K, 256, 768]
-                    encoded_dbs_flat = torch.tensor(encoded_dbs_flat, dtype=torch.float32).to('cuda')
-                    encoded_dbs = encoded_dbs_flat.reshape(batch_size, RERANKING_TOP_K, 256, -1)  # [B, K, 256, 768]
-                    
-                    # c. Query batch 생성 (각 query를 K번 반복)
-                    encoded_query_batch = encoded_queries.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1)  # [B, K, 256, 768]
-                    
-                    # Reshape for decoder: [B*K, 256, 768]
-                    encoded_query_flat = encoded_query_batch.reshape(-1, 256, encoded_queries.size(-1))
-                    encoded_dbs_flat = encoded_dbs.reshape(-1, 256, encoded_dbs.size(-1))
-                    
-                    # d. Decoder 통과
-                    thermal_dec = encoded_query_flat
-                    for blk in model.module.decoder_blocks:
-                        thermal_dec = blk(thermal_dec, encoded_dbs_flat)
-                    thermal_full_dec = model.module.decoder_norm(thermal_dec)
-                    
-                    # e. Reconstruction
-                    reconstructed_patches = model.module.prediction_head(thermal_full_dec)  # [B*K, 256, 588]
-                    
-                    # 추가! confidence score 패치 시각화 추가
-                    if args.use_confidence_map:
-                        confidence_score_map = model.module.confidence_head(thermal_full_dec)  # [B, 256]
-                    # confidence_map 시각화(grayscale), rgb/thermal 시각화, rgb/thermal과 confidence map 겹친 사진 시각화
-                    
-                    # f. Target patches (batch)
-                    query_abs_indices = list(range(eval_ds.database_num + start_idx, eval_ds.database_num + end_idx))
-                    query_imgs = torch.stack([eval_ds[idx][0] for idx in query_abs_indices]).to('cuda')  # [B, 3, 224, 224]
-                    query_imgs_batch = query_imgs.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1, -1)  # [B, K, 3, 224, 224]
-                    query_imgs_flat = query_imgs_batch.reshape(-1, *query_imgs.shape[1:])  # [B*K, 3, 224, 224]
-                    target_patches = patchify(query_imgs_flat)  # [B*K, 256, 588]
-                    
-                    # g. Masks (batch)
-                    masks_batch = queries_features_mask[start_idx:end_idx]  # [B, 256]
-                    masks_batch = torch.tensor(masks_batch, dtype=torch.bool).to('cuda')
-                    masks_flat = masks_batch.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1)  # [B, K, 256]
-                    masks_flat = masks_flat.reshape(-1, 256)  # [B*K, 256]
-                    
-                    # h. Reconstruction loss
-                    loss = reconstruction_criterion(
-                        pred=reconstructed_patches,
-                        mask=masks_flat,
-                        target=target_patches
-                    )  # [B*K]
-                    
-                    # i. Reshape and rerank
-                    loss = loss.reshape(batch_size, RERANKING_TOP_K)  # [B, K]
-                    
-                    for i, query_idx in enumerate(range(start_idx, end_idx)):
-                        reconstruction_losses = loss[i].cpu().numpy()
-                        reranked_order = np.argsort(reconstruction_losses)
+                try:
+                    for batch_idx in tqdm(range(num_batches), desc="Reranking", ncols=100):
+                        start_idx = batch_idx * RERANK_BATCH_SIZE
+                        end_idx = min(start_idx + RERANK_BATCH_SIZE, num_queries)
+                        batch_size = end_idx - start_idx
+
+                        # a. Query thermal encoding (batch)
+                        encoded_queries = queries_patch_features[start_idx:end_idx]  # [B, 256, 768]
+                        encoded_queries = torch.tensor(encoded_queries, dtype=torch.float32).to('cuda')
+                        encoded_queries += model.module.decoder_pos_embed
+
+                        # b. Top-K database RGB encoding (batch)
+                        top_k_db_indices_batch = predictions[start_idx:end_idx, :RERANKING_TOP_K]  # [B, K]
+
+                        # c. Flatten indices to fetch all at once
+                        all_db_indices = top_k_db_indices_batch.flatten() # [B*K]
+                        encoded_dbs_flat = database_patch_features[all_db_indices]  # [B*K, 256, 768]
+                        encoded_dbs_flat = torch.tensor(encoded_dbs_flat, dtype=torch.float32).to('cuda')
+                        encoded_dbs = encoded_dbs_flat.reshape(batch_size, RERANKING_TOP_K, 256, -1)  # [B, K, 256, 768]
+                        encoded_dbs += model.module.decoder_pos_embed
                         
-                        reconstruction_losses_dict[query_idx] = reconstruction_losses.tolist()
+                        # encoded_dbs: [32, 5, 256, 768]
+                        # encoded_queries: [32, 768]
+
+                        # d. Query batch 생성 (각 query를 K번 반복)
+                        encoded_query_batch = encoded_queries.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1)  # [B, K, 256, 768]
                         
-                        top_k_db_indices = top_k_db_indices_batch[i]
-                        reranked_predictions[query_idx, :RERANKING_TOP_K] = top_k_db_indices[reranked_order]
+                        # e. Reshape for decoder: [B*K, 256, 768]
+                        encoded_query_flat = encoded_query_batch.reshape(-1, 256, encoded_queries.size(-1))
+                        encoded_dbs_flat = encoded_dbs.reshape(-1, 256, encoded_dbs.size(-1))
                         
-                        if predictions[query_idx, 0] != reranked_predictions[query_idx, 0]:
-                            top1_change_count += 1
-                        total_count += 1
+                        # f. Decoder 통과 (thermal-rgb pair)
+                        last_block = None
+                        thermal_dec = encoded_query_flat.clone()
+                        for blk in model.module.decoder_thermal_blocks:
+                            thermal_dec = blk(
+                                thermal_dec,
+                                encoded_dbs_flat,
+                                return_attention=True
+                            )
+                            last_block = blk
+                        thermal_dec = model.module.decoder_norm(thermal_dec)
+                        thermal_cross_attn_map = last_block.cross_attn_weights
+                        
+                        rgb_dec = encoded_dbs_flat.clone()
+                        for blk in model.module.decoder_rgb_blocks:
+                            rgb_dec = blk(
+                                rgb_dec,
+                                encoded_query_flat,
+                                return_attention=True
+                            )
+                            last_block = blk
+                        rgb_dec = model.module.decoder_norm(rgb_dec)
+                        rgb_cross_attn_map = last_block.cross_attn_weights
+                        
+                        # ==========================================================
+                        # ★ LoFTR Concept: Dual-Softmax Scoring 추가 구현
+                        # ==========================================================
+                        #
+                        # 1. RGB Map의 차원을 Thermal Map 기준으로 맞추기 (Transpose)
+                        # rgb_cross_attn_map: [Batch, RGB_Query, Thermal_Key]
+                        # -> [Batch, Thermal_Key, RGB_Query] 형태로 변환 (즉, Thermal x RGB)
+                        rgb_map_transposed = rgb_cross_attn_map.transpose(1, 2)
+                        #
+                        # 2. 상호 검증 (Dual-Softmax 개념)
+                        # 두 맵을 곱하면 "서로가 서로를 볼 때"만 값이 살아남음
+                        mutual_agreement = thermal_cross_attn_map * rgb_map_transposed # [B*K, 256, 256]
+                        #
+                        # ========== Mutual Agreement 통계 저장 ==========
+                        if batch_idx == 0:  # 첫 배치만 저장 (또는 전체 저장하려면 이 조건 제거)
+                            # 통계 계산
+                            ma_flat = mutual_agreement.view(mutual_agreement.size(0), -1)  # [B*K, 65536]
+                            
+                            stats = {
+                                'mean': ma_flat.mean(dim=1).cpu().numpy(),
+                                'std': ma_flat.std(dim=1).cpu().numpy(),
+                                'max': ma_flat.max(dim=1)[0].cpu().numpy(),
+                                'min': ma_flat.min(dim=1)[0].cpu().numpy(),
+                                'median': ma_flat.median(dim=1)[0].cpu().numpy(),
+                            }
+                            
+                            # Threshold 통계
+                            thresholds = [0.001, 0.005, 0.01, 0.05, 0.1]
+                            threshold_counts = {}
+                            for th in thresholds:
+                                mask = (mutual_agreement > th)
+                                counts = mask.sum(dim=(1, 2)).cpu().numpy()
+                                threshold_counts[th] = counts
+                            
+                            # 로그 파일 저장
+                            log_path = os.path.join(args.save_dir, 'mutual_agreement_logs', f'epoch_{args.current_epoch:03d}_batch_{batch_idx:03d}.txt')
+                            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                            
+                            with open(log_path, 'w') as f:
+                                f.write(f"Epoch {args.current_epoch} - Batch {batch_idx}\n")
+                                f.write(f"Shape: {mutual_agreement.shape}\n")
+                                f.write("="*60 + "\n\n")
+                                
+                                # 각 샘플별 통계
+                                for b in range(min(5, mutual_agreement.size(0))):  # 처음 5개만
+                                    f.write(f"Sample {b} (Query {start_idx + b // RERANKING_TOP_K}, Rank {b % RERANKING_TOP_K}):\n")
+                                    f.write(f"  Mean:   {stats['mean'][b]:.6f}\n")
+                                    f.write(f"  Std:    {stats['std'][b]:.6f}\n")
+                                    f.write(f"  Max:    {stats['max'][b]:.6f}\n")
+                                    f.write(f"  Min:    {stats['min'][b]:.6f}\n")
+                                    f.write(f"  Median: {stats['median'][b]:.6f}\n")
+                                    f.write(f"  Threshold counts:\n")
+                                    for th in thresholds:
+                                        f.write(f"    > {th:.3f}: {threshold_counts[th][b]:.0f} / 65536 ({100*threshold_counts[th][b]/65536:.2f}%)\n")
+                                    f.write("\n")
+                                
+                                # 전체 통계
+                                f.write("="*60 + "\n")
+                                f.write("Overall Statistics (all B*K samples):\n")
+                                f.write(f"  Mean:   {stats['mean'].mean():.6f} ± {stats['mean'].std():.6f}\n")
+                                f.write(f"  Max:    {stats['max'].mean():.6f} ± {stats['max'].std():.6f}\n")
+                                f.write(f"  Median: {stats['median'].mean():.6f} ± {stats['median'].std():.6f}\n")
+                                f.write(f"\n  Average threshold counts:\n")
+                                for th in thresholds:
+                                    avg_count = threshold_counts[th].mean()
+                                    f.write(f"    > {th:.3f}: {avg_count:.1f} / 65536 ({100*avg_count/65536:.2f}%)\n")
+                            
+                            print(f"Saved mutual agreement log: {log_path}")
+                        # ================================================
+                        break
+                        #
+                        
+                        # (선택) 방법 B: 확실한 매칭 개수만 세기 (Hard Count)
+                        # threshold = 0.1 # 예: 확률 10% 이상인 것만 인정
+                        threshold = 0.01
+                        mask = (mutual_agreement > threshold)
+                        num_over_threshold = mask.sum(dim=(1, 2))  # [B*K]
+                        total_points = mutual_agreement.size(1) * mutual_agreement.size(2)  # 256*256 = 65536
+
+                        # Print
+                        for b in range(num_over_threshold.size(0)):
+                            print(f"Sample {b}: threshold over point {num_over_threshold[b].item():.0f} / {total_points}")
+                        rerank_scores_flat = num_over_threshold
+                        #
+                        # 4. 배치 형태로 복원 [B, K]
+                        # 이 점수가 높을수록 두 이미지가 진짜 짝꿍일 확률이 높음
+                        rerank_scores_batch = rerank_scores_flat.view(batch_size, RERANKING_TOP_K)
+                        # TODO: 여기서 rerank_scores_batch를 이용해 순위를 다시 정렬하거나 저장
+                        # 예: final_scores[start_idx:end_idx] = rerank_scores_batch.cpu()
+                        # ==========================================================
+                        
+                        # save_simple_cross_attn(rgb_cross_attn_map, "./test.png")
+                        
+                except Exception as e:
+                    import traceback
+                    print(f"ERROR caught: {e}")
+                    traceback.print_exc()
+                    breakpoint()
 
                 logging.info(f"Reranking completed in {time.time() - start_time:.2f} s")
                 print(f"RERANK: changed {top1_change_count} / {total_count}")
@@ -395,6 +361,10 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                     )
                 #########################
                 predictions = reranked_predictions
+        
+        import gc; gc.collect()
+        del database_features
+        del queries_features # predictions: [Query, top20]
         
         # 4. positive query(정답)가 몇 번째 top-N에 속하는지 검사하기
         positives_per_query = eval_ds.get_positives()
@@ -580,3 +550,16 @@ def fuse_inference(args, eval_ds, models):
             recalls_str[key][k] = ", ".join([f"{method[k]}/{key}  R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, recalls[key][k])])
 
     return recalls, recalls_str
+
+                        # for i, query_idx in enumerate(range(start_idx, end_idx)):
+                        #     reconstruction_losses = loss[i].cpu().numpy()
+                        #     reranked_order = np.argsort(reconstruction_losses)
+                            
+                        #     reconstruction_losses_dict[query_idx] = reconstruction_losses.tolist()
+                            
+                        #     top_k_db_indices = top_k_db_indices_batch[i]
+                        #     reranked_predictions[query_idx, :RERANKING_TOP_K] = top_k_db_indices[reranked_order]
+                            
+                        #     if predictions[query_idx, 0] != reranked_predictions[query_idx, 0]:
+                        #         top1_change_count += 1
+                        #     total_count += 1

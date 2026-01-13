@@ -13,17 +13,7 @@ from croco.models.masking import RandomMask
 from croco.models.criterion import MaskedMSE
         
 class CroCoDecoderBlock(nn.Module):
-    """
-    CroCo 원본 Decoder Block
-    
-    구조:
-    1. Self-Attention: decoder 내부 token들 간 정보 혼합
-    2. Cross-Attention: RGB encoder output 참조
-    3. MLP: Position-wise feed-forward
-    
-    모두 Pre-LayerNorm + Residual connection 사용
-    """
-    def __init__(self, dim=768, num_heads=12, mlp_ratio=4.0):
+    def __init__(self, dim=768, num_heads=12, mlp_ratio=4.0, drop_path=0.0):
         super().__init__()
         
         # Self-Attention components
@@ -44,32 +34,58 @@ class CroCoDecoderBlock(nn.Module):
             nn.Linear(mlp_hidden_dim, dim)
         )
         
-    def forward(self, x, y):
+        # ========== Attention 저장용 ==========
+        self.self_attn_weights = None
+        self.cross_attn_weights = None
+        # ======================================
+        
+    def forward(self, x, y, return_attention=False):
         """
         Args:
-            x: [B, N, D] - decoder input (thermal + mask tokens)
-            encoder_output: [B, M, D] - RGB encoder output (참조할 정보)
+            x: [B, N, D] - decoder input (RGB masked)
+            y: [B, M, D] - encoder output (Thermal reference)
+            return_attention: bool - attention map 반환 여부
         Returns:
             x: [B, N, D] - updated decoder features
         """
         # Step 1: Self-Attention
         x_norm = self.norm1(x)
-        x = x + self.self_attn(x_norm, x_norm, x_norm)[0]
+        if return_attention:
+            self_out, self_attn_weights = self.self_attn(
+                x_norm, x_norm, x_norm, 
+                need_weights=True, 
+                average_attn_weights=True  # [B, N, N]
+            )
+            self.self_attn_weights = self_attn_weights
+        else:
+            self_out = self.self_attn(x_norm, x_norm, x_norm)[0]
+        x = x + self_out
         
         # Step 2: Cross-Attention
         x_norm = self.norm2(x)
         encoder_norm = self.norm_cross(y)
-        x = x + self.cross_attn(
-            query=x_norm,
-            key=encoder_norm,
-            value=encoder_norm
-        )[0]
+        if return_attention:
+            cross_out, cross_attn_weights = self.cross_attn(
+                query=x_norm,
+                key=encoder_norm,
+                value=encoder_norm,
+                need_weights=True,
+                average_attn_weights=True  # [B, N, M]
+            )
+            self.cross_attn_weights = cross_attn_weights
+        else:
+            cross_out = self.cross_attn(
+                query=x_norm,
+                key=encoder_norm,
+                value=encoder_norm
+            )[0]
+        x = x + cross_out
         
         # Step 3: MLP
         x = x + self.mlp(self.norm3(x))
         
         return x
-
+    
 class CroCoOnlyCrossDecoderBlock(nn.Module):
     """
     CroCo 원본 Decoder Block
@@ -181,7 +197,6 @@ class CrossModalVPR_Net(nn.Module):
         self.rgb_backbone = get_backbone(pretrained_foundation, foundation_model_path)
         self.thermal_backbone = get_backbone(pretrained_foundation, foundation_model_path)
         self.output_dim = 768
-        self.use_single_pass = args.use_single_pass
         self.use_masked_inference = False
         self.use_feature_level_recon_loss = args.use_feature_level_recon_loss
         self.use_confidence_map = args.use_confidence_map
@@ -193,12 +208,20 @@ class CrossModalVPR_Net(nn.Module):
         dec_depth = args.num_decoder_depth
         dec_num_heads = 16
         if args.use_only_cross_decoder:
-            self.decoder_blocks = nn.ModuleList([
+            self.decoder_thermal_blocks = nn.ModuleList([
+                CroCoOnlyCrossDecoderBlock(self.output_dim, dec_num_heads) 
+                for _ in range(dec_depth)
+            ])
+            self.decoder_rgb_blocks = nn.ModuleList([
                 CroCoOnlyCrossDecoderBlock(self.output_dim, dec_num_heads) 
                 for _ in range(dec_depth)
             ])
         else:
-            self.decoder_blocks = nn.ModuleList([
+            self.decoder_thermal_blocks = nn.ModuleList([
+                CroCoDecoderBlock(self.output_dim, dec_num_heads) 
+                for _ in range(dec_depth)
+            ])
+            self.decoder_rgb_blocks = nn.ModuleList([
                 CroCoDecoderBlock(self.output_dim, dec_num_heads) 
                 for _ in range(dec_depth)
             ])
@@ -211,19 +234,11 @@ class CrossModalVPR_Net(nn.Module):
         self._set_prediction_head(self.output_dim, 14)
         self._set_confidence_head(self.output_dim, 16*16)
         
-        if args.use_confidence_map:
-            # FIXME: 왜 이따구로 짰었지, 걍 forward에서 None들어오는지로 판단하게 바꾸기(언젠가))
-            self.reconstruction_criterion = MaskedMSE(
-                norm_pix_loss=False,
-                masked=True,
-                loss_type=self.recon_loss_type
-            )
-        else:
-            self.reconstruction_criterion = MaskedMSE(
-                norm_pix_loss=False,
-                masked=True,
-                loss_type=self.recon_loss_type
-            )
+        self.reconstruction_criterion = MaskedMSE(
+            norm_pix_loss=False,
+            masked=True,
+            loss_type=self.recon_loss_type
+        )
 
         # 2. Aggregation Layer (각각 따로 두는 것을 추천)
         # GeM의 파라미터 p가 모달리티별로 다르게 학습될 수 있도록 분리합니다.
@@ -303,53 +318,54 @@ class CrossModalVPR_Net(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], channels, h * patch_size, h * patch_size))
         return imgs
     
-    def croco_like_encoder(self, x):
+    def croco_like_encoder(self, x, modality='thermal'):
         # thermal       : torch.Size([4, 3, 224, 224])
-        # aligned_rgb   : torch.Size([4, 3, 224, 224])
+        # paired_rgb   : torch.Size([4, 3, 224, 224])
         
         # 1. 먼저 thermal의 patch_embedding한 걸 가져온다
-        thermal_patch = self.thermal_backbone.patch_embed(x)
-        patch_B, patch_N, patch_D = thermal_patch.shape  # N=256, D=768
+        if modality == 'thermal':
+            current_backbone = self.thermal_backbone
+        elif modality == 'rgb':
+            current_backbone = self.rgb_backbone
+        else:
+            raise ValueError(f"Wrong Modality: {modality} in function::croco_like_encoder")
+        
+        image_patch = current_backbone.patch_embed(x)
+        patch_B, patch_N, patch_D = image_patch.shape  # N=256, D=768
         
         # 2. positional embedding도 구해서 더해준다.
-        pos_tokens = self.thermal_backbone.pos_embed[:, 1:, :]
+        pos_tokens = current_backbone.pos_embed[:, 1:, :]
         pos_embed_grid = pos_tokens.reshape(1, 37, 37, 768).permute(0, 3, 1, 2) # (BHWC) => (BCHW)
         pos_embed_resized = F.interpolate(pos_embed_grid, size=(16, 16), mode='bicubic', align_corners=False)
         pos_embed_final = pos_embed_resized.permute(0, 2, 3, 1).flatten(1, 2) # (BCHW) => (BNC)
-        thermal_patch = thermal_patch + pos_embed_final  # [B, 256, 768]
+        image_patch = image_patch + pos_embed_final  # [B, 256, 768]
         
         # 3. patch embedding을 masking 해준다.
-        mask = self.mask_generator(thermal_patch)
-        thermal_visible = thermal_patch[~mask].reshape(patch_B, -1, patch_D)
+        mask = self.mask_generator(image_patch)
+        thermal_visible = image_patch[~mask].reshape(patch_B, -1, patch_D)
         
         # 4. unmasked된 patch들만 DINOv2 통과시키기
-        for blk in self.thermal_backbone.blocks:
+        for blk in current_backbone.blocks:
             thermal_visible = blk(thermal_visible)
-        thermal_visible = self.thermal_backbone.norm(thermal_visible)
+        thermal_visible = current_backbone.norm(thermal_visible)
 
         return thermal_visible, mask, patch_B, patch_N, patch_D
 
     def croco_encoded_mask_expension(self, thermal_visible, mask, patch_B, patch_N, patch_D):
         # CROCO로 masking된 부분 mask token으로 채워넣기
-        try:
-            mask_tokens = self.mask_token.expand(patch_B, patch_N, -1) # [B, 256, 768]
-            thermal_full = mask_tokens.clone()
-            for i in range(patch_B):
-                thermal_full[i, ~mask[i]] = thermal_visible[i]
-            thermal_full = thermal_full.reshape(patch_B, -1, patch_D)
-        except Exception as e:
-            print("Error: ", e)
-            breakpoint()
+        thermal_full = self.mask_token.expand(patch_B, patch_N, -1).clone()
+        thermal_full[~mask] = thermal_visible.flatten(0, 1)
+        thermal_full = thermal_full.view(patch_B, patch_N, patch_D)
         return thermal_full
     
-    def forward_model(self, x, aligned_rgb=None, modality='rgb', return_masked_patch=False):
+    def forward_model(self, x, paired_rgb=None, modality='rgb', return_masked_patch=False):
         """단일 모달리티에 대한 Forward"""
         # self.use_masked_inference: rerank를 위해, decoder에 들어가기 바로 전 단계를 뱉는다
         
         global_desc = None
         recon_loss = None
-        mask = None
-        masked_patch = None
+        mask_thermal = None
+        masked_patch_thermal = None
         if modality == 'rgb':
             if self.use_masked_inference:
                 rgb_full = self.rgb_backbone(x)
@@ -362,117 +378,60 @@ class CrossModalVPR_Net(nn.Module):
         elif modality == 'thermal':
             if self.training:
                 # 1-4. masked thermal encoder
-                thermal_visible, mask, patch_B, patch_N, patch_D = self.croco_like_encoder(x)
+                thermal_visible, mask_thermal, patch_B, patch_N, patch_D = self.croco_like_encoder(x, modality='thermal')
+                rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb = self.croco_like_encoder(paired_rgb, modality='rgb')
                 
-                # 5. aligned RGB도 feature tokens 추출하기
-                rgb_full = self.rgb_backbone(aligned_rgb)
-                rgb_full = rgb_full["x_norm_patchtokens"] 
+                # 5. paired RGB도 feature tokens 추출하기
+                paired_thermal_full = self.thermal_backbone(x)
+                paired_thermal_full = paired_thermal_full["x_norm_patchtokens"] 
+                paired_rgb_full = self.rgb_backbone(paired_rgb)
+                paired_rgb_full = paired_rgb_full["x_norm_patchtokens"]
                 
                 # 6. Mask token expansion
-                thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask, patch_B, patch_N, patch_D)
-            
+                thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
+                rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb)
+                
+                # out을 미리 저장
+                out = {"x_norm_patchtokens": paired_thermal_full.clone()}
+                if return_masked_patch: masked_patch_thermal = thermal_full # 이후로 안건들여서 clone안해도 됨
+                
                 # 7. Decoder Positional Encoding
                 thermal_full_dec = thermal_full + self.decoder_pos_embed  # [B, 256, 768]
-                rgb_full = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
+                rgb_full_dec = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
+                paired_thermal_full = paired_thermal_full + self.decoder_pos_embed  # [B, 256, 768]
+                paired_rgb_full = paired_rgb_full + self.decoder_pos_embed  # [B, 256, 768]
                 
                 # 8. decoder 통과시키기
-                for blk in self.decoder_blocks:
-                    thermal_full_dec = blk(thermal_full_dec, rgb_full)
+                for blk in self.decoder_thermal_blocks:
+                    thermal_full_dec = blk(thermal_full_dec, paired_rgb_full)
                 thermal_full_dec = self.decoder_norm(thermal_full_dec)
-                
-                def calculate_contrastive_recon_loss(pred_pos, pred_negs, mask, target, confidence_map=None, method='infoNCE'):
-                    """
-                    pred_pos: [B, 256, 588] - positive reconstruction
-                    pred_negs: [B, N, 256, 588] - N negative reconstructions
-                    mask: [B, 256]
-                    target: [B, 256, 588]
-                    """
-                    # Positive loss
-                    loss_pos = self.reconstruction_criterion(
-                        pred=pred_pos,
-                        mask=mask,
-                        target=target
-                    )  # [B] or scalar
-                    
-                    # Negative losses
-                    B, N = pred_negs.shape[:2]
-                    loss_negs = []
-                    
-                    for n in range(N):
-                        loss_neg = self.reconstruction_criterion(
-                            pred=pred_negs[:, n],  # [B, 256, 588]
-                            mask=mask,
-                            target=target,
-                        )  # [B] or scalar
-                        loss_negs.append(loss_neg)
-                    
-                    loss_negs = torch.stack(loss_negs, dim=0)  # [N, B] or [N]
-                    
-                    loss_method = method
-                    if loss_method == 'MEAN':
-                        # Simple difference
-                        loss = loss_pos - loss_negs.mean(dim=0)
-                    elif loss_method == 'infoNCE':
-                        # InfoNCE (loss → similarity score via negative)
-                        # Lower loss = higher similarity
-                        sim_pos = torch.exp(-loss_pos)  # [B]
-                        sim_negs = torch.exp(-loss_negs)  # [N, B]
-                        
-                        denominator = sim_pos + sim_negs.sum(dim=0)  # [B]
-                        loss = -torch.log(sim_pos / denominator)  # [B]
-                    
-                    return loss # 이거 mean해야함? 체크하기
-                    
-                
-                def calculate_recon_loss(pred, mask, target, confidence_map=None):
-                    recon_loss = self.reconstruction_criterion(
-                        pred=pred,        # [B, 256, 768]
-                        mask=mask,        # [B, 256]
-                        target=target,    # [B, 3, 256, 768]
-                    )
-                    return recon_loss
 
-                if self.use_contrastive_recon_loss:
-                    recon_loss_fn = calculate_contrastive_recon_loss
-                else:
-                    recon_loss_fn = calculate_recon_loss
+                for blk in self.decoder_rgb_blocks:
+                    rgb_full_dec = blk(rgb_full_dec, paired_thermal_full)
+                rgb_full_dec = self.decoder_norm(rgb_full_dec)
+
+                if self.use_contrastive_recon_loss: recon_loss_fn = self.calculate_contrastive_recon_loss
+                else: recon_loss_fn = self.calculate_recon_loss
                 
                 # 9. Prediction Head
-                if self.use_feature_level_recon_loss:
-                    out = self.thermal_backbone(x)
-                    thermal_not_masked_enc = out["x_norm_patchtokens"]
-                    
-                    # 10. Reconstruction loss 계산
-                    recon_loss = recon_loss_fn(thermal_full_dec, mask, thermal_not_masked_enc)
-                else:
-                    reconstructed_patches = self.prediction_head(thermal_full_dec)
-                    target_patches = self.patchify(x)
-                    
-                    # 10. Reconstruction loss 계산
-                    confidence_scores = None
-                    if self.use_confidence_map:
-                        confidence_scores = self.confidence_head(thermal_full_dec) # [B, 256]
-                    recon_loss = recon_loss_fn(reconstructed_patches, mask, target_patches, confidence_scores)
-                    
-                    # 11. VPR용 patch tokens
-                    if return_masked_patch:
-                        masked_patch = thermal_full
-                        
-                    if self.use_single_pass:
-                        thermal_for_vpr = thermal_full.clone()
-                        thermal_for_vpr[mask] = thermal_full_dec[mask]
-                        out = {"x_norm_patchtokens": thermal_for_vpr}
-                    else:
-                        out = self.thermal_backbone(x)
+                reconstructed_thermal_patches = self.prediction_head(thermal_full_dec)
+                reconstructed_rgb_patches = self.prediction_head(rgb_full_dec)
+                target_thermal_patches = self.patchify(x)
+                target_rgb_patches = self.patchify(paired_rgb)
+                
+                # 10. Reconstruction loss 계산
+                recon_loss_thermal = recon_loss_fn(reconstructed_thermal_patches, mask_thermal, target_thermal_patches)
+                recon_loss_rgb = recon_loss_fn(reconstructed_rgb_patches, mask_rgb, target_rgb_patches)
+                recon_loss = (recon_loss_thermal + recon_loss_rgb) / 2
             else:
                 # when inference
                 # NOTE: 부르는 곳에 no_grad 호출하기
                 if self.use_masked_inference:
                     # 1-4. masked thermal encoder
-                    thermal_visible, mask, patch_B, patch_N, patch_D = self.croco_like_encoder(x)
+                    thermal_visible, mask_thermal, patch_B, patch_N, patch_D = self.croco_like_encoder(x, modality='thermal')
                     
                     # 5. Mask token expansion
-                    thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask, patch_B, patch_N, patch_D)
+                    thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
                     
                     # 6. Decoder Positional Encoding
                     thermal_full_dec = thermal_full + self.decoder_pos_embed  # [B, 256, 768]
@@ -498,26 +457,23 @@ class CrossModalVPR_Net(nn.Module):
             # Aggregation -> Descriptor
             global_desc = agg_layer(x_feat) # [B, D]
         
-        return global_desc, patch_tokens, recon_loss, mask, masked_patch
+        return global_desc, patch_tokens, recon_loss, mask_thermal, masked_patch_thermal
 
-    def forward(self, x, flags, aligned_rgb=None, return_mask=False, return_masked_patch=False):
+    def forward(self, x, flags, paired_rgb=None, return_mask=False, return_masked_patch=False):
         is_rgb = torch.tensor([f == 'rgb' for f in flags], device=x.device)
         final_emb = torch.zeros((x.size(0), self.output_dim), device=x.device)
         patch_emb = torch.zeros((x.size(0), 256, self.output_dim), device=x.device)
         masks = torch.zeros((x.size(0), 256), dtype=torch.bool, device=x.device)
         
-        # thermal_count = len([_ for _ in flags if _ == 'thermal'])
-        # masked_patch_emb = torch.zeros((thermal_count, 256, self.output_dim), device=x.device)
-        masked_patch_emb = None
-        
         recon_loss = None
+        masked_patch_emb = None
         try:
             if is_rgb.any():
                 global_emb, patch_rgb, _, _, _ = self.forward_model(x[is_rgb], modality='rgb')
                 if global_emb is not None: final_emb[is_rgb] = global_emb
                 patch_emb[is_rgb] = patch_rgb
             if (~is_rgb).any():
-                global_emb, patch_thermal, recon_loss, mask, masked_patch_thermal = self.forward_model(x[~is_rgb], modality='thermal', aligned_rgb=aligned_rgb, return_masked_patch=return_masked_patch)
+                global_emb, patch_thermal, recon_loss, mask, masked_patch_thermal = self.forward_model(x[~is_rgb], modality='thermal', paired_rgb=paired_rgb, return_masked_patch=return_masked_patch)
                 if global_emb is not None: final_emb[~is_rgb] = global_emb
                 patch_emb[~is_rgb] = patch_thermal
                 if return_mask: masks[~is_rgb] = mask
@@ -533,6 +489,57 @@ class CrossModalVPR_Net(nn.Module):
             return final_emb, patch_emb, recon_loss, masks, masked_patch_emb
         else:
             return final_emb, patch_emb, recon_loss, masks
+
+    def calculate_contrastive_recon_loss(self, pred_pos, pred_negs, mask, target, confidence_map=None, method='infoNCE'):
+        """
+        pred_pos: [B, 256, 588] - positive reconstruction
+        pred_negs: [B, N, 256, 588] - N negative reconstructions
+        mask: [B, 256]
+        target: [B, 256, 588]
+        """
+        # Positive loss
+        loss_pos = self.reconstruction_criterion(
+            pred=pred_pos,
+            mask=mask,
+            target=target
+        )  # [B] or scalar
+        
+        # Negative losses
+        B, N = pred_negs.shape[:2]
+        loss_negs = []
+        
+        for n in range(N):
+            loss_neg = self.reconstruction_criterion(
+                pred=pred_negs[:, n],  # [B, 256, 588]
+                mask=mask,
+                target=target,
+            )  # [B] or scalar
+            loss_negs.append(loss_neg)
+        
+        loss_negs = torch.stack(loss_negs, dim=0)  # [N, B] or [N]
+        
+        loss_method = method
+        if loss_method == 'MEAN':
+            # Simple difference
+            loss = loss_pos - loss_negs.mean(dim=0)
+        elif loss_method == 'infoNCE':
+            # InfoNCE (loss → similarity score via negative)
+            # Lower loss = higher similarity
+            sim_pos = torch.exp(-loss_pos)  # [B]
+            sim_negs = torch.exp(-loss_negs)  # [N, B]
+            
+            denominator = sim_pos + sim_negs.sum(dim=0)  # [B]
+            loss = -torch.log(sim_pos / denominator)  # [B]
+        
+        return loss # 이거 mean해야함? 체크하기
+        
+    def calculate_recon_loss(self, pred, mask, target, confidence_map=None):
+        recon_loss = self.reconstruction_criterion(
+            pred=pred,        # [B, 256, 768]
+            mask=mask,        # [B, 256]
+            target=target,    # [B, 3, 256, 768]
+        )
+        return recon_loss
 
 def get_backbone(pretrained_foundation, foundation_model_path):
     backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0)

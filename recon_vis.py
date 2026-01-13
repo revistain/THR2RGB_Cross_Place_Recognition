@@ -6,92 +6,52 @@ from torchvision.utils import make_grid
 from utils import get_timestamp
 import cv2
 
-def visualize_reconstruction(model, thermal_img, aligned_rgb, device='cuda', save_path=None):
+def visualize_reconstruction(model, thermal_img, paired_rgb, device='cuda', save_path=None):
     """
     Args:
         model: CrossModalVPR_Net
         thermal_img: [1, 3, 224, 224] - single thermal image
-        aligned_rgb: [1, 3, 224, 224] - aligned RGB image
+        paired_rgb: [1, 3, 224, 224] - aligned RGB image
         device: 'cuda' or 'cpu'
         save_path: Optional path to save the figure
     """
+    model.train()
+    with torch.no_grad():
+        _, patch_thermal, recon_loss, mask_thermal, masked_patch_thermal = model.module.forward_model(thermal_img, modality='thermal', paired_rgb=paired_rgb)
     model.eval()
     
-    with torch.no_grad():
-        # 1. Patch embedding
-        thermal_patch = model.module.thermal_backbone.patch_embed(thermal_img)
-        B, N, D = thermal_patch.shape  # [1, 256, 768]
-        
-        # 2. Positional embedding
-        pos_tokens = model.module.thermal_backbone.pos_embed[:, 1:, :]
-        pos_embed_grid = pos_tokens.reshape(1, 37, 37, 768).permute(0, 3, 1, 2)
-        pos_embed_resized = torch.nn.functional.interpolate(
-            pos_embed_grid, size=(16, 16), mode='bicubic', align_corners=False
-        )
-        pos_embed_final = pos_embed_resized.permute(0, 2, 3, 1).flatten(1, 2)
-        thermal_patch = thermal_patch + pos_embed_final
-        
-        # 3. Masking
-        mask = model.module.mask_generator(thermal_patch)  # [1, 256]
-        thermal_visible = thermal_patch[~mask].reshape(B, -1, D)
-        
-        # 4. Encoder (visible only)
-        for blk in model.module.thermal_backbone.blocks:
-            thermal_visible = blk(thermal_visible)
-        thermal_visible = model.module.thermal_backbone.norm(thermal_visible)
-        
-        # 5. RGB features
-        rgb_full = model.module.rgb_backbone(aligned_rgb)
-        rgb_full = rgb_full["x_norm_patchtokens"]
-        
-        # 6. Mask token expansion
-        mask_tokens = model.module.mask_token.expand(B, N, -1)
-        thermal_full = mask_tokens.clone()
-        thermal_full[0, ~mask[0]] = thermal_visible[0]
-        
-        # 7. Decoder positional encoding
-        thermal_full = thermal_full + model.module.decoder_pos_embed
-        rgb_full = rgb_full + model.module.decoder_pos_embed
-        
-        # 8. Decoder
-        for blk in model.module.decoder_blocks:
-            thermal_full = blk(thermal_full, rgb_full)
-        thermal_full = model.module.decoder_norm(thermal_full)
-
-        # ========== Confidence Map 추가 ==========
-        if hasattr(model.module, 'confidence_head'):
-            confidence_map = model.module.confidence_head(thermal_full).squeeze().cpu()  # [256]
-        else:
-            confidence_map = None
-        # ==========================================
-
-        # 9. Prediction
-        reconstructed_patches = model.module.prediction_head(thermal_full)  # [1, 256, 588]
-        
-        # 10. Unpatchify
-        reconstructed_img = unpatchify_visual(reconstructed_patches, patch_size=14)  # [1, 3, 224, 224]
-        
-        # 11. 원본 이미지도 patchify
-        original_patches = model.module.patchify(thermal_img)  # [1, 256, 588]
-        
+    reconstructed_pixels = model.module.prediction_head(patch_thermal)  # [1, 256, 588]
+    reconstructed_img = unpatchify_visual(reconstructed_pixels, patch_size=14) # [1, 3, 224, 224]
+    
     # Denormalize (ImageNet stats 사용했다고 가정)
     mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(device)
     std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(device)
     
     thermal_img_denorm = thermal_img * std + mean
-    aligned_rgb_denorm = aligned_rgb * std + mean
+    aligned_rgb_denorm = paired_rgb * std + mean
     reconstructed_img_denorm = reconstructed_img * std + mean
     
-    # ===== 핵심: Visible + Reconstructed 합치기 =====
     # Visible patches는 원본, Masked patches는 reconstruction 사용
+    original_patches = model.module.patchify(thermal_img)
     hybrid_patches = original_patches.clone()  # [1, 256, 588]
-    hybrid_patches[mask] = reconstructed_patches[mask]  # Masked 위치만 reconstruction으로 교체
+    hybrid_patches[mask_thermal] = reconstructed_pixels[mask_thermal]  # Masked 위치만 reconstruction으로 교체
     
     hybrid_img = unpatchify_visual(hybrid_patches, patch_size=14)  # [1, 3, 224, 224]
     hybrid_img_denorm = hybrid_img * std + mean
     
+    hybrid_img_denorm = hybrid_img_denorm.detach().cpu()
+    hybrid_img = hybrid_img.detach().cpu()
+    hybrid_patches = hybrid_patches.detach().cpu()
+    original_patches = original_patches.detach().cpu()
+    reconstructed_img = reconstructed_img.detach().cpu()
+    reconstructed_pixels = reconstructed_pixels.detach().cpu()
+    
+    thermal_img_denorm = thermal_img_denorm.detach().cpu()
+    reconstructed_img_denorm = reconstructed_img_denorm.detach().cpu()
+    aligned_rgb_denorm = aligned_rgb_denorm.detach().cpu()
+    
     # Mask 시각화 (16x16 grid)
-    mask_2d = mask.reshape(1, 16, 16).float()  # [1, 16, 16]
+    mask_2d = mask_thermal.reshape(1, 16, 16).float()  # [1, 16, 16]
     mask_img = torch.nn.functional.interpolate(
         mask_2d.unsqueeze(1), size=(224, 224), mode='nearest'
     ).squeeze(1)  # [1, 224, 224]
@@ -105,7 +65,7 @@ def visualize_reconstruction(model, thermal_img, aligned_rgb, device='cuda', sav
     axes[0, 0].axis('off')
     
     axes[0, 1].imshow(mask_img[0].cpu(), cmap='RdYlGn_r', vmin=0, vmax=1)
-    axes[0, 1].set_title(f'Mask (Masked={mask.float().mean()*100:.1f}%)', fontsize=14, fontweight='bold')
+    axes[0, 1].set_title(f'Mask (Masked={mask_thermal.float().mean()*100:.1f}%)', fontsize=14, fontweight='bold')
     axes[0, 1].axis('off')
     
     # ★ 핵심: Hybrid 이미지 (Visible + Reconstructed)
@@ -143,17 +103,6 @@ def visualize_reconstruction(model, thermal_img, aligned_rgb, device='cuda', sav
         plt.close()
     else:
         plt.show()
-    
-    # ========== Confidence 시각화 추가 (맨 끝) ==========
-    if confidence_map is not None and save_path is not None:
-        conf_save_path = save_path.replace('.png', '_confidence.png')
-        save_confidence_vis_simple(
-            thermal_img=thermal_img[0],
-            rgb_img=aligned_rgb[0],
-            confidence_map=confidence_map,
-            save_path=conf_save_path
-        )
-    # ==================================================
     
     return hybrid_img_denorm
 
@@ -195,10 +144,10 @@ def visualize_during_training(args, model, triplets_dl, device, epoch, save_dir=
         
     # Thermal query 1개만 추출 (첫 번째 thermal)
     thermal_img = images[0:1].to(device)  # [1, 3, 224, 224]
-    aligned_rgb = aligned_rgbs[0:1].to(device)  # [1, 3, 224, 224]
+    paired_rgb = aligned_rgbs[0:1].to(device)  # [1, 3, 224, 224]
     
     save_path = f"{save_subdir}/epoch_{epoch:03d}.png"
-    visualize_reconstruction(model, thermal_img, aligned_rgb, device, save_path)
+    visualize_reconstruction(model, thermal_img, paired_rgb, device, save_path)
     
     model.train()
     
@@ -525,43 +474,45 @@ def visualize_reranking_comparison(args, eval_ds,
         f.write(f"  Delta:  {rerank_correct-orig_correct:+d} ({100*(rerank_correct-orig_correct)/eval_ds.queries_num:+.2f}%)\n")
     
     print(f"Saved summary: {summary_path}")
-    
-# inference.py 최상단
-def save_confidence_vis_simple(thermal_img, rgb_img, confidence_map, save_path):
+
+def save_simple_cross_attn(attn_map, save_path, query_idx=None):
     """
-    최소 코드로 3개 이미지 시각화
-    
     Args:
-        thermal_img: [3, 224, 224] normalized tensor
-        rgb_img: [3, 224, 224] normalized tensor
-        confidence_map: [256] tensor
-        save_path: str
+        attn_map: [B, N, M] 또는 [N, M] 텐서 (CPU/GPU 상관없음)
+        save_path: 저장할 파일 경로 (예: './test.png')
+        query_idx: (선택) 보고 싶은 Query 패치 번호. 안 넣으면 정중앙을 봅니다.
     """
-    import matplotlib.pyplot as plt
-    from matplotlib import cm
-    import os
+    # 1. 텐서 정리 (GPU -> CPU, Batch 차원 제거)
+    if isinstance(attn_map, torch.Tensor):
+        attn_map = attn_map.detach().cpu().numpy()
     
-    # ========== 수정: device 맞추기 ==========
-    device = thermal_img.device
-    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1).to(device)
-    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1).to(device)
-    # =========================================
+    # [B, N, M]인 경우 첫 번째 배치를 선택
+    if attn_map.ndim == 3:
+        attn_map = attn_map[0]  # [N, M]
+        
+    N, M = attn_map.shape
     
-    thermal = ((thermal_img * std + mean).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-    rgb = ((rgb_img * std + mean).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+    # 2. Grid 크기 자동 계산 (정사각형 가정)
+    # M (Key 개수) = H * W
+    grid_size = int(np.sqrt(M))
     
-    # Confidence map
-    conf_map = confidence_map.cpu().numpy().reshape(16, 16)
-    conf_resized = cv2.resize(conf_map, (224, 224))
-    conf_colored = (cm.jet(conf_resized)[:, :, :3] * 255).astype(np.uint8)
+    # 3. Query 선택 (기본값: 정중앙 패치)
+    if query_idx is None:
+        query_idx = N // 2  # 중앙 인덱스
+        
+    # 4. 해당 Query가 바라보는 Attention Map 추출 [M] -> [H, W]
+    heatmap = attn_map[query_idx, :]
+    heatmap = heatmap.reshape(grid_size, grid_size)
     
-    # Plot
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-    axes[0].imshow(thermal); axes[0].set_title('Query Thermal'); axes[0].axis('off')
-    axes[1].imshow(conf_colored); axes[1].set_title(f'Confidence (mean: {conf_map.mean():.3f})'); axes[1].axis('off')
-    axes[2].imshow(rgb); axes[2].set_title('Top-1 RGB'); axes[2].axis('off')
+    # 5. 보기 좋게 해상도 키우기 (Interpolation)
+    # 16x16 같은 저해상도를 256x256으로 부드럽게 키움
+    heatmap = cv2.resize(heatmap, (256, 256), interpolation=cv2.INTER_NEAREST)
     
-    plt.tight_layout()
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    plt.savefig(save_path, dpi=100, bbox_inches='tight')
-    plt.close()
+    # 6. Min-Max 정규화 (0~1) - 선명하게 보기 위해
+    heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-8)
+    
+    # 7. 이미지 저장 (Jet colormap 적용)
+    # plt.imsave는 자동으로 컬러맵을 입혀서 저장해줍니다.
+    plt.imsave(save_path, heatmap, cmap='jet')
+    
+    print(f"Saved attention map to {save_path} (Query Index: {query_idx})")

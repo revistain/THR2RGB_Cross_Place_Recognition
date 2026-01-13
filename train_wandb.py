@@ -27,104 +27,6 @@ from croco.models.criterion import MaskedMSE
 from recon_vis import visualize_during_training
 from info_nce import InfoNCE, info_nce
 
-def clip_patch_alignment_mean_loss(thermal_patches, rgb_patches, temperature=0.07):
-    # https://taeyuplab.tistory.com/16
-    B, N, D = thermal_patches.shape # (batch, 16x16, feature_dim)
-    
-    # 
-    thermal_feat = thermal_patches.mean(dim=1)
-    rgb_feat = rgb_patches.mean(dim=1)
-    
-    thermal_feat = F.normalize(thermal_feat, dim=-1)
-    rgb_feat = F.normalize(rgb_feat, dim=-1)
-    
-    logits = torch.matmul(thermal_feat, rgb_feat.T) / temperature
-    labels = torch.arange(B, device=logits.device)
-    
-    loss_t2r = F.cross_entropy(logits, labels)
-    # loss_r2t = F.cross_entropy(logits.T, labels)
-    
-    # FIXME: loss_r2t는 필요없지 않나
-    # return (loss_t2r + loss_r2t) / 2
-    return loss_t2r
-
-def clip_alignment_cls_loss(thermal_cls, rgb_cls, temperature=0.07):
-    """
-    thermal_cls: (B, D) - CLS token features
-    rgb_cls: (B, D) - CLS token features
-    """
-    thermal_feat = F.normalize(thermal_cls, dim=-1)
-    rgb_feat = F.normalize(rgb_cls, dim=-1)
-    
-    logits = torch.matmul(thermal_feat, rgb_feat.T) / temperature
-    labels = torch.arange(thermal_feat.size(0), device=logits.device)
-    
-    loss_t2r = F.cross_entropy(logits, labels)
-    
-    # FIXME: 이거 loss_r2t도 넣어서 해보기, 필요한거 같음
-    return loss_t2r
-
-def patch_alignment_loss(thermal_patches, rgb_patches):
-    """
-    thermal_patches: (B, 256, 768)
-    rgb_patches: (B, 256, 768)
-    """
-    # L2 normalize
-    thermal_norm = F.normalize(thermal_patches, dim=-1)  # (B, 256, 768)
-    rgb_norm = F.normalize(rgb_patches, dim=-1)          # (B, 256, 768)
-    
-    # 같은 위치 patch끼리 cosine similarity
-    cos_sim = (thermal_norm * rgb_norm).sum(dim=-1)  # (B, 256)
-    
-    # similarity가 1에 가까울수록 좋음
-    loss = 1 - cos_sim.mean()
-    return loss
-
-def attention_weighted_patch_alignment_loss(thermal_patches, rgb_patches, thermal_attn, rgb_attn, use_intranorm=False):
-    """
-    공통 중요도로 가중치를 준 patch alignment
-    
-    Args:
-        thermal_patches: (B, num_patches, 768)
-        rgb_patches: (B, num_patches, 768)
-        thermal_attn: (B, num_heads, num_tokens)
-        rgb_attn: (B, num_heads, num_tokens)
-        use_intranorm: if True, L2-normalize patches before averaging (GeM-style)
-    
-    Returns:
-        loss
-    """
-    # Multi-head averaging + CLS 토큰 제거
-    thermal_attn_flat = thermal_attn.mean(dim=1)[:, 1:]  # (B, num_patches)
-    rgb_attn_flat = rgb_attn.mean(dim=1)[:, 1:]  # (B, num_patches)
-    
-    # 공통 중요도
-    # importance = thermal_attn_flat * rgb_attn_flat
-    # importance = importance / (importance.sum(dim=1, keepdim=True) + 1e-8)
-    importance = rgb_attn_flat
-    importance = importance / (importance.sum(dim=1, keepdim=True) + 1e-8)
-    
-    if use_intranorm:
-        thermal_patches = F.normalize(thermal_patches, dim=-1)
-        rgb_patches = F.normalize(rgb_patches, dim=-1)
-        
-        thermal_agg = (thermal_patches * importance.unsqueeze(-1)).sum(dim=1)
-        rgb_agg = (rgb_patches * importance.unsqueeze(-1)).sum(dim=1)
-        
-        # F.cosine_similarity 사용
-        similarity = F.cosine_similarity(thermal_agg, rgb_agg, dim=-1)
-        loss = 1 - similarity.mean()
-    else:
-        ...
-        # # 원래 방식: Patch-wise cosine similarity
-        # patch_sim = (thermal_patches * rgb_patches).sum(dim=-1)  # (B, num_patches)
-        
-        # # Importance-weighted similarity
-        # weighted_sim = (patch_sim * importance).sum(dim=1)  # (B,)
-        # loss = 1 - weighted_sim.mean()
-    
-    return loss
-
 def set_seed(seed=42):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -293,12 +195,12 @@ if __name__ == "__main__":
             logging.debug("Finish computing triplets")
 
             ### triplet을 위한 DataLoader 생성
-            # DataLoader는 (Batch, images, triplets_local_indexes, triplets_global_indexes[index], aligned_rgb)를 getitem
+            # DataLoader는 (Batch, images, triplets_local_indexes, triplets_global_indexes[index], paired_rgb)를 getitem
             # images: stacked(query, pos, *negs)
             # triplets_local_indexes: triplet 내에서의 local index
             #   ex) (0, 1, 2), (0, 1, 3), ..., (0, 1, 11) # (query, pos, neg)의 pairs
             # triplets_global_indexes[index]: ?
-            # aligned_rgb: thermal query와 맞는 rgb query 이미지
+            # paired_rgb: thermal query와 맞는 rgb query 이미지
             triplets_dl = DataLoader(dataset=triplets_ds, num_workers=args.num_workers,
                                     batch_size=args.train_batch_size,
                                     collate_fn=datasets_T2R.collate_fn,
@@ -326,7 +228,7 @@ if __name__ == "__main__":
                 global_features, patch_embedding, recon_loss, masks, masked_patch_embedding = model(
                     images.to(args.device),
                     flags=flags,
-                    aligned_rgb=aligned_rgbs.to(args.device),
+                    paired_rgb=aligned_rgbs.to(args.device),
                     return_mask=True,
                     return_masked_patch=True
                 )
