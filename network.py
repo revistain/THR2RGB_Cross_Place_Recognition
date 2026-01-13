@@ -9,7 +9,7 @@ import numpy as np
 from sklearn.neighbors import NearestNeighbors
 import torchvision.models as models
 
-from croco.models.masking import RandomMask
+from croco.models.masking import RandomMask, AttentiveMask
 from croco.models.criterion import MaskedMSE
 from timm.models.layers import DropPath
 
@@ -164,6 +164,10 @@ class CrossModalVPR_Net(nn.Module):
         self._set_mask_generator(16*16, mask_ratio)
         self._set_prediction_head(self.output_dim, 14)
         self._set_confidence_head(self.output_dim, 16*16)
+        self.use_confidence_map = args.use_confidence_map
+        self.attention_mask_type = args.attention_mask_type[0]
+        self.use_constrastive_recon_loss = args.use_constrastive_recon_loss
+        print(f"attention_mask_type: {args.attention_mask_type[0]}")
         
         self.reconstruction_criterion = MaskedMSE(
             norm_pix_loss=False,
@@ -194,7 +198,7 @@ class CrossModalVPR_Net(nn.Module):
     
     def _set_mask_generator(self, num_patches, mask_ratio):
         """Random masking generator 초기화"""
-        self.mask_generator = RandomMask(num_patches, mask_ratio)
+        self.mask_generator = AttentiveMask(num_patches, mask_ratio)
         
     def _set_confidence_head(self, dec_embed_dim, hidden_dim=192):
         self.confidence_head = nn.Sequential(
@@ -245,7 +249,7 @@ class CrossModalVPR_Net(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], channels, h * patch_size, h * patch_size))
         return imgs
     
-    def croco_like_encoder(self, x):
+    def croco_like_encoder(self, x, conf_map=None, prev_mask=None):
         # thermal          : torch.Size([4, 3, 224, 224])
         # paired_thermal   : torch.Size([4, 3, 224, 224])
         
@@ -261,53 +265,77 @@ class CrossModalVPR_Net(nn.Module):
         rgb_patch = rgb_patch + pos_embed_final  # [B, 256, 768]
         
         # 3. patch embedding을 masking 해준다.
-        mask = self.mask_generator(rgb_patch)
-        rgb_visible = rgb_patch[~mask].reshape(patch_B, -1, patch_D)
+        orig_mask = prev_mask
+        if prev_mask is None:
+            orig_mask = self.mask_generator(rgb_patch, conf_map, self.attention_mask_type)
+            rgb_visible = rgb_patch[~orig_mask].reshape(patch_B, -1, patch_D)
+        else:
+            expanded_mask = orig_mask.repeat_interleave(10, dim=0)
+            rgb_visible = rgb_patch[~expanded_mask].reshape(patch_B, -1, patch_D)
         
         # 4. unmasked된 patch들만 DINOv2 통과시키기
         for blk in self.rgb_backbone.blocks:
             rgb_visible = blk(rgb_visible)
         rgb_visible = self.rgb_backbone.norm(rgb_visible)
 
-        return rgb_visible, mask, patch_B, patch_N, patch_D
+        return rgb_visible, orig_mask, patch_B, patch_N, patch_D
 
     def croco_encoded_mask_expension(self, rgb_visible, mask, patch_B, patch_N, patch_D):
         # CROCO로 masking된 부분 mask token으로 채워넣기
         mask_tokens = self.mask_token.expand(patch_B, patch_N, -1) # [B, 256, 768]
+        expanded_mask = mask.repeat_interleave(10, dim=0)
         rgb_full = mask_tokens.clone()
         for i in range(patch_B):
-            rgb_full[i, ~mask[i]] = rgb_visible[i]
+            rgb_full[i, ~expanded_mask[i]] = rgb_visible[i]
         rgb_full = rgb_full.reshape(patch_B, -1, patch_D)
 
         return rgb_full
     
-    def forward_model(self, x, paired_thermal=None, modality='rgb', return_masked_patch=False, use_global_descriptor=True):
+    def forward_model(self, x, paired_thermal=None, rgb_negs=None, modality='rgb', return_masked_patch=False, use_global_descriptor=True):
         """단일 모달리티에 대한 Forward"""
         global_desc = None
         recon_loss = None
         mask = None
         masked_patch = None
+        rgb_negs_tokens = None
+        global_neg_desc = None
         if modality == 'thermal':
             # x: torch.Size([6, 3, 224, 224])
             out = self.thermal_backbone(x)
             agg_layer = self.thermal_aggregation
-        elif modality == 'rgb' or modality == 'rgb_neg':
+        elif modality == 'rgb':
             out = self.rgb_backbone(x)
             agg_layer = self.rgb_aggregation
         elif modality == 'rgb_pos':
             agg_layer = self.rgb_aggregation
             if self.training:
-                # 5. aligned RGB도 feature tokens 추출하기
+                # 1. VPR용 patch tokens을 먼저 뽑아서 attn map도 구해두기
+                out = self.rgb_backbone(x, return_attention=True)
+                rgb_attn_map = out["cls_attention"]
+                rgb_attn_map = rgb_attn_map.mean(dim=1)[:, 1:]
+
+                if rgb_negs is not None:
+                    out_rgb_negs = self.rgb_backbone(rgb_negs)
+                
+                # 5. aligned thermal도 feature tokens 추출하기
                 thermal_full = self.thermal_backbone(paired_thermal) # [4, 256, 768]
                 thermal_full = thermal_full["x_norm_patchtokens"] 
                 
                 # 6. Mask token expansion
-                rgb_visible, mask, patch_B, patch_N, patch_D = self.croco_like_encoder(x) # [4, 256*(1-mask_ratio), 768]
+                rgb_visible, mask, patch_B, patch_N, patch_D = self.croco_like_encoder(x, rgb_attn_map) # [4, 256*(1-mask_ratio), 768]
                 rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask, patch_B, patch_N, patch_D)
+
+                if rgb_negs is not None:
+                    rgb_neg_visible, _, _, _, _ = self.croco_like_encoder(rgb_negs, prev_mask=mask) # [4, 256*(1-mask_ratio), 768]
+                    rgb_neg_full = self.croco_encoded_mask_expension(rgb_neg_visible, mask, patch_B*10, patch_N, patch_D)
                 
                 # 7. Decoder Positional Encoding
                 rgb_full_dec = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
                 thermal_full = thermal_full + self.decoder_pos_embed  # [B, 256, 768]
+
+                if rgb_negs is not None:
+                    rgb_neg_full_dec = rgb_neg_full + self.decoder_pos_embed  # [B, 256, 768]
+                    thermal_full_expanded = thermal_full.repeat_interleave(10, dim=0)      
                 
                 # 8. decoder 통과시키기
                 # rgb_full_dec: [44, 256, 768]
@@ -315,25 +343,91 @@ class CrossModalVPR_Net(nn.Module):
                 for blk in self.decoder_blocks:
                     rgb_full_dec = blk(rgb_full_dec, thermal_full)
                 rgb_full_dec = self.decoder_norm(rgb_full_dec)
-                
-                # 9. Prediction Head
+
                 reconstructed_patches = self.prediction_head(rgb_full_dec)
-                confidence_map_flat = self.confidence_head(rgb_full_dec)
+
+                if rgb_negs is not None:
+                    for blk in self.decoder_blocks:
+                        rgb_neg_full_dec = blk(rgb_neg_full_dec, thermal_full_expanded)
+                    rgb_neg_full_dec = self.decoder_norm(rgb_neg_full_dec)
+
+                    reconstructed_neg_patches = self.prediction_head(rgb_neg_full_dec)
+
+                # 9. Prediction Head
+                confidence_map_flat = None
+                if self.use_confidence_map:
+                    confidence_map_flat = self.confidence_head(rgb_full_dec)
+
                 target_patches = self.patchify(x)
+                target_neg_patches = self.patchify(rgb_negs)
                 
+                def calculate_contrastive_recon_loss(pred_pos, pred_negs, mask, target_pos, target_neg, confidence_map=None, method='infoNCE'):
+                    """
+                    pred_pos: [B, 256, 588] - positive reconstruction
+                    pred_negs: [B, N, 256, 588] - N negative reconstructions
+                    mask: [B, 256]
+                    target: [B, 256, 588]
+                    """
+                    # Positive loss
+                    loss_pos = self.reconstruction_criterion(
+                        pred=pred_pos,
+                        mask=mask,
+                        target=target_pos,
+                        confidence_map=confidence_map
+                    )  # [B] or scalar
+                    
+                    # Negative losses
+                    B, N = pred_negs.shape[:2]
+                    
+                    num_negs_per_anchor = pred_negs.size(0) // mask.size(0)  # 40 // 4 = 10
+                    expanded_mask = mask.repeat_interleave(num_negs_per_anchor, dim=0)  # [40, 256]
+                    
+                    loss_neg = self.reconstruction_criterion(
+                        pred=pred_negs,          # [40, 256, 588]
+                        mask=expanded_mask,      # [40, 256]
+                        target=target_neg,       # [40, 256, 588]
+                        confidence_map=None      # Negative에는 confidence 적용 안함
+                    )
+                    
+                    if method == 'MEAN':
+                        # Simple difference
+                        loss = loss_pos - loss_neg.mean(dim=0) * 0.5
+                        raise NotImplementedError("이거 규제항 없으면 그냥 loss_neg만 미친듯이 키우면됨")
+                    elif method == 'infoNCE':
+                        # InfoNCE (loss → similarity score via negative)
+                        # Lower loss = higher similarity
+                        sim_pos = torch.exp(-loss_pos)  # [B]
+                        sim_negs = torch.exp(-loss_neg)  # [N, B]
+                        
+                        denominator = sim_pos + sim_negs.sum(dim=0)  # [B]
+                        loss = -torch.log(sim_pos / denominator)  # [B]
+                    
+                    return loss # 이거 mean해야함? 체크하기
+            
                 # 10. Reconstruction loss 계산
-                recon_loss = self.reconstruction_criterion(
-                    pred=reconstructed_patches,        # [B, 256, 768]
-                    mask=mask,        # [B, 256]
-                    target=target_patches,    # [B, 3, 256, 768]
-                    confidence_map=confidence_map_flat
-                )
+                if self.use_constrastive_recon_loss and rgb_negs is not None:
+                    recon_loss = calculate_contrastive_recon_loss(
+                        pred_pos=reconstructed_patches,     # [B, 256, 768]
+                        pred_negs=reconstructed_neg_patches,     # [B, N, 256, 768]
+                        mask=mask,                          # [B, 256]
+                        target_pos=target_patches,              # [B, 3, 256, 768]
+                        target_neg=target_neg_patches,              # [B, 3, 256, 768]
+                        confidence_map=confidence_map_flat                     
+                    )
+                else:
+                    recon_loss = self.reconstruction_criterion(
+                        pred=reconstructed_patches,        # [B, 256, 768]
+                        mask=mask,        # [B, 256]
+                        target=target_patches,    # [B, 3, 256, 768]
+                        confidence_map=confidence_map_flat
+                    )
                 
-                # 11. VPR용 patch tokens
-                if return_masked_patch: masked_patch = rgb_full
-                out = self.rgb_backbone(x)
+                if return_masked_patch:
+                    masked_patch = rgb_full
             else:
                 # when inference
+                if rgb_negs is not None:
+                    out_rgb_negs = self.rgb_backbone(rgb_negs)
                 out = self.rgb_backbone(x)
         else:
             raise ValueError("Modality must be 'rgb' or 'thermal'")
@@ -341,9 +435,11 @@ class CrossModalVPR_Net(nn.Module):
         # Backbone 출력 처리 (ViT 기준)
         # x['x_norm_patchtokens']: (B, num_patchs, D)
         patch_tokens = out["x_norm_patchtokens"]
+        if rgb_negs is not None:
+            rgb_negs_tokens = out_rgb_negs["x_norm_patchtokens"]
         
         if use_global_descriptor:
-            # attnetion_dict_keys(['x_norm_clstoken', 'x_norm_patchtokens', 'x_prenorm', 'masks'])
+            # attention_dict_keys(['x_norm_clstoken', 'x_norm_patchtokens', 'x_prenorm', 'masks'])
             B, N, D = patch_tokens.shape
             
             # 224,224 정방 이미지 입력 가정(patch 2D 복원)
@@ -352,8 +448,18 @@ class CrossModalVPR_Net(nn.Module):
             
             # Aggregation -> Descriptor
             global_desc = agg_layer(x_feat) # [B, D]
+
+            if rgb_negs is not None:
+                B, N, D = rgb_negs_tokens.shape
+                
+                # 224,224 정방 이미지 입력 가정(patch 2D 복원)
+                H_feat = W_feat = int(math.sqrt(N)) 
+                x_feat = rgb_negs_tokens.permute(0, 2, 1).view(B, D, H_feat, W_feat)
+                
+                # Aggregation -> Descriptor
+                global_neg_desc = agg_layer(x_feat) # [B, D]
         
-        return global_desc, patch_tokens, recon_loss, mask, masked_patch
+        return global_desc, patch_tokens, recon_loss, mask, masked_patch, [global_neg_desc, rgb_negs_tokens]
 
     def forward(self, x, flags, return_mask=False, return_masked_patch=False, use_global_descriptor=True):
         is_thermal = torch.tensor([f == 'thermal' for f in flags], device=x.device)
@@ -370,30 +476,36 @@ class CrossModalVPR_Net(nn.Module):
         masked_patch_emb = None
         try:
             if is_thermal.any():
-                global_emb, patch_thermal, _, _, _ = self.forward_model(
+                global_emb, patch_thermal, _, _, _, _ = self.forward_model(
                     x[is_thermal], modality='thermal', use_global_descriptor=use_global_descriptor)
                 if global_emb is not None: final_emb[is_thermal] = global_emb
                 patch_emb[is_thermal] = patch_thermal
             if is_rgb.any():
-                global_emb, patch_rgb, _, _, _ = self.forward_model(
+                global_emb, patch_rgb, _, _, _, _ = self.forward_model(
                     x[is_rgb], modality='rgb', use_global_descriptor=use_global_descriptor)
                 if global_emb is not None: final_emb[is_rgb] = global_emb
                 patch_emb[is_rgb] = patch_rgb
-            if is_rgb_neg.any():
-                global_emb, patch_rgb, _, _, _ = self.forward_model(
-                    x[is_rgb_neg], modality='rgb_neg', use_global_descriptor=use_global_descriptor)
-                if global_emb is not None: final_emb[is_rgb_neg] = global_emb
-                patch_emb[is_rgb_neg] = patch_rgb
-            if is_rgb_pos.any():
-                global_emb, patch_rgb, recon_loss, mask, masked_patch_rgb = self.forward_model(
+            # if is_rgb_neg.any():
+            #     global_emb, patch_rgb, _, _, _ = self.forward_model(
+            #         x[is_rgb_neg], modality='rgb_neg', use_global_descriptor=use_global_descriptor)
+            #     if global_emb is not None: final_emb[is_rgb_neg] = global_emb
+            #     patch_emb[is_rgb_neg] = patch_rgb
+            if is_rgb_pos.any() or is_rgb_neg.any():
+                global_emb, patch_rgb, recon_loss, mask, masked_patch_rgb, rgb_negs_out = self.forward_model(
                     x[is_rgb_pos],
                     modality='rgb_pos',
+                    rgb_negs=x[is_rgb_neg],
                     paired_thermal=x[is_thermal],
                     return_masked_patch=return_masked_patch,
                     use_global_descriptor=use_global_descriptor
                 )
                 if global_emb is not None: final_emb[is_rgb_pos] = global_emb
                 patch_emb[is_rgb_pos] = patch_rgb
+
+                if rgb_negs_out[0] != None:
+                    final_emb[is_rgb_neg] = rgb_negs_out[0]
+                if rgb_negs_out[1] != None:
+                    patch_emb[is_rgb_neg] = rgb_negs_out[1]
                 if return_mask: masks[is_rgb_pos] = mask
                 if return_masked_patch:
                     masked_patch_emb = masked_patch_rgb # torch.Size([4, 256, 768])

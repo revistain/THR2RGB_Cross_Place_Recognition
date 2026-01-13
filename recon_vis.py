@@ -44,7 +44,7 @@ def visualize_reconstruction(model, thermal_img, paired_rgb, device='cuda', save
         rgb_visible = model.module.rgb_backbone.norm(rgb_visible)
         
         # 5. Thermal features (참조용)
-        thermal_full = model.module.thermal_backbone(thermal_img)
+        thermal_original = model.module.thermal_backbone(thermal_img)
         thermal_original = thermal_original["x_norm_patchtokens"]
         
         # 6. Mask token expansion

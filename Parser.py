@@ -92,6 +92,9 @@ class Parser():
         self.parser.add_argument("--num_decoder_depth", type=int, default=8, help="_")
         self.parser.add_argument("--use_decode_mask", action='store_true', default=False)
         self.parser.add_argument("--use_pos_as_paired_rgb", action='store_true', default=False)
+        self.parser.add_argument("--attention_mask_type", type=str, default=['high', 'low', 'none'], nargs="+")
+        self.parser.add_argument("--use_confidence_map", action='store_true', default=False)
+        self.parser.add_argument("--use_constrastive_recon_loss", action='store_true', default=False)
     
     def parse_arguments(self):
         args = self.parser.parse_args()

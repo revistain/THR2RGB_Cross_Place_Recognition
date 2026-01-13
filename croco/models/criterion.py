@@ -81,8 +81,16 @@ class MaskedMSE(torch.nn.Module):
 
             # 정규화된 가중 평균
             if self.masked:
-                weight_sum = (uncertainty * mask).sum(dim=-1) + 1e-8
-                loss = (loss * uncertainty * mask).sum(dim=-1) / weight_sum
+                breakpoint()
+                # 1. Before scale
+                scale_before = (loss * mask).sum(dim=-1, keepdim=True)
+                # 2. Weighting
+                loss_weighted = loss * uncertainty * mask
+                # 3. After scale  
+                scale_after = loss_weighted.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+                # 4. Restore
+                loss = loss_weighted.sum(dim=-1, keepdim=True) * (scale_before / scale_after)
+                loss = loss.squeeze(-1)
             else:
                 weight_sum = uncertainty.sum(dim=-1) + 1e-8
                 loss = (loss * uncertainty).sum(dim=-1) / weight_sum
