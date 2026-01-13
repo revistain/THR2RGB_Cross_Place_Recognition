@@ -182,21 +182,13 @@ if __name__ == "__main__":
             use_bireconstruction=args.use_bireconstruction,
             use_only_cross_decoder=args.use_only_cross_decoder,
             use_contrastive_recon_loss=args.use_contrastive_recon_lossm,
-            use_ssim_recon_loss=args.use_ssim_recon_loss,
+            use_ssim_recon_loss=args.recon_loss_type,
         )
     else:
         model = network.CrossModalVPR_Net(
+            args,
             pretrained_foundation = True,
-            foundation_model_path = args.foundation_model_path, 
-            use_GeMAdditionalLayer=args.use_GeMAdditionalLayer,
-            mask_ratio=args.croco_mask_ratio,
-            use_single_pass=args.use_single_pass, use_reduced_thermal_patch=args.use_reduced_thermal_patch,
-            num_decoder_depth=args.num_decoder_depth,
-            use_feature_level_recon_loss=args.use_feature_level_recon_loss,
-            use_feature_loss=args.use_feature_level_recon_loss,
-            use_confidence_map=args.use_confidence_map,
-            use_only_cross_decoder=args.use_only_cross_decoder,
-            use_ssim_recon_loss=args.use_ssim_recon_loss,
+            foundation_model_path = args.foundation_model_path,
         )
     model = model.to(args.device)
     model = torch.nn.DataParallel(model)

@@ -93,7 +93,6 @@ class Parser():
         self.parser.add_argument("--recon_weight", type=float, default=1, help="_")
         self.parser.add_argument("--rerank_weight", type=float, default=1, help="_")
         self.parser.add_argument("--use_single_pass", action='store_true', default=False)
-        self.parser.add_argument("--use_reduced_thermal_patch", action='store_true', default=False)
         self.parser.add_argument("--use_reranking", action='store_true', default=False)
         self.parser.add_argument("--use_rerank_loss", action='store_true', default=False)
         self.parser.add_argument("--num_decoder_depth", type=int, default=8, help="_")
@@ -105,7 +104,7 @@ class Parser():
         self.parser.add_argument("--use_only_cross_decoder", action='store_true', default=False)
         self.parser.add_argument("--use_pos_as_aligned_rgb", action='store_true', default=False)
         self.parser.add_argument("--use_contrastive_recon_loss", action='store_true', default=False)
-        self.parser.add_argument("--use_ssim_recon_loss", action='store_true', default=False)
+        self.parser.add_argument("--recon_loss_type", type=str, default="none", choices=['mse', 'l1', 'ssim', 'mse+ssim'])
         
     
     def parse_arguments(self):

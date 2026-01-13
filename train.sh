@@ -9,17 +9,18 @@ python3 train_wandb.py \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 4 \
     --num_trainable_blocks_THERMAL 4 \
-    --use_reduced_thermal_patch \
-    --comment "croco-0.8-alpha10.0-decDepth8-contrastiveReconLoss-rerank" \
+    --comment "test-croco-0.8-alpha10.0-decDepth8-rerank" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
     --croco_mask_ratio 0.8 \
     --num_decoder_depth 8 \
     --recon_weight 10 \
-    --use_reranking \
-    --use_contrastive_recon_loss
-    # --use_ssim_recon_loss
+    --recon_loss_type 'mse' \
+    --use_reranking
+
+    # --use_contrastive_recon_loss \
+    # -ssim-contrastLoss
     # --use_confidence_map
     # --use_ssim_recon_loss
     # --use_reranking \
