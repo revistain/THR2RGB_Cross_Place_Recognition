@@ -8,6 +8,7 @@ from torch.utils.data.dataset import Subset
 import time
 import cv2
 import os
+import torch.nn.functional as F
 cv2.setNumThreads(0)
 cv2.ocl.setUseOpenCL(False)
 torch.backends.cudnn.benchmark = False
@@ -32,6 +33,122 @@ def patchify(imgs):
     x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 3))
     
     return x
+
+def save_mnn_visualization(eval_ds, query_indices, top_k_db_indices, 
+                          mutual_matches_list, rerank_scores, 
+                          save_dir, epoch):
+    """
+    MNN matching 시각화
+    
+    Args:
+        eval_ds: dataset
+        query_indices: list of query indices
+        top_k_db_indices: [num_queries, K] - Top-K DB indices
+        mutual_matches_list: list of (matches_i, matches_j, conf) tuples
+        rerank_scores: [num_queries, K] - Reranking scores
+        save_dir: save directory
+        epoch: current epoch
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as patches
+    
+    os.makedirs(save_dir, exist_ok=True)
+    
+    for q_idx, (query_idx, db_indices, matches, scores) in enumerate(
+        zip(query_indices, top_k_db_indices, mutual_matches_list, rerank_scores)
+    ):
+        # Load images
+        thermal_abs_idx = eval_ds.database_num + query_idx
+        thermal_img = eval_ds[thermal_abs_idx][0]  # [3, 224, 224]
+        
+        # Denormalize
+        mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+        thermal_img = (thermal_img * std + mean).permute(1, 2, 0).numpy()
+        thermal_img = np.clip(thermal_img, 0, 1)
+        
+        # Top-5 RGB images
+        fig, axes = plt.subplots(2, 6, figsize=(24, 8))
+        
+        # Row 1: Thermal + Top-5 RGB
+        axes[0, 0].imshow(thermal_img)
+        axes[0, 0].set_title(f'Query {query_idx}\n(Thermal)', fontsize=12, fontweight='bold')
+        axes[0, 0].axis('off')
+        
+        for k in range(5):
+            db_idx = db_indices[k]
+            rgb_img = eval_ds[int(db_idx)][0]
+            rgb_img = (rgb_img * std + mean).permute(1, 2, 0).numpy()
+            rgb_img = np.clip(rgb_img, 0, 1)
+            
+            axes[0, k+1].imshow(rgb_img)
+            axes[0, k+1].set_title(f'Rank {k+1}\nScore: {scores[k]:.3f}', fontsize=10)
+            axes[0, k+1].axis('off')
+        
+        # Row 2: Matching visualization (only Top-1)
+        if len(matches[0]) > 0:
+            matches_i, matches_j, matches_conf = matches
+            
+            # Top-1 RGB
+            db_idx = db_indices[0]
+            rgb_img = eval_ds[int(db_idx)][0]
+            rgb_img = (rgb_img * std + mean).permute(1, 2, 0).numpy()
+            rgb_img = np.clip(rgb_img, 0, 1)
+            
+            # Side-by-side with matches
+            combined = np.hstack([thermal_img, rgb_img])
+            
+            ax = plt.subplot(2, 1, 2)
+            ax.imshow(combined)
+            
+            # Draw matches
+            patch_size = 14
+            img_h, img_w = 224, 224
+            
+            # Convert patch indices to pixel coordinates
+            def patch_to_pixel(patch_idx):
+                row = patch_idx // 16
+                col = patch_idx % 16
+                y = row * patch_size + patch_size // 2
+                x = col * patch_size + patch_size // 2
+                return x, y
+            
+            # Draw lines
+            num_matches = min(50, len(matches_i))  # 최대 50개
+            for idx in range(num_matches):
+                i = matches_i[idx]
+                j = matches_j[idx]
+                conf = matches_conf[idx]
+                
+                x1, y1 = patch_to_pixel(i)
+                x2, y2 = patch_to_pixel(j)
+                x2 += img_w  # RGB는 오른쪽
+                
+                # Color by confidence
+                color = plt.cm.hot(conf / 0.1)  # 0.1 = max expected conf
+                
+                ax.plot([x1, x2], [y1, y2], 
+                       color=color, linewidth=1, alpha=0.6)
+                ax.scatter([x1], [y1], c='cyan', s=10, zorder=5)
+                ax.scatter([x2], [y2], c='lime', s=10, zorder=5)
+            
+            ax.set_title(f'MNN Matches: {len(matches_i)} pairs (showing top {num_matches})', 
+                        fontsize=12, fontweight='bold')
+            ax.axis('off')
+            
+            # Vertical divider
+            ax.axvline(x=img_w, color='white', linewidth=2, linestyle='--')
+        else:
+            axes[1, 0].text(0.5, 0.5, 'No matches found', 
+                          ha='center', va='center', fontsize=16)
+            axes[1, 0].axis('off')
+        
+        plt.tight_layout()
+        save_path = os.path.join(save_dir, f'epoch_{epoch:03d}_query_{query_idx:05d}.png')
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Saved MNN visualization: {save_path}")
     
 def visualize_top5_predictions(args, eval_ds, predictions, distances, positives_per_query, num_samples=10):
     """
@@ -207,9 +324,6 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                         encoded_dbs = encoded_dbs_flat.reshape(batch_size, RERANKING_TOP_K, 256, -1)  # [B, K, 256, 768]
                         encoded_dbs += model.module.decoder_pos_embed
                         
-                        # encoded_dbs: [32, 5, 256, 768]
-                        # encoded_queries: [32, 768]
-
                         # d. Query batch 생성 (각 query를 K번 반복)
                         encoded_query_batch = encoded_queries.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1)  # [B, K, 256, 768]
                         
@@ -218,47 +332,95 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                         encoded_dbs_flat = encoded_dbs.reshape(-1, 256, encoded_dbs.size(-1))
                         
                         # f. Decoder 통과 (thermal-rgb pair)
-                        last_block = None
                         thermal_dec = encoded_query_flat.clone()
                         for blk in model.module.decoder_thermal_blocks:
-                            thermal_dec = blk(
-                                thermal_dec,
-                                encoded_dbs_flat,
-                                return_attention=True
-                            )
-                            last_block = blk
+                            thermal_dec = blk(thermal_dec, encoded_dbs_flat, return_attention=True)
                         thermal_dec = model.module.decoder_norm(thermal_dec)
-                        thermal_cross_attn_map = last_block.cross_attn_weights
+                        thermal_cross_attn_map = model.module.decoder_thermal_blocks[-1].cross_attn_weights
                         
                         rgb_dec = encoded_dbs_flat.clone()
                         for blk in model.module.decoder_rgb_blocks:
-                            rgb_dec = blk(
-                                rgb_dec,
-                                encoded_query_flat,
-                                return_attention=True
-                            )
-                            last_block = blk
+                            rgb_dec = blk(rgb_dec, encoded_query_flat, return_attention=True)
                         rgb_dec = model.module.decoder_norm(rgb_dec)
-                        rgb_cross_attn_map = last_block.cross_attn_weights
+                        rgb_cross_attn_map = model.module.decoder_rgb_blocks[-1].cross_attn_weights
                         
-                        # ==========================================================
-                        # ★ LoFTR Concept: Dual-Softmax Scoring 추가 구현
-                        # ==========================================================
-                        #
-                        # 1. RGB Map의 차원을 Thermal Map 기준으로 맞추기 (Transpose)
-                        # rgb_cross_attn_map: [Batch, RGB_Query, Thermal_Key]
-                        # -> [Batch, Thermal_Key, RGB_Query] 형태로 변환 (즉, Thermal x RGB)
+                        # ========== LoFTR-style Mutual Agreement ==========
                         rgb_map_transposed = rgb_cross_attn_map.transpose(1, 2)
-                        #
-                        # 2. 상호 검증 (Dual-Softmax 개념)
-                        # 두 맵을 곱하면 "서로가 서로를 볼 때"만 값이 살아남음
-                        mutual_agreement = thermal_cross_attn_map * rgb_map_transposed # [B*K, 256, 256]
-                        #
-                        # ========== Mutual Agreement 통계 저장 ==========
-                        if batch_idx == 0:  # 첫 배치만 저장 (또는 전체 저장하려면 이 조건 제거)
-                            # 통계 계산
-                            ma_flat = mutual_agreement.view(mutual_agreement.size(0), -1)  # [B*K, 65536]
+                        mutual_agreement = thermal_cross_attn_map * rgb_map_transposed  # [B*K, 256, 256]
+                        
+                        # ========== MNN (Mutual Nearest Neighbor) ==========
+                        B_K, N_thermal, N_rgb = thermal_cross_attn_map.shape
+                        
+                        # 1. Best matches (argmax)
+                        thermal_to_rgb = thermal_cross_attn_map.argmax(dim=2)  # [B*K, 256]
+                        rgb_to_thermal = rgb_cross_attn_map.argmax(dim=2)      # [B*K, 256]
+                        
+                        # 2. Mutual check + Threshold
+                        threshold = 0.01
+                        mutual_scores = torch.zeros(B_K, device=thermal_cross_attn_map.device)
+                        mutual_matches_list = []  # For visualization
+                        
+                        for b in range(B_K):
+                            i_range = torch.arange(N_thermal, device=thermal_cross_attn_map.device)
+                            j_from_i = thermal_to_rgb[b]
+                            i_from_j = rgb_to_thermal[b, j_from_i]
                             
+                            # Mutual mask
+                            is_mutual = (i_from_j == i_range)
+                            
+                            # Confidence check
+                            conf_thermal = thermal_cross_attn_map[b, i_range, j_from_i]
+                            conf_rgb = rgb_cross_attn_map[b, j_from_i, i_range]
+                            conf_avg = (conf_thermal + conf_rgb) / 2
+                            
+                            # Threshold
+                            is_confident = conf_avg > threshold
+                            
+                            # Final mask
+                            valid_matches = is_mutual & is_confident
+                            
+                            # Score
+                            mutual_scores[b] = (conf_avg * valid_matches).sum()
+                            
+                            # Save matches for visualization (첫 5개만)
+                            if b < 5:
+                                matches_i = i_range[valid_matches].cpu().numpy()
+                                matches_j = j_from_i[valid_matches].cpu().numpy()
+                                matches_conf = conf_avg[valid_matches].cpu().numpy()
+                                mutual_matches_list.append((matches_i, matches_j, matches_conf))
+                        
+                        # 3. Reshape
+                        rerank_scores_batch = mutual_scores.view(batch_size, RERANKING_TOP_K)
+                        
+                        # 4. Reranking
+                        for i in range(batch_size):
+                            query_idx = start_idx + i
+                            scores = rerank_scores_batch[i].cpu().numpy()
+                            reranked_order = np.argsort(-scores)  # Descending
+                            
+                            top_k_db_indices = top_k_db_indices_batch[i]
+                            reranked_predictions[query_idx, :RERANKING_TOP_K] = \
+                                top_k_db_indices[reranked_order]
+                            
+                            if predictions[query_idx, 0] != reranked_predictions[query_idx, 0]:
+                                top1_change_count += 1
+                            total_count += 1
+                        
+                        # ========== Statistics Logging (첫 배치만) ==========
+                        if batch_idx == 0:
+                            # MNN Statistics
+                            print(f"\n{'='*60}")
+                            print(f"MNN Statistics (Batch {batch_idx}):")
+                            print(f"{'='*60}")
+                            for b in range(min(5, B_K)):
+                                if b < len(mutual_matches_list):
+                                    num_matches = len(mutual_matches_list[b][0])
+                                    avg_conf = mutual_matches_list[b][2].mean() if num_matches > 0 else 0
+                                    print(f"Sample {b}: {num_matches:3d} matches, avg conf: {avg_conf:.4f}")
+                            print(f"{'='*60}\n")
+                            
+                            # Mutual Agreement Statistics
+                            ma_flat = mutual_agreement.view(mutual_agreement.size(0), -1)
                             stats = {
                                 'mean': ma_flat.mean(dim=1).cpu().numpy(),
                                 'std': ma_flat.std(dim=1).cpu().numpy(),
@@ -267,15 +429,13 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                                 'median': ma_flat.median(dim=1)[0].cpu().numpy(),
                             }
                             
-                            # Threshold 통계
-                            thresholds = [0.001, 0.005, 0.01, 0.05, 0.1]
+                            thresholds = [0.00001, 0.001, 0.005, 0.01, 0.05, 0.1]
                             threshold_counts = {}
                             for th in thresholds:
                                 mask = (mutual_agreement > th)
                                 counts = mask.sum(dim=(1, 2)).cpu().numpy()
                                 threshold_counts[th] = counts
                             
-                            # 로그 파일 저장
                             log_path = os.path.join(args.save_dir, 'mutual_agreement_logs', f'epoch_{args.current_epoch:03d}_batch_{batch_idx:03d}.txt')
                             os.makedirs(os.path.dirname(log_path), exist_ok=True)
                             
@@ -284,8 +444,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                                 f.write(f"Shape: {mutual_agreement.shape}\n")
                                 f.write("="*60 + "\n\n")
                                 
-                                # 각 샘플별 통계
-                                for b in range(min(5, mutual_agreement.size(0))):  # 처음 5개만
+                                for b in range(min(5, mutual_agreement.size(0))):
                                     f.write(f"Sample {b} (Query {start_idx + b // RERANKING_TOP_K}, Rank {b % RERANKING_TOP_K}):\n")
                                     f.write(f"  Mean:   {stats['mean'][b]:.6f}\n")
                                     f.write(f"  Std:    {stats['std'][b]:.6f}\n")
@@ -297,7 +456,6 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                                         f.write(f"    > {th:.3f}: {threshold_counts[th][b]:.0f} / 65536 ({100*threshold_counts[th][b]/65536:.2f}%)\n")
                                     f.write("\n")
                                 
-                                # 전체 통계
                                 f.write("="*60 + "\n")
                                 f.write("Overall Statistics (all B*K samples):\n")
                                 f.write(f"  Mean:   {stats['mean'].mean():.6f} ± {stats['mean'].std():.6f}\n")
@@ -309,30 +467,18 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                                     f.write(f"    > {th:.3f}: {avg_count:.1f} / 65536 ({100*avg_count/65536:.2f}%)\n")
                             
                             print(f"Saved mutual agreement log: {log_path}")
-                        # ================================================
-                        break
-                        #
-                        
-                        # (선택) 방법 B: 확실한 매칭 개수만 세기 (Hard Count)
-                        # threshold = 0.1 # 예: 확률 10% 이상인 것만 인정
-                        threshold = 0.01
-                        mask = (mutual_agreement > threshold)
-                        num_over_threshold = mask.sum(dim=(1, 2))  # [B*K]
-                        total_points = mutual_agreement.size(1) * mutual_agreement.size(2)  # 256*256 = 65536
-
-                        # Print
-                        for b in range(num_over_threshold.size(0)):
-                            print(f"Sample {b}: threshold over point {num_over_threshold[b].item():.0f} / {total_points}")
-                        rerank_scores_flat = num_over_threshold
-                        #
-                        # 4. 배치 형태로 복원 [B, K]
-                        # 이 점수가 높을수록 두 이미지가 진짜 짝꿍일 확률이 높음
-                        rerank_scores_batch = rerank_scores_flat.view(batch_size, RERANKING_TOP_K)
-                        # TODO: 여기서 rerank_scores_batch를 이용해 순위를 다시 정렬하거나 저장
-                        # 예: final_scores[start_idx:end_idx] = rerank_scores_batch.cpu()
-                        # ==========================================================
-                        
-                        # save_simple_cross_attn(rgb_cross_attn_map, "./test.png")
+                            
+                            # Visualization
+                            save_mnn_visualization(
+                                eval_ds=eval_ds,
+                                query_indices=list(range(start_idx, min(start_idx + 5, end_idx))),
+                                top_k_db_indices=top_k_db_indices_batch[:5].cpu().numpy(),
+                                mutual_matches_list=mutual_matches_list,
+                                rerank_scores=rerank_scores_batch[:5].cpu().numpy(),
+                                save_dir=os.path.join(args.save_dir, 'mnn_matches'),
+                                epoch=args.current_epoch
+                            )
+                        # ==================================================
                         
                 except Exception as e:
                     import traceback
@@ -550,16 +696,3 @@ def fuse_inference(args, eval_ds, models):
             recalls_str[key][k] = ", ".join([f"{method[k]}/{key}  R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, recalls[key][k])])
 
     return recalls, recalls_str
-
-                        # for i, query_idx in enumerate(range(start_idx, end_idx)):
-                        #     reconstruction_losses = loss[i].cpu().numpy()
-                        #     reranked_order = np.argsort(reconstruction_losses)
-                            
-                        #     reconstruction_losses_dict[query_idx] = reconstruction_losses.tolist()
-                            
-                        #     top_k_db_indices = top_k_db_indices_batch[i]
-                        #     reranked_predictions[query_idx, :RERANKING_TOP_K] = top_k_db_indices[reranked_order]
-                            
-                        #     if predictions[query_idx, 0] != reranked_predictions[query_idx, 0]:
-                        #         top1_change_count += 1
-                        #     total_count += 1
