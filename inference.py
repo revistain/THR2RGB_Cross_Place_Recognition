@@ -478,6 +478,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                                 save_dir=os.path.join(args.save_dir, 'mnn_matches'),
                                 epoch=args.current_epoch
                             )
+                        break
                         # ==================================================
                         
                 except Exception as e:
