@@ -195,12 +195,12 @@ if __name__ == "__main__":
             logging.debug("Finish computing triplets")
 
             ### triplet을 위한 DataLoader 생성
-            # DataLoader는 (Batch, images, triplets_local_indexes, triplets_global_indexes[index], aligned_rgb)를 getitem
+            # DataLoader는 (Batch, images, triplets_local_indexes, triplets_global_indexes[index], paired_rgb)를 getitem
             # images: stacked(query, pos, *negs)
             # triplets_local_indexes: triplet 내에서의 local index
             #   ex) (0, 1, 2), (0, 1, 3), ..., (0, 1, 11) # (query, pos, neg)의 pairs
             # triplets_global_indexes[index]: ?
-            # aligned_rgb: thermal query와 맞는 rgb query 이미지
+            # paired_rgb: thermal query와 맞는 rgb query 이미지
             triplets_dl = DataLoader(dataset=triplets_ds, num_workers=args.num_workers,
                                     batch_size=args.train_batch_size,
                                     collate_fn=datasets_T2R.collate_fn,
@@ -228,7 +228,7 @@ if __name__ == "__main__":
                 global_features, patch_embedding, recon_loss, masks, masked_patch_embedding = model(
                     images.to(args.device),
                     flags=flags,
-                    aligned_rgb=aligned_rgbs.to(args.device),
+                    paired_rgb=aligned_rgbs.to(args.device),
                     return_mask=True,
                     return_masked_patch=True
                 )
@@ -279,8 +279,8 @@ if __name__ == "__main__":
                 global_step += 1
 
                 del overall_loss, triplet_loss, recon_loss
-                # break # for fast debug
-            
+                if args.debug_fast_track: break
+                
             logging.info(f"Epoch[{epoch_num:02d}]({loop_num + 1}/{loops_num}): " +
                         f"current batch triplet loss = {batch_loss:.8f}, " +
                         f"average epoch triplet loss = {epoch_losses.mean():.8f}")

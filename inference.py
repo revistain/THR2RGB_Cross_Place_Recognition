@@ -162,7 +162,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                     patches = outputs[1]
                     patches = patches.cpu().numpy()
                     queries_patch_tokens[indices.numpy()-eval_ds.database_num, :] = patches
-                # break # for fast debug
+                if args.debug_fast_track: break
 
             logging.info(f"Finished extracting {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
 
@@ -333,11 +333,6 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                     
                     # e. Reconstruction
                     reconstructed_patches = model.module.prediction_head(thermal_full_dec)  # [B*K, 256, 588]
-                    
-                    # 추가! confidence score 패치 시각화 추가
-                    if args.use_confidence_map:
-                        confidence_score_map = model.module.confidence_head(thermal_full_dec)  # [B, 256]
-                    # confidence_map 시각화(grayscale), rgb/thermal 시각화, rgb/thermal과 confidence map 겹친 사진 시각화
                     
                     # f. Target patches (batch)
                     query_abs_indices = list(range(eval_ds.database_num + start_idx, eval_ds.database_num + end_idx))
