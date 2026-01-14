@@ -472,7 +472,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                             save_mnn_visualization(
                                 eval_ds=eval_ds,
                                 query_indices=list(range(start_idx, min(start_idx + 5, end_idx))),
-                                top_k_db_indices=top_k_db_indices_batch[:5].cpu().numpy(),
+                                top_k_db_indices=top_k_db_indices_batch[:5],
                                 mutual_matches_list=mutual_matches_list,
                                 rerank_scores=rerank_scores_batch[:5].cpu().numpy(),
                                 save_dir=os.path.join(args.save_dir, 'mnn_matches'),
