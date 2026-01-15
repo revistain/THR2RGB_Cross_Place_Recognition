@@ -1,6 +1,6 @@
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
-CUDA_VISIBLE_DEVICES=1 \
+CUDA_VISIBLE_DEVICES=2 \
 python3 train_wandb.py \
     --save_dir './logs' \
     --features_dim 768 \
@@ -9,17 +9,17 @@ python3 train_wandb.py \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 4 \
     --num_trainable_blocks_THERMAL 4 \
-    --comment "test-croco-0.8-alpha10.0-decDepth8-bidirectional-ssim-contrastLoss-reranking" \
+    --comment "test-croco-0.8-alpha10.0-decDepth8-mse+ssim(0.84)-reranking" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
     --croco_mask_ratio 0.8 \
     --num_decoder_depth 8 \
     --recon_weight 10 \
-    --recon_loss_type 'ssim' \
-    --use_contrastive_recon_loss \
+    --recon_loss_type 'mse+ssim' \
     --use_reranking
-    # -ssim-contrastLoss
+    # --use_contrastive_recon_loss \
+    # --ssim-contrastLoss
     # --use_confidence_map
     # --use_ssim_recon_loss
     # --use_reranking \

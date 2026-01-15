@@ -96,7 +96,6 @@ class MaskedMSE(torch.nn.Module):
             
         elif self.loss_type == 'mse+ssim':
             # MSE + SSIM 조합
-            # MSE
             mse_loss = (pred - target) ** 2
             mse_loss = mse_loss.mean(dim=-1)  # [B, 256]
             
@@ -124,7 +123,8 @@ class MaskedMSE(torch.nn.Module):
                 ssim_loss = ssim_loss * mask_ratio
             
             # 조합 (0.5 : 0.5)
-            loss = 0.5 * mse_loss + 0.5 * ssim_loss  # [B]
+            ssim_ratio = 0.84
+            loss = ssim_ratio * mse_loss + (1-ssim_ratio) * ssim_loss  # [B]
             
             # reduction
             if self.reduction == 'none':
