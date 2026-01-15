@@ -352,19 +352,20 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                             
                             print(f"Saved mutual agreement log: {log_path}")
                             
-                            # Visualization
-                            save_mnn_visualization(
-                                eval_ds=eval_ds,
-                                query_indices=list(range(start_idx, min(start_idx + 5, end_idx))),
-                                top_k_db_indices=top_k_db_indices_batch[:5],
-                                mutual_matches_list=mutual_matches_list,
-                                rerank_scores=rerank_scores_batch[:5].cpu().numpy(),
-                                cross_attn_map_rgb2thermal=rgb_to_thermal, # [B*K, 16*16]
-                                cross_attn_map_thermal2rgb=thermal_to_rgb, # [B*K, 16*16]
-                                save_dir=os.path.join(args.save_dir, 'mnn_matches'),
-                                epoch=args.current_epoch
-                            )
-                        break
+                            if batch_idx % 200 == 100:
+                                VIS_QUERY_COUNT = 5
+                                save_mnn_visualization(
+                                    eval_ds=eval_ds,
+                                    query_indices=list(range(start_idx, min(start_idx + VIS_QUERY_COUNT, end_idx))),
+                                    top_k_db_indices=top_k_db_indices_batch[:VIS_QUERY_COUNT],
+                                    mutual_matches_list=mutual_matches_list,
+                                    rerank_scores=rerank_scores_batch[:VIS_QUERY_COUNT].cpu().numpy(),
+                                    thermal_cross_attn_maps=thermal_cross_attn_map[:VIS_QUERY_COUNT*5],  # 5 queries × 5 ranks
+                                    rgb_cross_attn_maps=rgb_cross_attn_map[:VIS_QUERY_COUNT*5],
+                                    save_dir=os.path.join(args.save_dir, 'mnn_matches'),
+                                    epoch=args.current_epoch,
+                                )
+                            break
                         # ==================================================
                         
                 except Exception as e:

@@ -45,7 +45,6 @@ def load_model(args, model):
         current_epoch_r1_list.append(recalls[0])
         
 if __name__ == "__main__":
-    set_seed()
     parser = Parser()
     args = parser.parse_arguments()
     model = network.CrossModalVPR_Net(

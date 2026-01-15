@@ -16,5 +16,5 @@ python3 attn_map_match.py \
     --num_decoder_depth 8 \
     --recon_weight 10 \
     --recon_loss_type 'mse' \
-    --resume /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/test-croco-0.8-alpha10.0-decDepth8-bidirectional-mse-reranking/260114_040035/last_model.pth \
+    --resume /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/test-croco-0.8-alpha10.0-decDepth8-bidirectional-mse-reranking/260114_101935/last_model.pth \
     --use_reranking
