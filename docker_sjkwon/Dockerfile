@@ -22,7 +22,7 @@ RUN curl -sSLo miniforge.sh https://github.com/conda-forge/miniforge/releases/la
     chmod +x miniforge.sh && ./miniforge.sh -b -p $CONDA_DIR && \
     rm miniforge.sh && conda clean -afy
 
-RUN conda install -y python=3.10
+RUN conda install -y python=3.8
 # COPY requirements.txt /tmp/requirements.txt
 # RUN pip install -r /tmp/requirements.txt
 

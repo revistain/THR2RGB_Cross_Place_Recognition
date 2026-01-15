@@ -5,11 +5,11 @@ USER_NAME := $(shell whoami)
 # 이미지 및 사용자 정보 변수
 IMAGE_NAME := ${USER_NAME}/thr2rgb_pr
 IMAGE_TAG := cuda12.1.0-torch2.5.1
-# FULL_IMAGE := $(IMAGE_NAME):$(IMAGE_TAG)
-FULL_IMAGE := sjkwon/thr2rgb_pr:cuda12.1.0-torch2.5.1   
+FULL_IMAGE := $(IMAGE_NAME):$(IMAGE_TAG)
+# FULL_IMAGE := sjkwon/thr2rgb_pr:cuda12.1.0-torch2.5.1   
  
 
-CONTAINER_NAME := jwkim_thr2rgb_pr
+CONTAINER_NAME := jwkim_callibration_test
 
 POS_GPUS=all
 TBP=8818
