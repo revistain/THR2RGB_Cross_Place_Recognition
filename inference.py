@@ -34,122 +34,6 @@ def patchify(imgs):
     
     return x
 
-def save_mnn_visualization(eval_ds, query_indices, top_k_db_indices, 
-                          mutual_matches_list, rerank_scores, 
-                          save_dir, epoch):
-    """
-    MNN matching 시각화
-    
-    Args:
-        eval_ds: dataset
-        query_indices: list of query indices
-        top_k_db_indices: [num_queries, K] - Top-K DB indices
-        mutual_matches_list: list of (matches_i, matches_j, conf) tuples
-        rerank_scores: [num_queries, K] - Reranking scores
-        save_dir: save directory
-        epoch: current epoch
-    """
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as patches
-    
-    os.makedirs(save_dir, exist_ok=True)
-    
-    for q_idx, (query_idx, db_indices, matches, scores) in enumerate(
-        zip(query_indices, top_k_db_indices, mutual_matches_list, rerank_scores)
-    ):
-        # Load images
-        thermal_abs_idx = eval_ds.database_num + query_idx
-        thermal_img = eval_ds[thermal_abs_idx][0]  # [3, 224, 224]
-        
-        # Denormalize
-        mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-        thermal_img = (thermal_img * std + mean).permute(1, 2, 0).numpy()
-        thermal_img = np.clip(thermal_img, 0, 1)
-        
-        # Top-5 RGB images
-        fig, axes = plt.subplots(2, 6, figsize=(24, 8))
-        
-        # Row 1: Thermal + Top-5 RGB
-        axes[0, 0].imshow(thermal_img)
-        axes[0, 0].set_title(f'Query {query_idx}\n(Thermal)', fontsize=12, fontweight='bold')
-        axes[0, 0].axis('off')
-        
-        for k in range(5):
-            db_idx = db_indices[k]
-            rgb_img = eval_ds[int(db_idx)][0]
-            rgb_img = (rgb_img * std + mean).permute(1, 2, 0).numpy()
-            rgb_img = np.clip(rgb_img, 0, 1)
-            
-            axes[0, k+1].imshow(rgb_img)
-            axes[0, k+1].set_title(f'Rank {k+1}\nScore: {scores[k]:.3f}', fontsize=10)
-            axes[0, k+1].axis('off')
-        
-        # Row 2: Matching visualization (only Top-1)
-        if len(matches[0]) > 0:
-            matches_i, matches_j, matches_conf = matches
-            
-            # Top-1 RGB
-            db_idx = db_indices[0]
-            rgb_img = eval_ds[int(db_idx)][0]
-            rgb_img = (rgb_img * std + mean).permute(1, 2, 0).numpy()
-            rgb_img = np.clip(rgb_img, 0, 1)
-            
-            # Side-by-side with matches
-            combined = np.hstack([thermal_img, rgb_img])
-            
-            ax = plt.subplot(2, 1, 2)
-            ax.imshow(combined)
-            
-            # Draw matches
-            patch_size = 14
-            img_h, img_w = 224, 224
-            
-            # Convert patch indices to pixel coordinates
-            def patch_to_pixel(patch_idx):
-                row = patch_idx // 16
-                col = patch_idx % 16
-                y = row * patch_size + patch_size // 2
-                x = col * patch_size + patch_size // 2
-                return x, y
-            
-            # Draw lines
-            num_matches = min(50, len(matches_i))  # 최대 50개
-            for idx in range(num_matches):
-                i = matches_i[idx]
-                j = matches_j[idx]
-                conf = matches_conf[idx]
-                
-                x1, y1 = patch_to_pixel(i)
-                x2, y2 = patch_to_pixel(j)
-                x2 += img_w  # RGB는 오른쪽
-                
-                # Color by confidence
-                color = plt.cm.hot(conf / 0.1)  # 0.1 = max expected conf
-                
-                ax.plot([x1, x2], [y1, y2], 
-                       color=color, linewidth=1, alpha=0.6)
-                ax.scatter([x1], [y1], c='cyan', s=10, zorder=5)
-                ax.scatter([x2], [y2], c='lime', s=10, zorder=5)
-            
-            ax.set_title(f'MNN Matches: {len(matches_i)} pairs (showing top {num_matches})', 
-                        fontsize=12, fontweight='bold')
-            ax.axis('off')
-            
-            # Vertical divider
-            ax.axvline(x=img_w, color='white', linewidth=2, linestyle='--')
-        else:
-            axes[1, 0].text(0.5, 0.5, 'No matches found', 
-                          ha='center', va='center', fontsize=16)
-            axes[1, 0].axis('off')
-        
-        plt.tight_layout()
-        save_path = os.path.join(save_dir, f'epoch_{epoch:03d}_query_{query_idx:05d}.png')
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        plt.close()
-        
-        print(f"Saved MNN visualization: {save_path}")
-    
 def visualize_top5_predictions(args, eval_ds, predictions, distances, positives_per_query, num_samples=10):
     """
     Query와 top-5 retrieved 이미지를 시각화
@@ -475,6 +359,8 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                                 top_k_db_indices=top_k_db_indices_batch[:5],
                                 mutual_matches_list=mutual_matches_list,
                                 rerank_scores=rerank_scores_batch[:5].cpu().numpy(),
+                                cross_attn_map_rgb2thermal=rgb_to_thermal, # [B*K, 16*16]
+                                cross_attn_map_thermal2rgb=thermal_to_rgb, # [B*K, 16*16]
                                 save_dir=os.path.join(args.save_dir, 'mnn_matches'),
                                 epoch=args.current_epoch
                             )
