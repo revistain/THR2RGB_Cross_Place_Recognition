@@ -432,8 +432,6 @@ class CrossModalVPR_Net(nn.Module):
                     # 6. Decoder Positional Encoding
                     thermal_full_dec = thermal_full + self.decoder_pos_embed  # [B, 256, 768]
                     out = {"x_norm_patchtokens": thermal_full_dec}
-                    target_hogs = extract_hog_batch(x)
-                    print("hogs extracted")
                 else:
                     out = self.thermal_backbone(x)
             agg_layer = self.thermal_aggregation

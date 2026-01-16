@@ -138,7 +138,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
                     patches = outputs[1]
                     patches = patches.cpu().numpy()
                     database_patch_tokens[indices.numpy(), :] = patches
-                break # for fast debug
+                # break # for fast debug
 
             logging.info(f"Finished extracting {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
 
@@ -165,7 +165,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
                     patches = outputs[1]
                     patches = patches.cpu().numpy()
                     queries_patch_tokens[indices.numpy()-eval_ds.database_num, :] = patches
-                break # for fast debug
+                # break # for fast debug
 
             logging.info(f"Finished extracting {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
 
@@ -335,7 +335,8 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
                         if predictions[query_idx, 0] != reranked_predictions[query_idx, 0]:
                             top1_change_count += 1
                         total_count += 1
-
+                    # break # for fast debug
+                
                 logging.info(f"Reranking completed in {time.time() - start_time:.2f} s")
                 print(f"RERANK: changed {top1_change_count} / {total_count}")
                 
@@ -357,7 +358,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
                         num_samples=5
                     )
                 #########################
-                prev_predictions = predictions.clone()
+                prev_predictions = predictions.copy()
                 predictions = reranked_predictions
         
         # 4. positive query(정답)가 몇 번째 top-N에 속하는지 검사하기
