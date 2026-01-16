@@ -16,6 +16,7 @@ torch.backends.cudnn.deterministic = True
 from croco.models.masking import RandomMask
 from croco.models.criterion import MaskedMSE
 
+from utils import *
 from recon_vis import *
 
 def patchify(imgs):
@@ -100,7 +101,7 @@ def index_to_image_tensor(dataset, index):
 
 # TODO: can be less memory cost
 # TODO: finish the uncompleted parts
-def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
+def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, seq_name=""):
     '''
     hard_resize: directly use the resized image
     single_query: use the resized image, and set query_infer_batchsize=1 (used when the query images have varying size)
@@ -136,6 +137,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                     patches = outputs[1]
                     patches = patches.cpu().numpy()
                     database_patch_tokens[indices.numpy(), :] = patches
+                # break # for fast debug
 
             logging.info(f"Finished extracting {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
 
@@ -216,12 +218,14 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
 
                 queries_features_mask = np.empty((eval_ds.queries_num, 256), dtype="bool")
                 masked_queries_features = np.empty((eval_ds.queries_num, 256, args.features_dim), dtype="float32")
+                hog_queries_targets = np.empty((eval_ds.queries_num, 256, 36), dtype="float32")
                 model.module.use_masked_inference = True
                 for inputs, indices, flags in tqdm(queries_dataloader, ncols=100):
                     features = model(inputs.to(args.device), flags, return_mask=True)
                     encoded_features = features[1].reshape(inputs.size(0), 256, -1).cpu().numpy()
                     masked_queries_features[indices.numpy()-eval_ds.database_num,:,:] = encoded_features
                     queries_features_mask[indices.numpy()-eval_ds.database_num,:] = features[3].detach().cpu().numpy()
+                    hog_queries_targets[indices.numpy()-eval_ds.database_num,:] = features[4].detach().cpu().numpy()
                 model.module.use_masked_inference = False
 
                 logging.info(f"Finished extracting (FOR RERANK) {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
@@ -278,35 +282,44 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                         thermal_dec = blk(thermal_dec, encoded_dbs_flat)
                     thermal_full_dec = model.module.decoder_norm(thermal_dec)
                     
-                    # e. Reconstruction
-                    reconstructed_patches = model.module.prediction_head(thermal_full_dec)  # [B*K, 256, 588]
+                    # g. Reconstruction
+                    reconstructed_hogs = model.module.hog_prediction_head(thermal_full_dec)  # [B*K, 256, 588]
                     
-                    # 추가! confidence score 패치 시각화 추가
-                    if args.use_confidence_map:
-                        confidence_score_map = model.module.confidence_head(thermal_full_dec)  # [B, 256]
-                    # confidence_map 시각화(grayscale), rgb/thermal 시각화, rgb/thermal과 confidence map 겹친 사진 시각화
+                    # h. Target patches (batch)
+                    # query_abs_indices = list(range(eval_ds.database_num + start_idx, eval_ds.database_num + end_idx))
+                    # query_imgs = torch.stack([eval_ds[idx][0] for idx in query_abs_indices]).to('cuda') # [B, 3, 224, 224]
+                    # query_imgs_batch = query_imgs.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1, -1) # [B, K, 3, 224, 224]
+                    # query_imgs_flat = query_imgs_batch.reshape(-1, *query_imgs.shape[1:])  # [B*K, 3, 224, 224]
                     
-                    # f. Target patches (batch)
-                    query_abs_indices = list(range(eval_ds.database_num + start_idx, eval_ds.database_num + end_idx))
-                    query_imgs = torch.stack([eval_ds[idx][0] for idx in query_abs_indices]).to('cuda')  # [B, 3, 224, 224]
-                    query_imgs_batch = query_imgs.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1, -1)  # [B, K, 3, 224, 224]
-                    query_imgs_flat = query_imgs_batch.reshape(-1, *query_imgs.shape[1:])  # [B*K, 3, 224, 224]
-                    target_patches = patchify(query_imgs_flat)  # [B*K, 256, 588]
+                    # 1. Numpy 배열에서 슬라이싱 (CPU 메모리 상)
+                    target_hogs_np = hog_queries_targets[start_idx:end_idx]
+                    # 2. Tensor로 변환 및 GPU 이동
+                    # from_numpy는 메모리를 공유하려 하지만, to(device)로 이동하면서 복사가 일어납니다.
+                    target_hogs = torch.from_numpy(target_hogs_np).to(args.device)
+                    # 3. 기존 로직 그대로 실행 (이제 target_hogs가 Tensor이므로 작동함)
+                    # [B, N, C] -> [B, 1, N, C] -> [B, K, N, C] (Memory View)
+                    target_hogs_batch = target_hogs.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1) 
+                    # [B, K, N, C] -> [B*K, N, C]
+                    target_hogs_flat = target_hogs_batch.reshape(-1, *target_hogs.shape[1:])
                     
-                    # g. Masks (batch)
+                    # target_hogs = hog_queries_targets[start_idx:end_idx]
+                    # target_hogs_batch = target_hogs.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1) # torch.Size([B, K, 256, 36])
+                    # target_hogs_flat = target_hogs_batch.reshape(-1, *target_hogs.shape[1:])  # [B*K, 256, 36]
+                    
+                    # i. Masks (batch)
                     masks_batch = queries_features_mask[start_idx:end_idx]  # [B, 256]
                     masks_batch = torch.tensor(masks_batch, dtype=torch.bool).to('cuda')
                     masks_flat = masks_batch.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1)  # [B, K, 256]
                     masks_flat = masks_flat.reshape(-1, 256)  # [B*K, 256]
                     
-                    # h. Reconstruction loss
+                    # j. Reconstruction loss
                     loss = reconstruction_criterion(
-                        pred=reconstructed_patches,
+                        pred=reconstructed_hogs,
                         mask=masks_flat,
-                        target=target_patches
+                        target=target_hogs_flat
                     )  # [B*K]
                     
-                    # i. Reshape and rerank
+                    # k. Reshape and rerank
                     loss = loss.reshape(batch_size, RERANKING_TOP_K)  # [B, K]
                     
                     for i, query_idx in enumerate(range(start_idx, end_idx)):
@@ -342,12 +355,12 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                         num_samples=5
                     )
                 #########################
+                prev_predictions = predictions
                 predictions = reranked_predictions
         
         # 4. positive query(정답)가 몇 번째 top-N에 속하는지 검사하기
         positives_per_query = eval_ds.get_positives()
         recalls = np.zeros(len(args.recall_values))
-        pre_num = eval_ds.queries_num
         for query_index, pred in enumerate(predictions):
             for i, n in enumerate(args.recall_values):
                 if np.any(np.in1d(pred[:n], positives_per_query[query_index])):
@@ -357,174 +370,24 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
         
         logging.info(f"recalls: {','.join(map(str, recalls))}")
         recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, recalls)])
-        print(pre_num, eval_ds.queries_num)
         
+        if args.use_reranking:
+            prev_recalls = np.zeros(len(args.recall_values))
+            for query_index, pred in enumerate(prev_predictions):
+                for i, n in enumerate(args.recall_values):
+                    if np.any(np.in1d(pred[:n], positives_per_query[query_index])):
+                        prev_recalls[i:] += 1
+                        break
+            prev_recalls = prev_recalls / eval_ds.queries_num * 100
+            
+            logging.info(f"=================================================")
+            logging.info(f"recalls before RERANKING: {','.join(map(str, recalls))}")
+            prev_recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, recalls)])
+            logging.info(f"Recalls for {seq_name}: {prev_recalls_str}")
+            logging.info(f"=================================================")
         return recalls, recalls_str
     except Exception as e:
         import traceback
         print(f"ERROR caught: {e}")
         traceback.print_exc()  # 전체 stack trace 출력
         breakpoint()
-    
-### TODO
-def top_n_voting(topn, predictions, distances, maj_weight):
-    if topn == 'top1':
-        n = 1
-        selected = 0
-    elif topn == 'top5':
-        n = 5
-        selected = slice(0, 5)
-    elif topn == 'top10':
-        n = 10
-        selected = slice(0, 10)
-    # find predictions that repeat in the first, first five,
-    # or fist ten columns for each crop
-    vals, counts = np.unique(predictions[:, selected], return_counts=True)
-    # for each prediction that repeats more than once,
-    # subtract from its score
-    for val, count in zip(vals[counts > 1], counts[counts > 1]):
-        mask = (predictions[:, selected] == val)
-        distances[:, selected][mask] -= maj_weight * count/n
-        
-def fuse_inference(args, eval_ds, models):
-    model_rgb, model_t = models
-    ds_rgb, ds_t = eval_ds
-    model_rgb.eval()
-    model_t.eval()
-    
-    with torch.no_grad():
-        ### Extract database features
-        start_time = time.time()
-
-        database_subset_ds_rgb = Subset(ds_rgb, list(range(ds_rgb.database_num)))
-        database_dataloader_rgb = DataLoader(dataset=database_subset_ds_rgb, num_workers=args.num_workers,
-                                        batch_size=1, pin_memory=(args.device=="cuda"))
-        
-        database_subset_ds_t = Subset(ds_t, list(range(ds_t.database_num)))
-        database_dataloader_t = DataLoader(dataset=database_subset_ds_t, num_workers=args.num_workers,
-                                        batch_size=1, pin_memory=(args.device=="cuda"))
-
-        assert ds_rgb.database_num == ds_t.database_num
-        
-        database_features_rgb = np.empty((ds_rgb.database_num, args.features_dim), dtype="float32")
-        database_features_t = np.empty((ds_t.database_num, args.features_dim), dtype="float32")
-        database_features_cat = np.empty((ds_rgb.database_num, 2*args.features_dim), dtype="float32")
-        database_features_add = np.empty((ds_rgb.database_num, args.features_dim), dtype="float32")
-
-        for inputs, indices in tqdm(database_dataloader_rgb, ncols=100):
-            features = model_rgb(inputs.to(args.device)).view(-1, args.features_dim)
-            features = features.cpu().numpy()
-            database_features_rgb[indices.numpy(), :] = features
-            database_features_cat[indices.numpy(), :args.features_dim] = features
-            database_features_add[indices.numpy(), :] = features
-        
-        for inputs, indices in tqdm(database_dataloader_t, ncols=100):
-            features = model_t(inputs.to(args.device)).view(-1, args.features_dim)
-            features = features.cpu().numpy()
-            database_features_t[indices.numpy(), :] = features
-            database_features_cat[indices.numpy(), args.features_dim:] = features
-            database_features_add[indices.numpy(), :] += features
-
-        logging.info(f"Finished extracting {ds_rgb.database_num}*2 database features in {time.time() - start_time:.2f} s")
-
-        ### Extract query features
-        start_time = time.time()
-
-        queries_infer_batch_size = 1
-        queries_subset_ds_rgb = Subset(ds_rgb, list(range(ds_rgb.database_num, len(ds_rgb))))
-        queries_dataloader_rgb = DataLoader(dataset=queries_subset_ds_rgb, num_workers=args.num_workers,
-                                        batch_size=queries_infer_batch_size, pin_memory=(args.device=="cuda"))
-        queries_subset_ds_t = Subset(ds_t, list(range(ds_t.database_num, len(ds_t))))
-        queries_dataloader_t = DataLoader(dataset=queries_subset_ds_t, num_workers=args.num_workers,
-                                        batch_size=queries_infer_batch_size, pin_memory=(args.device=="cuda"))
-        
-        assert ds_rgb.queries_num == ds_t.queries_num
-        
-        queries_features_rgb = np.empty((ds_rgb.queries_num, args.features_dim), dtype="float32")
-        queries_features_t = np.empty((ds_t.queries_num, args.features_dim), dtype="float32")
-        queries_features_cat = np.empty((ds_rgb.queries_num, 2*args.features_dim), dtype="float32")
-        queries_features_add = np.empty((ds_rgb.queries_num, args.features_dim), dtype="float32")
-        
-        for inputs, indices in tqdm(queries_dataloader_rgb, ncols=100):
-            features = model_rgb(inputs.to(args.device)).view(-1, args.features_dim)
-            features = features.cpu().numpy()
-            queries_features_rgb[indices.numpy()-ds_rgb.database_num, :] = features
-            queries_features_cat[indices.numpy()-ds_rgb.database_num, :args.features_dim] = features
-            queries_features_add[indices.numpy()-ds_rgb.database_num, :] = features
-        
-        for inputs, indices in tqdm(queries_dataloader_t, ncols=100):
-            features = model_t(inputs.to(args.device)).view(-1, args.features_dim)
-            features = features.cpu().numpy()
-            queries_features_t[indices.numpy()-ds_rgb.database_num, :] = features
-            queries_features_cat[indices.numpy()-ds_rgb.database_num, args.features_dim:] = features
-            queries_features_add[indices.numpy()-ds_rgb.database_num, :] += features
-                 
-        logging.info(f"Finished extracting {ds_rgb.queries_num}*2 query features in {time.time() - start_time:.2f} s")
-    
-    faiss_index_rgb = faiss.IndexFlatL2(args.features_dim)
-    faiss_index_t = faiss.IndexFlatL2(args.features_dim)
-    faiss_index_cat = faiss.IndexFlatL2(2*args.features_dim)
-    faiss_index_add = faiss.IndexFlatL2(args.features_dim)
-    
-    faiss_index_rgb.add(database_features_rgb)
-    del database_features_rgb
-    faiss_index_t.add(database_features_t)
-    del database_features_t
-    faiss_index_cat.add(database_features_cat)
-    del database_features_cat
-    faiss_index_add.add(database_features_add)
-    del database_features_add
-
-    ### Calculating recalls
-    start_time = time.time()
-    
-    predictions_all = []
-    distances_all = []
-    
-    distances, predictions = faiss_index_rgb.search(queries_features_rgb, max(args.recall_values))
-    predictions_all.append(predictions)
-    distances_all.append(distances)
-    del queries_features_rgb
-    
-    distances, predictions = faiss_index_t.search(queries_features_t, max(args.recall_values))
-    predictions_all.append(predictions)
-    distances_all.append(distances)
-    del queries_features_t
-    
-    distances, predictions = faiss_index_cat.search(queries_features_cat, max(args.recall_values))
-    predictions_all.append(predictions)
-    distances_all.append(distances)
-    del queries_features_cat
-    
-    distances, predictions = faiss_index_add.search(queries_features_add, max(args.recall_values))
-    predictions_all.append(predictions)
-    distances_all.append(distances)
-    del queries_features_add
-
-    split = {
-        'morning':list(range(0,365))+list(range(1371,1770))+list(range(2754,2869)),
-        'afternoon':list(range(365,892))+list(range(1770,2231))+list(range(2869,2994)),
-        'evening':list(range(892,1371))+list(range(2231,2754))+list(range(2994,3130)),
-        'allday':list(range(0,3130))
-    }
-    
-    positives_per_query = ds_rgb.get_positives()
-    recalls = {'morning':np.zeros((4, len(args.recall_values))), 'afternoon':np.zeros((4, len(args.recall_values))),\
-        'evening':np.zeros((4, len(args.recall_values))), 'allday':np.zeros((4, len(args.recall_values)))}
-    recalls_str = {'morning':[""]*4, 'afternoon':[""]*4, 'evening':[""]*4, 'allday':[""]*4}
-    
-    method = ['rgb', 't', 'cat', 'add']
-    
-    for k, (predictions, distances) in enumerate(zip(predictions_all, distances_all)):
-        for key, indices in split.items():
-            for query_index in indices:
-                pred = predictions[query_index]
-                for i, n in enumerate(args.recall_values):
-                    if np.any(np.in1d(pred[:n], positives_per_query[query_index])):
-                        recalls[key][k, i:] += 1
-                        break
-            
-            recalls[key][k] = recalls[key][k] / len(indices) * 100
-            recalls_str[key][k] = ", ".join([f"{method[k]}/{key}  R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, recalls[key][k])])
-
-    return recalls, recalls_str

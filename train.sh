@@ -1,6 +1,6 @@
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
-CUDA_VISIBLE_DEVICES=4 \
+CUDA_VISIBLE_DEVICES=3 \
 python3 train_wandb.py \
     --save_dir './logs' \
     --features_dim 768 \
@@ -16,8 +16,8 @@ python3 train_wandb.py \
     --croco_mask_ratio 0.8 \
     --num_decoder_depth 8 \
     --recon_weight 10 \
-    --recon_loss_type 'mse'
-    # --use_reranking
+    --recon_loss_type 'mse' \
+    --use_reranking
     # --use_contrastive_recon_loss \
     # --ssim-contrastLoss
     # --use_confidence_map

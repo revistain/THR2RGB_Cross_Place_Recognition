@@ -361,6 +361,7 @@ class CrossModalVPR_Net(nn.Module):
         recon_loss = None
         mask = None
         masked_patch = None
+        target_hogs = None
         if modality == 'rgb':
             if self.use_masked_inference:
                 rgb_full = self.rgb_backbone(x)
@@ -402,7 +403,7 @@ class CrossModalVPR_Net(nn.Module):
                 recon_loss_fn = calculate_recon_loss
                 
                 # 9. Prediction Head
-                target_hogs = extract_hog_batch(x)
+                target_hogs = extract_hog_batch(x) # torch.Size([B, 256, 36])
                 reconstructed_hogs = self.hog_prediction_head(thermal_full_dec) # [4, 256, 36]
                 recon_loss = recon_loss_fn(reconstructed_hogs, mask, target_hogs)
                 
@@ -452,31 +453,34 @@ class CrossModalVPR_Net(nn.Module):
             # Aggregation -> Descriptor
             global_desc = agg_layer(x_feat) # [B, D]
         
-        return global_desc, patch_tokens, recon_loss, mask, masked_patch
+        return global_desc, patch_tokens, recon_loss, mask, masked_patch, target_hogs
 
     def forward(self, x, flags, aligned_rgb=None, return_mask=False, return_masked_patch=False):
         is_rgb = torch.tensor([f == 'rgb' for f in flags], device=x.device)
         final_emb = torch.zeros((x.size(0), self.output_dim), device=x.device)
         patch_emb = torch.zeros((x.size(0), 256, self.output_dim), device=x.device)
         masks = torch.zeros((x.size(0), 256), dtype=torch.bool, device=x.device)
+        target_hogs = torch.zeros((x.size(0), 256, 36), device=x.device)
         
         # thermal_count = len([_ for _ in flags if _ == 'thermal'])
         # masked_patch_emb = torch.zeros((thermal_count, 256, self.output_dim), device=x.device)
-        masked_patch_emb = None
-        
         recon_loss = None
+        masked_patch_emb = None
         try:
             if is_rgb.any():
-                global_emb, patch_rgb, _, _, _ = self.forward_model(x[is_rgb], modality='rgb')
+                global_emb, patch_rgb, _, _, _, _ = self.forward_model(x[is_rgb], modality='rgb')
                 if global_emb is not None: final_emb[is_rgb] = global_emb
                 patch_emb[is_rgb] = patch_rgb
             if (~is_rgb).any():
-                global_emb, patch_thermal, recon_loss, mask, masked_patch_thermal = self.forward_model(x[~is_rgb], modality='thermal', aligned_rgb=aligned_rgb, return_masked_patch=return_masked_patch)
+                global_emb, patch_thermal, recon_loss, mask, masked_patch_thermal, hogs = self.forward_model(x[~is_rgb], modality='thermal', aligned_rgb=aligned_rgb, return_masked_patch=return_masked_patch)
                 if global_emb is not None: final_emb[~is_rgb] = global_emb
                 patch_emb[~is_rgb] = patch_thermal
-                if return_mask: masks[~is_rgb] = mask
+                if return_mask:
+                    masks[~is_rgb] = mask
                 if return_masked_patch:
                     masked_patch_emb = masked_patch_thermal # torch.Size([4, 256, 768])
+                if hogs is not None:
+                    target_hogs[~is_rgb] = hogs
         except Exception as e:
             import traceback
             print(f"ERROR caught: {e}")
@@ -484,9 +488,9 @@ class CrossModalVPR_Net(nn.Module):
             breakpoint()
         
         if return_masked_patch:
-            return final_emb, patch_emb, recon_loss, masks, masked_patch_emb
+            return final_emb, patch_emb, recon_loss, masks, masked_patch_emb, target_hogs
         else:
-            return final_emb, patch_emb, recon_loss, masks
+            return final_emb, patch_emb, recon_loss, masks, target_hogs
 
 def get_backbone(pretrained_foundation, foundation_model_path):
     backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0)

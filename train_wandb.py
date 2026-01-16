@@ -225,7 +225,7 @@ if __name__ == "__main__":
                     pos_rgbs = torch.stack(pos_rgbs)
                     aligned_rgbs = pos_rgbs
                     
-                global_features, patch_embedding, recon_loss, masks, masked_patch_embedding = model(
+                global_features, patch_embedding, recon_loss, masks, masked_patch_embedding, _ = model(
                     images.to(args.device),
                     flags=flags,
                     aligned_rgb=aligned_rgbs.to(args.device),
@@ -304,7 +304,7 @@ if __name__ == "__main__":
         for seq, test_ds in zip(test_sequences, test_ds_list):
             logging.info(f"===== Evaluating Sequence: {seq} =====")
             args.current_epoch = epoch_num # 시각화
-            recalls, recalls_str = inference.inference(args, test_ds, model)
+            recalls, recalls_str = inference.inference(args, test_ds, model, seq_name=seq)
             logging.info(f"Recalls for {seq}: {recalls_str}")
             logging.info(f"================================================")
             current_epoch_r1_list.append(recalls[0])

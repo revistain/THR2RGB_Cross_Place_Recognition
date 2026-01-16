@@ -1,9 +1,13 @@
 import os
 import yaml
 import torch
-from collections import OrderedDict
-from datetime import datetime
 import shutil
+import numpy as np
+from einops import rearrange
+from datetime import datetime
+from skimage.feature import hog
+from skimage.color import rgb2gray
+from collections import OrderedDict
 
 def save_to_yaml(args, filename='config.yaml'):
     file_path = os.path.join(args.save_dir, filename)
@@ -52,11 +56,6 @@ def get_timestamp():
         cached_timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
     return cached_timestamp
 
-from skimage.feature import hog
-from skimage.color import rgb2gray
-import torch
-import numpy as np
-from einops import rearrange
 def extract_hog_simple(image):
     """
     Args:
@@ -136,14 +135,6 @@ def visualize_hog_simple(image, save_path=None):
         print(f"Saved: {save_path}")
     
     plt.show()
-
-'''
-  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/utils.py", line 99, in extract_hog_batch
-    hog_feat = extract_hog_simple(images[b])
-  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/utils.py", line 82, in extract_hog_simple
-    hog_feat = hog_feat.squeeze().reshape(256, 9)
-ValueError: cannot reshape array of size 26244 into shape (256,9)
-'''
 
 def extract_hog_batch(images):
     """
