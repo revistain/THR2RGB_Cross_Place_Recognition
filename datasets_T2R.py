@@ -144,11 +144,9 @@ class BaseSTheReODual(data.Dataset):
             self.soft_positives_per_query = np.array(self.soft_positives_per_query, dtype=object)
             self.soft_distances_per_query = np.array(self.soft_distances_per_query, dtype=object)
         else:
-            indices = knn.radius_neighbors(
-            self.queries_utms, 
-            radius=args.soft_positives_dist_threshold, 
-            return_distance=False
-        )
+            self.soft_positives_per_query = knn.radius_neighbors(
+                self.queries_utms, radius=args.soft_positives_dist_threshold, return_distance=False
+            )
 
         self.rgb_database_paths = np.concatenate(
             [mat['db_rgb'][0, 0] for mat in self.matStruct]
@@ -330,6 +328,7 @@ class TripletsSTheReODual(BaseSTheReODual):
 
         self.queries_num = len(self.rgb_queries_paths)
         self.use_align_rgb = use_align_rgb
+        self.use_paried_morning = args.use_paried_morning
 
     def __getitem__(self, index):
         if self.is_inference:
@@ -347,8 +346,7 @@ class TripletsSTheReODual(BaseSTheReODual):
             query = self.query_transform(self.get_thermal_img(self.t_queries_paths[query_index]))
             
             torch.manual_seed(seed)
-            # aligned_rgb = self.query_transform(self.get_rgb_img(self.rgb_queries_paths[query_index]))
-            aligned_rgb = self.query_transform(self.get_rgb_img(self.rgb_database_paths[query_index]))
+            aligned_rgb = self.query_transform(self.get_rgb_img(self.rgb_queries_paths[query_index]))
             
         else:
             query = self.query_transform(self.get_thermal_img(self.t_queries_paths[query_index]))
