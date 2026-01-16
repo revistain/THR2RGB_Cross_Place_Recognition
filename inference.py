@@ -138,7 +138,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
                     patches = outputs[1]
                     patches = patches.cpu().numpy()
                     database_patch_tokens[indices.numpy(), :] = patches
-                # break # for fast debug
+                break # for fast debug
 
             logging.info(f"Finished extracting {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
 
@@ -165,7 +165,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
                     patches = outputs[1]
                     patches = patches.cpu().numpy()
                     queries_patch_tokens[indices.numpy()-eval_ds.database_num, :] = patches
-                # break # for fast debug
+                break # for fast debug
 
             logging.info(f"Finished extracting {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
 
@@ -216,7 +216,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
                     split='queries',
                     hog_cache_dir='./hog_cache',
                     device=args.device  # 'cuda' or 'cpu'
-                ) 
+                )
             
                 # rerank2. masked된 query 전부 추출 (before decoder)
                 start_time = time.time()
@@ -302,6 +302,50 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
                     target_hogs = hog_queries_targets[start_idx:end_idx]  # [B, 256, 36]
                     target_hogs_batch = target_hogs.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1)
                     target_hogs_flat = target_hogs_batch.reshape(-1, 256, 36)
+                    # if batch_idx == 0: # 첫 번째 배치에서만 확인
+                    #     import matplotlib.pyplot as plt
+                    #     from skimage.feature import hog
+                        
+                    #     # 1. 검증할 샘플 인덱스 (배치의 0번째)
+                    #     check_idx = 0
+                    #     abs_idx = eval_ds.database_num + start_idx + check_idx
+                        
+                    #     # 2. 원본 이미지 가져오기 (Dataset에서 다시 로드)
+                    #     # eval_ds[idx] -> (image, index, flag)
+                    #     img_tensor, _, _ = eval_ds[abs_idx] 
+                    #     img_np = img_tensor.permute(1, 2, 0).numpy() # [H, W, C] for plot
+                        
+                    #     # 3. 데이터 정합성 체크 (값 비교)
+                    #     # 지금 로딩된 HOG값 vs 이미지에서 방금 다시 뽑은 HOG값 비교
+                    #     current_hog_feat = target_hogs[check_idx].cpu().numpy() # [256, 36]
+                    #     recalc_hog_feat = extract_hog_simple(img_tensor).numpy() # [256, 36]
+                        
+                    #     diff = np.abs(current_hog_feat - recalc_hog_feat).mean()
+                    #     print(f"\n[Validation] Index: {abs_idx}")
+                    #     print(f"HOG Difference (Loaded vs Recalculated): {diff:.6f}")
+                    #     if diff < 1e-5:
+                    #         print(">> ✅ SUCCESS: HOG Features Match Perfectly!")
+                    #     else:
+                    #         print(">> ❌ WARNING: HOG Features Do Not Match!")
+
+                    #     # 4. 시각화 (이미지 vs HOG 이미지)
+                    #     # HOG 시각화 이미지를 얻기 위해 skimage 다시 호출
+                    #     from skimage.color import rgb2gray
+                    #     gray = rgb2gray(img_np)
+                    #     _, hog_image = hog(gray, orientations=9, pixels_per_cell=(7, 7),
+                    #                     cells_per_block=(1, 1), visualize=True)
+
+                    #     fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+                    #     ax[0].imshow(img_np)
+                    #     ax[0].set_title(f"Query Image (Idx: {abs_idx})")
+                    #     ax[0].axis('off')
+                        
+                    #     ax[1].imshow(hog_image, cmap='hot')
+                    #     ax[1].set_title("Computed HOG Visualization")
+                    #     ax[1].axis('off')
+                        
+                    #     plt.savefig('debug_hog.png')
+                    #     breakpoint() # 여기서 멈춰서 확인
                     
                     # target_hogs = hog_queries_targets[start_idx:end_idx]
                     # target_hogs_batch = target_hogs.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1) # torch.Size([B, K, 256, 36])
@@ -335,7 +379,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
                         if predictions[query_idx, 0] != reranked_predictions[query_idx, 0]:
                             top1_change_count += 1
                         total_count += 1
-                    # break # for fast debug
+                    break # for fast debug
                 
                 logging.info(f"Reranking completed in {time.time() - start_time:.2f} s")
                 print(f"RERANK: changed {top1_change_count} / {total_count}")

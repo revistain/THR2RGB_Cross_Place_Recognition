@@ -278,7 +278,7 @@ if __name__ == "__main__":
                 global_step += 1
 
                 del overall_loss, triplet_loss, recon_loss
-                # break # for fast debug
+                break # for fast debug
             
             logging.info(f"Epoch[{epoch_num:02d}]({loop_num + 1}/{loops_num}): " +
                         f"current batch triplet loss = {batch_loss:.8f}, " +
