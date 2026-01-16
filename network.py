@@ -11,6 +11,7 @@ import torchvision.models as models
 
 from croco.models.masking import RandomMask
 from croco.models.criterion import MaskedMSE
+from utils import *
         
 class CroCoDecoderBlock(nn.Module):
     """
@@ -145,10 +146,12 @@ class CrossModalVPR_Net(nn.Module):
         self._set_decode_positional_embedding(self.output_dim)
         self._set_mask_generator(16*16, mask_ratio)
         self._set_prediction_head(self.output_dim, 14)
+        self._set_hog_prediction_head(self.output_dim)
         
         self.reconstruction_criterion = MaskedMSE(
             norm_pix_loss=False,
             masked=True,
+            loss_type=args.recon_loss_type,
         )
 
         # 2. Aggregation Layer (각각 따로 두는 것을 추천)
@@ -182,7 +185,14 @@ class CrossModalVPR_Net(nn.Module):
         )
         nn.init.normal_(self.prediction_head[0].weight, std=0.02)
         nn.init.zeros_(self.prediction_head[0].bias)
-
+        
+    def _set_hog_prediction_head(self, dec_embed_dim):
+        self.hog_prediction_head = nn.Sequential(
+            nn.Linear(dec_embed_dim, 36), # 768 → 588
+        )
+        nn.init.normal_(self.hog_prediction_head[0].weight, std=0.02)
+        nn.init.zeros_(self.hog_prediction_head[0].bias)
+        
     def patchify(self, imgs):
         """
         imgs: (B, 3, H, W)
@@ -292,11 +302,12 @@ class CrossModalVPR_Net(nn.Module):
                 recon_loss_fn = calculate_recon_loss
                 
                 # 9. Prediction Head
-                reconstructed_patches = self.prediction_head(rgb_full_dec)
-                target_patches = self.patchify(x)
+                target_hogs = extract_hog_batch(x) # torch.Size([B, 256, 36])
+                reconstructed_hogs = self.hog_prediction_head(rgb_full_dec) # [4, 256, 36]
+                recon_loss = recon_loss_fn(reconstructed_hogs, mask, target_hogs)
                 
                 # 10. Reconstruction loss 계산
-                recon_loss = recon_loss_fn(reconstructed_patches, mask, target_patches)
+                recon_loss = recon_loss_fn(reconstructed_hogs, mask, target_hogs)
                 
                 # 11. VPR용 patch tokens
                 if return_masked_patch: masked_patch = rgb_full

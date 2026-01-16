@@ -1,7 +1,7 @@
-# branch: BASELINE
+# branch: rgb_hog
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
-CUDA_VISIBLE_DEVICES=4 \
+CUDA_VISIBLE_DEVICES=5 \
 python3 train_wandb.py \
     --save_dir './logs' \
     --features_dim 768 \
@@ -10,15 +10,16 @@ python3 train_wandb.py \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 4 \
     --num_trainable_blocks_THERMAL 4 \
-    --comment "CroCo-RGBrecon-maskRatio0.8-reconWeight10-decDepth8-usePos" \
+    --comment "test-CroCo-RGBrecon-maskRatio0.8-reconWeight10-decDepth8-HoG" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
     --croco_mask_ratio 0.8 \
     --num_decoder_depth 8 \
     --recon_weight 10 \
-    --use_pos_as_paired_rgb
+    --recon_loss_type 'mse+ssim'
     # --use_reranking
+    # --use_pos_as_paired_rgb
 
     # --use_ssim_recon_loss
     # --use_confidence_map
