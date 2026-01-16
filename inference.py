@@ -101,7 +101,7 @@ def index_to_image_tensor(dataset, index):
 
 # TODO: can be less memory cost
 # TODO: finish the uncompleted parts
-def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
+def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,seq_name=""):
     '''
     hard_resize: directly use the resized image
     single_query: use the resized image, and set query_infer_batchsize=1 (used when the query images have varying size)
@@ -365,7 +365,6 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                                     save_dir=os.path.join(args.save_dir, 'mnn_matches'),
                                     epoch=args.current_epoch,
                                 )
-                            break
                         # ==================================================
                         
                 except Exception as e:
@@ -394,6 +393,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                         num_samples=5
                     )
                 #########################
+                prev_predictions = predictions.copy()
                 predictions = reranked_predictions
         
         import gc; gc.collect()
@@ -413,7 +413,21 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
         
         logging.info(f"recalls: {','.join(map(str, recalls))}")
         recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, recalls)])
-        print(pre_num, eval_ds.queries_num)
+
+        if args.use_reranking:
+            prev_recalls = np.zeros(len(args.recall_values))
+            for query_index, pred in enumerate(prev_predictions):
+                for i, n in enumerate(args.recall_values):
+                    if np.any(np.in1d(pred[:n], positives_per_query[query_index])):
+                        prev_recalls[i:] += 1
+                        break
+            prev_recalls = prev_recalls / eval_ds.queries_num * 100
+            
+            logging.info(f"=================================================")
+            logging.info(f"recalls before RERANKING: {','.join(map(str, recalls))}")
+            prev_recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, recalls)])
+            logging.info(f"Recalls for RERANKING {seq_name}: {prev_recalls_str}")
+            logging.info(f"=================================================")
         
         return recalls, recalls_str
     except Exception as e:
