@@ -93,6 +93,7 @@ class Parser():
         self.parser.add_argument("--use_decode_mask", action='store_true', default=False)
         self.parser.add_argument("--use_pos_as_paired_rgb", action='store_true', default=False)
         self.parser.add_argument("--recon_loss_type", type=str, default="none", choices=['mse', 'l1', 'ssim', 'mse+ssim'])
+        self.parser.add_argument("--use_fast_track", action='store_true', default=False)
         
     
     def parse_arguments(self):

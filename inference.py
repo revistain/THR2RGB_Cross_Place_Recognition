@@ -16,7 +16,9 @@ torch.backends.cudnn.deterministic = True
 from croco.models.masking import RandomMask
 from croco.models.criterion import MaskedMSE
 
+from utils import *
 from recon_vis import *
+from precompute_hog import *
 
 def patchify(imgs):
     """
@@ -150,7 +152,8 @@ def inference(args, eval_ds, model, scene_name="", pca=None, k=1, use_cuda=True,
                 features = features.cpu().numpy()
                 queries_features[indices.numpy()-eval_ds.database_num, :] = features
 
-                # break # for fast debug
+                if args.use_fast_track:
+                    break
 
             logging.info(f"Finished extracting {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
 
@@ -195,7 +198,24 @@ def inference(args, eval_ds, model, scene_name="", pca=None, k=1, use_cuda=True,
                     database_mask[indices.numpy()-eval_ds.database_num,:] = mask.detach().cpu().numpy()
 
                 logging.info(f"Finished extracting (FOR RERANK) {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
-
+                
+                # npy 불러오기
+                # Size Mismatch! eval_ds has 12589 queries, but loaded 2082 HOG features.
+                hog_queries_targets = load_hog_features(
+                    sequences=[scene_name],
+                    split='queries',
+                    hog_cache_dir='./hog_cache',
+                    device=args.device  # 'cuda' or 'cpu'
+                )
+                
+                if len(hog_queries_targets) != eval_ds.queries_num:
+                    print()
+                    raise ValueError(
+                        f"Size Mismatch! eval_ds has {eval_ds.queries_num} queries, "
+                        f"but loaded {len(hog_queries_targets)} HOG features. "
+                        "Check your 'sequences' argument."
+                    )
+                
                 # rerank2. masked된 query 전부 추출 (before decoder)
                 start_time = time.time()
                 queries_infer_batch_size = args.infer_batch_size
@@ -267,14 +287,18 @@ def inference(args, eval_ds, model, scene_name="", pca=None, k=1, use_cuda=True,
                         breakpoint()
                     
                     # e. Reconstruction
-                    reconstructed_patches = model.module.prediction_head(encoded_dbs_flat_dec)  # [B*K, 256, 588]
+                    reconstructed_hogs = model.module.hog_prediction_head(encoded_dbs_flat_dec)  # [B*K, 256, 588]
                     
                     # f. Target patches (batch)
-                    query_abs_indices = list(range(eval_ds.database_num + start_idx, eval_ds.database_num + end_idx))
-                    query_imgs = torch.stack([eval_ds[idx][0] for idx in query_abs_indices]).to('cuda')  # [B, 3, 224, 224]
-                    query_imgs_batch = query_imgs.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1, -1)  # [B, K, 3, 224, 224]
-                    query_imgs_flat = query_imgs_batch.reshape(-1, *query_imgs.shape[1:])  # [B*K, 3, 224, 224]
-                    target_patches = patchify(query_imgs_flat)  # [B*K, 256, 588]
+                    # query_abs_indices = list(range(eval_ds.database_num + start_idx, eval_ds.database_num + end_idx))
+                    # query_imgs = torch.stack([eval_ds[idx][0] for idx in query_abs_indices]).to('cuda')  # [B, 3, 224, 224]
+                    # query_imgs_batch = query_imgs.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1, -1)  # [B, K, 3, 224, 224]
+                    # query_imgs_flat = query_imgs_batch.reshape(-1, *query_imgs.shape[1:])  # [B*K, 3, 224, 224]
+                    # target_patches = patchify(query_imgs_flat)  # [B*K, 256, 588]
+                    
+                    target_hogs = hog_queries_targets[start_idx:end_idx]  # [B, 256, 36]
+                    target_hogs_batch = target_hogs.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1)
+                    target_hogs_flat = target_hogs_batch.reshape(-1, 256, 36)
                     
                     # g. Masks (batch)
                     masks_batch = database_mask[start_idx:end_idx]  # [B, 256]
@@ -284,9 +308,9 @@ def inference(args, eval_ds, model, scene_name="", pca=None, k=1, use_cuda=True,
                     
                     # h. Reconstruction loss
                     loss = reconstruction_criterion(
-                        pred=reconstructed_patches,
+                        pred=reconstructed_hogs,
                         mask=masks_flat,
-                        target=target_patches
+                        target=target_hogs_flat
                     )  # [B*K]
                     
                     # i. Reshape and rerank
@@ -325,6 +349,7 @@ def inference(args, eval_ds, model, scene_name="", pca=None, k=1, use_cuda=True,
                     scene_name=scene_name
                 )
                 #########################
+                prev_predictions = predictions.copy()
                 predictions = reranked_predictions
         
         # 4. positive query(정답)가 몇 번째 top-N에 속하는지 검사하기
@@ -340,9 +365,22 @@ def inference(args, eval_ds, model, scene_name="", pca=None, k=1, use_cuda=True,
         
         logging.info(f"recalls: {','.join(map(str, recalls))}")
         recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, recalls)])
-        print(pre_num, eval_ds.queries_num)
-        
+        if args.use_reranking:
+            prev_recalls = np.zeros(len(args.recall_values))
+            for query_index, pred in enumerate(prev_predictions):
+                for i, n in enumerate(args.recall_values):
+                    if np.any(np.in1d(pred[:n], positives_per_query[query_index])):
+                        prev_recalls[i:] += 1
+                        break
+            prev_recalls = prev_recalls / eval_ds.queries_num * 100
+            
+            logging.info(f"=================================================")
+            logging.info(f"recalls before RERANKING: {','.join(map(str, prev_predictions))}")
+            prev_recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, prev_predictions)])
+            logging.info(f"Recalls for {scene_name}: {prev_recalls_str}")
+            logging.info(f"=================================================")
         return recalls, recalls_str
+    
     except Exception as e:
         import traceback
         print(f"ERROR caught: {e}")

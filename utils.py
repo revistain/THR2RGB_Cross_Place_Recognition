@@ -58,19 +58,21 @@ def get_timestamp():
 
 def extract_hog_simple(image):
     """
-    Args: image: [3, 224, 224] torch.Tensor (RGB)
-    Returns: hog_features: [256, 9] torch.Tensor
+    Args:
+        image: [3, 224, 224] torch.Tensor (RGB)
+    
+    Returns:
+        hog_features: [256, 9] torch.Tensor
     """
     # 1. Numpy로 변환 & [C,H,W] -> [H,W,C]
     img = image.cpu().numpy().transpose(1, 2, 0)
     gray = rgb2gray(img)
-    
-    # 2. HoG 추출
+    # 3. HoG 추출
     hog_feat = hog(
         gray,
-        orientations=9,
-        pixels_per_cell=(7, 7),
-        cells_per_block=(1, 1),
+        orientations=9,           # 9개 방향
+        pixels_per_cell=(14, 14),
+        cells_per_block=(2, 2),
         block_norm='L2-Hys',
         feature_vector=False
     )
@@ -82,8 +84,49 @@ def extract_hog_simple(image):
         h=16, w=16, p1=2, p2=2
     )
     
+    return torch.tensor(hog_features, dtype=torch.float32)
+
+def extract_hog_fixed(image):
+    """
+    Args:
+        image: [3, 224, 224] torch.Tensor
+    Returns:
+        hog_features: [256, 36] (16x16 grid)
+    """
+    # 1. Numpy & Grayscale
+    img = image.cpu().numpy().transpose(1, 2, 0)
+    gray = rgb2gray(img) # [224, 224]
+
+    # 2. Padding (핵심!)
+    # 16x16 블록을 만들기 위해 17x17 셀이 필요함.
+    # 17 * 14 = 238 픽셀이 되어야 하므로 14픽셀씩 패딩 (Right, Bottom)
+    # mode='reflect'를 쓰면 경계면이 자연스러워짐
+    pad_h = 238 - 224  # 14
+    pad_w = 238 - 224  # 14
     
-    # visualize_hog_simple(image)
+    gray_padded = np.pad(
+        gray, 
+        ((0, pad_h), (0, pad_w)), # ((top, bottom), (left, right))
+        mode='edge' # or 'reflect'
+    )
+    
+    # 3. HoG 추출
+    # 입력이 238x238 -> 셀 17x17 -> 블록 16x16 생성됨
+    hog_feat = hog(
+        gray_padded,
+        orientations=9,
+        pixels_per_cell=(14, 14),
+        cells_per_block=(2, 2),
+        block_norm='L2-Hys',
+        feature_vector=False
+    )
+    # hog_feat shape: [16, 16, 2, 2, 9]
+
+    # 4. Flatten: [16, 16, 2, 2, 9] -> [256, 36]
+    hog_features = rearrange(
+        hog_feat,
+        'h w b1 b2 c -> (h w) (b1 b2 c)'
+    )
     
     return torch.tensor(hog_features, dtype=torch.float32)
 
@@ -150,7 +193,7 @@ def extract_hog_batch(images):
     
     hog_list = []
     for b in range(B):
-        hog_feat = extract_hog_simple(images[b])
+        hog_feat = extract_hog_fixed(images[b])
         hog_list.append(hog_feat)
     
     return torch.stack(hog_list, dim=0).to(device)
