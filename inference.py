@@ -189,96 +189,43 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
             ##################
             with torch.no_grad():
                 # NOTE: decoder에 들어가기 완전 직전 상태를 저장해놔야함
-                if not args.use_decode_mask:
-                    # rerank1. RGB database 전부 추출 (before decoder)
-                    # FIXME: 이거 위에꺼 이용해서 합칠 수 있는데, 일단 그렇게 느리지 않으니 일단 두기
-                    start_time = time.time()
+                # rerank1. RGB database 전부 추출 (before decoder)
+                # FIXME: 이거 위에꺼 이용해서 합칠 수 있는데, 일단 그렇게 느리지 않으니 일단 두기
+                start_time = time.time()
 
-                    database_subset_ds = Subset(eval_ds, list(range(eval_ds.database_num)))
-                    database_dataloader = DataLoader(dataset=database_subset_ds, num_workers=args.num_workers,
-                                                    batch_size=args.infer_batch_size, pin_memory=(args.device=="cuda"))
-                
-                    masked_database_features = np.empty((eval_ds.database_num, 256, args.features_dim), dtype="float32")
-                    model.module.use_masked_inference = True
-                    for inputs, indices, flags in tqdm(database_dataloader, ncols=100):
-                        features = model(inputs.to(args.device), flags)
-                        encoded_features = features[1].reshape(inputs.size(0), 256, -1).cpu().numpy()
-                        masked_database_features[indices.numpy(), :, :] = encoded_features
-                    model.module.use_masked_inference = False
+                database_subset_ds = Subset(eval_ds, list(range(eval_ds.database_num)))
+                database_dataloader = DataLoader(dataset=database_subset_ds, num_workers=args.num_workers,
+                                                batch_size=args.infer_batch_size, pin_memory=(args.device=="cuda"))
+            
+                masked_database_features = np.empty((eval_ds.database_num, 256, args.features_dim), dtype="float32")
+                model.module.use_masked_inference = True
+                for inputs, indices, flags in tqdm(database_dataloader, ncols=100):
+                    features = model(inputs.to(args.device), flags)
+                    encoded_features = features[1].reshape(inputs.size(0), 256, -1).cpu().numpy()
+                    masked_database_features[indices.numpy(), :, :] = encoded_features
+                model.module.use_masked_inference = False
 
-                    logging.info(f"Finished extracting (FOR RERANK) {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
+                logging.info(f"Finished extracting (FOR RERANK) {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
 
-                    # rerank2. masked된 query 전부 추출 (before decoder)
-                    start_time = time.time()
-                    queries_infer_batch_size = args.infer_batch_size
-                    queries_subset_ds = Subset(eval_ds, list(range(eval_ds.database_num, len(eval_ds))))
-                    queries_dataloader = DataLoader(dataset=queries_subset_ds, num_workers=args.num_workers,
-                                                    batch_size=queries_infer_batch_size, pin_memory=(args.device=="cuda"))
+                # rerank2. masked된 query 전부 추출 (before decoder)
+                start_time = time.time()
+                queries_infer_batch_size = args.infer_batch_size
+                queries_subset_ds = Subset(eval_ds, list(range(eval_ds.database_num, len(eval_ds))))
+                queries_dataloader = DataLoader(dataset=queries_subset_ds, num_workers=args.num_workers,
+                                                batch_size=queries_infer_batch_size, pin_memory=(args.device=="cuda"))
 
-                    queries_features_mask = np.empty((eval_ds.queries_num, 256), dtype="bool")
-                    masked_queries_features = np.empty((eval_ds.queries_num, 256, args.features_dim), dtype="float32")
-                    model.module.use_masked_inference = True
-                    for inputs, indices, flags in tqdm(queries_dataloader, ncols=100):
-                        features = model(inputs.to(args.device), flags, return_mask=True)
-                        encoded_features = features[1].reshape(inputs.size(0), 256, -1).cpu().numpy()
-                        masked_queries_features[indices.numpy()-eval_ds.database_num,:,:] = encoded_features
-                        queries_features_mask[indices.numpy()-eval_ds.database_num,:] = features[3].detach().cpu().numpy()
-                    model.module.use_masked_inference = False
+                queries_features_mask = np.empty((eval_ds.queries_num, 256), dtype="bool")
+                masked_queries_features = np.empty((eval_ds.queries_num, 256, args.features_dim), dtype="float32")
+                model.module.use_masked_inference = True
+                for inputs, indices, flags in tqdm(queries_dataloader, ncols=100):
+                    features = model(inputs.to(args.device), flags, return_mask=True)
+                    encoded_features = features[1].reshape(inputs.size(0), 256, -1).cpu().numpy()
+                    masked_queries_features[indices.numpy()-eval_ds.database_num,:,:] = encoded_features
+                    queries_features_mask[indices.numpy()-eval_ds.database_num,:] = features[3].detach().cpu().numpy()
+                model.module.use_masked_inference = False
 
-                    logging.info(f"Finished extracting (FOR RERANK) {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
-                else:
-                    queries_features_mask = np.empty((eval_ds.queries_num, 256), dtype="bool")
-                    # 뽑아놓은 encoded feature에 masking, token 채우기, pos_emb 넣기
-                    # 1. database feature들 추출
-                    start_time = time.time()
-                    inf_batch_size = args.infer_batch_size
-                    database_subset_ds = Subset(eval_ds, list(range(eval_ds.database_num)))
-
-                    for i in tqdm(range(0, len(database_subset_ds), inf_batch_size), desc="Prep DB for Rerank"):
-                        # RAM에서 배치만큼 가져오기
-                        batch_np = database_patch_tokens[i : i + inf_batch_size]
-                        
-                        # GPU로 올려서 연산 (Pos Embed 더하기)
-                        batch_tensor = torch.from_numpy(batch_np).to(args.device)
-                        batch_encoded = batch_tensor + model.module.decoder_pos_embed
-                        
-                        # 다시 RAM에 저장
-                        database_patch_tokens[i : i + inf_batch_size] = batch_encoded.cpu().numpy()
-                        
-                    masked_database_features = database_patch_tokens
-                    logging.info(f"Finished Adding Decode things {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
-                       
-                    ######
-                    start_time = time.time()
-                    queries_subset_ds = Subset(eval_ds, list(range(eval_ds.database_num, len(eval_ds))))
-
-                    for i in tqdm(range(0, len(queries_subset_ds), inf_batch_size), desc="Prep Query for Rerank", ncols=100):
-                        batch_np = queries_patch_tokens[i : i + inf_batch_size]
-                        
-                        # 2. GPU로 올리기
-                        batch_tensor = torch.from_numpy(batch_np).to(args.device) # [B, 256, 768]
-                        current_batch_size = batch_tensor.shape[0]
-                        
-                        # 3. Masking 생성
-                        # model.mask_generator 사용
-                        mask = model.module.mask_generator(batch_tensor) # [B, 256]
-                        queries_features_mask[i : i + inf_batch_size,:] = mask.detach().cpu()
-                        
-                        # 4. Add Mask Token (Token 교체)
-                        # mask_token 확장: [1, 1, 768] -> [B, 256, 768]
-                        mask_token_expanded = model.module.mask_token.expand(current_batch_size, 256, args.features_dim)
-                        
-                        batch_visible = batch_tensor.clone()
-                        batch_visible[mask] = mask_token_expanded[mask] # True인 곳을 마스크 토큰으로 덮어쓰기
-                        
-                        # 5. Add Pos Emb
-                        batch_encoded = batch_visible + model.module.decoder_pos_embed
-
-                        # 6. Save to RAM (Feature & Mask)
-                        queries_patch_tokens[i : i + inf_batch_size] = batch_encoded.cpu().numpy()
-                    masked_queries_features = queries_patch_tokens
-                    logging.info(f"Finished Adding Decode things {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")                    
-                        
+                logging.info(f"Finished extracting (FOR RERANK) {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
+                     
             # rerank3. Decoder 쭉쭉 태워서 rerank 진행하기
             # masked_database_features.shape: [1197, 256, 768]
             RERANKING_TOP_K = 5
@@ -312,20 +259,20 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                     # b. Top-K database RGB encoding (batch)
                     top_k_db_indices_batch = predictions[start_idx:end_idx, :RERANKING_TOP_K]  # [B, K]
                     
-                    # Flatten indices to fetch all at once
+                    # c. Flatten indices to fetch all at once
                     all_db_indices = top_k_db_indices_batch.flatten()  # [B*K]
                     encoded_dbs_flat = masked_database_features[all_db_indices]  # [B*K, 256, 768]
                     encoded_dbs_flat = torch.tensor(encoded_dbs_flat, dtype=torch.float32).to('cuda')
                     encoded_dbs = encoded_dbs_flat.reshape(batch_size, RERANKING_TOP_K, 256, -1)  # [B, K, 256, 768]
                     
-                    # c. Query batch 생성 (각 query를 K번 반복)
+                    # d. Query batch 생성 (각 query를 K번 반복)
                     encoded_query_batch = encoded_queries.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1)  # [B, K, 256, 768]
                     
-                    # Reshape for decoder: [B*K, 256, 768]
+                    # e. Reshape for decoder: [B*K, 256, 768]
                     encoded_query_flat = encoded_query_batch.reshape(-1, 256, encoded_queries.size(-1))
                     encoded_dbs_flat = encoded_dbs.reshape(-1, 256, encoded_dbs.size(-1))
                     
-                    # d. Decoder 통과
+                    # f. Decoder 통과
                     thermal_dec = encoded_query_flat
                     for blk in model.module.decoder_blocks:
                         thermal_dec = blk(thermal_dec, encoded_dbs_flat)

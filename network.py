@@ -8,10 +8,13 @@ import math
 import numpy as np
 from sklearn.neighbors import NearestNeighbors
 import torchvision.models as models
+from utils import *
 
 from croco.models.masking import RandomMask
 from croco.models.criterion import MaskedMSE
-        
+
+import kornia.feature as kf
+
 class CroCoDecoderBlock(nn.Module):
     """
     CroCo 원본 Decoder Block
@@ -188,7 +191,7 @@ class CrossModalVPR_Net(nn.Module):
         self.use_only_cross_decdoer = args.use_only_cross_decoder
         self.use_contrastive_recon_loss = args.use_contrastive_recon_loss
         self.recon_loss_type = args.recon_loss_type
-               
+        
         # Croco settings
         dec_depth = args.num_decoder_depth
         dec_num_heads = 16
@@ -209,6 +212,7 @@ class CrossModalVPR_Net(nn.Module):
         self._set_decode_positional_embedding(self.output_dim)
         self._set_mask_generator(16*16, args.croco_mask_ratio)
         self._set_prediction_head(self.output_dim, 14)
+        self._set_hog_prediction_head(self.output_dim)
         self._set_confidence_head(self.output_dim, 16*16)
         
         if args.use_confidence_map:
@@ -274,6 +278,13 @@ class CrossModalVPR_Net(nn.Module):
         )
         nn.init.normal_(self.prediction_head[0].weight, std=0.02)
         nn.init.zeros_(self.prediction_head[0].bias)
+
+    def _set_hog_prediction_head(self, dec_embed_dim):
+        self.hog_prediction_head = nn.Sequential(
+            nn.Linear(dec_embed_dim, 36), # 768 → 588
+        )
+        nn.init.normal_(self.hog_prediction_head[0].weight, std=0.02)
+        nn.init.zeros_(self.hog_prediction_head[0].bias)
 
     def patchify(self, imgs):
         """
@@ -380,50 +391,6 @@ class CrossModalVPR_Net(nn.Module):
                     thermal_full_dec = blk(thermal_full_dec, rgb_full)
                 thermal_full_dec = self.decoder_norm(thermal_full_dec)
                 
-                def calculate_contrastive_recon_loss(pred, mask, target, confidence_map=None, method='MEAN'):
-                    """
-                    pred_pos: [B, 256, 588] - positive reconstruction
-                    pred_negs: [B, N, 256, 588] - N negative reconstructions
-                    mask: [B, 256]
-                    target: [B, 256, 588]
-                    """
-                    # Positive loss
-                    loss_pos = self.reconstruction_criterion(
-                        pred=pred_pos,
-                        mask=mask,
-                        target=target
-                    )  # [B] or scalar
-                    
-                    # Negative losses
-                    B, N = pred_negs.shape[:2]
-                    loss_negs = []
-                    
-                    for n in range(N):
-                        loss_neg = self.reconstruction_criterion(
-                            pred=pred_negs[:, n],  # [B, 256, 588]
-                            mask=mask,
-                            target=target,
-                        )  # [B] or scalar
-                        loss_negs.append(loss_neg)
-                    
-                    loss_negs = torch.stack(loss_negs, dim=0)  # [N, B] or [N]
-                    
-                    loss_method = method
-                    if loss_method == 'MEAN':
-                        # Simple difference
-                        loss = loss_pos - loss_negs.mean(dim=0)
-                    elif loss_method == 'infoNCE':
-                        # InfoNCE (loss → similarity score via negative)
-                        # Lower loss = higher similarity
-                        sim_pos = torch.exp(-loss_pos)  # [B]
-                        sim_negs = torch.exp(-loss_negs)  # [N, B]
-                        
-                        denominator = sim_pos + sim_negs.sum(dim=0)  # [B]
-                        loss = -torch.log(sim_pos / denominator)  # [B]
-                    
-                    return loss # 이거 mean해야함? 체크하기
-                    
-                
                 def calculate_recon_loss(pred, mask, target, confidence_map=None):
                     recon_loss = self.reconstruction_criterion(
                         pred=pred,        # [B, 256, 768]
@@ -432,38 +399,25 @@ class CrossModalVPR_Net(nn.Module):
                     )
                     return recon_loss
 
-                if self.use_contrastive_recon_loss:
-                    recon_loss_fn = calculate_contrastive_recon_loss
-                else:
-                    recon_loss_fn = calculate_recon_loss
+                recon_loss_fn = calculate_recon_loss
                 
                 # 9. Prediction Head
-                if self.use_feature_level_recon_loss:
-                    out = self.thermal_backbone(x)
-                    thermal_not_masked_enc = out["x_norm_patchtokens"]
+                target_hogs = extract_hog_batch(x)
+                reconstructed_hogs = self.hog_prediction_head(thermal_full_dec) # [4, 256, 36]
+                recon_loss = recon_loss_fn(reconstructed_hogs, mask, target_hogs)
+                
+                # 10. Reconstruction loss 계산
+                
+                # 11. VPR용 patch tokens
+                if return_masked_patch:
+                    masked_patch = thermal_full
                     
-                    # 10. Reconstruction loss 계산
-                    recon_loss = recon_loss_fn(thermal_full_dec, mask, thermal_not_masked_enc)
+                if self.use_single_pass:
+                    thermal_for_vpr = thermal_full.clone()
+                    thermal_for_vpr[mask] = thermal_full_dec[mask]
+                    out = {"x_norm_patchtokens": thermal_for_vpr}
                 else:
-                    reconstructed_patches = self.prediction_head(thermal_full_dec)
-                    target_patches = self.patchify(x)
-                    
-                    # 10. Reconstruction loss 계산
-                    confidence_scores = None
-                    if self.use_confidence_map:
-                        confidence_scores = self.confidence_head(thermal_full_dec) # [B, 256]
-                    recon_loss = recon_loss_fn(reconstructed_patches, mask, target_patches, confidence_scores)
-                    
-                    # 11. VPR용 patch tokens
-                    if return_masked_patch:
-                        masked_patch = thermal_full
-                        
-                    if self.use_single_pass:
-                        thermal_for_vpr = thermal_full.clone()
-                        thermal_for_vpr[mask] = thermal_full_dec[mask]
-                        out = {"x_norm_patchtokens": thermal_for_vpr}
-                    else:
-                        out = self.thermal_backbone(x)
+                    out = self.thermal_backbone(x)
             else:
                 # when inference
                 # NOTE: 부르는 곳에 no_grad 호출하기

@@ -51,3 +51,114 @@ def get_timestamp():
     if cached_timestamp is None:
         cached_timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
     return cached_timestamp
+
+from skimage.feature import hog
+from skimage.color import rgb2gray
+import torch
+import numpy as np
+from einops import rearrange
+def extract_hog_simple(image):
+    """
+    Args:
+        image: [3, 224, 224] torch.Tensor (RGB)
+    
+    Returns:
+        hog_features: [256, 9] torch.Tensor
+    """
+    # 1. Numpy로 변환 & [C,H,W] -> [H,W,C]
+    img = image.cpu().numpy().transpose(1, 2, 0)
+    gray = rgb2gray(img)
+    # 3. HoG 추출
+    hog_feat = hog(
+        gray,
+        orientations=9,           # 9개 방향
+        pixels_per_cell=(7, 7),
+        cells_per_block=(1, 1),
+        block_norm='L2-Hys',
+        feature_vector=False
+    )
+    
+    # 4. Reshape: [16, 16, 1, 1, 9] -> [256, 9]
+    hog_features = rearrange(
+        hog_feat,
+        '(h p1) (w p2) 1 1 c -> (h w) (p1 p2 c)',
+        h=16, w=16, p1=2, p2=2
+    )
+    
+    return torch.tensor(hog_features, dtype=torch.float32)
+
+import matplotlib.pyplot as plt
+def visualize_hog_simple(image, save_path=None):
+    """
+    HOG feature 시각화 (간단 버전)
+    
+    Args:
+        image: [3, 224, 224] torch.Tensor
+        save_path: 저장 경로 (optional)
+    """
+    # 1. Prepare
+    img = image.cpu().numpy().transpose(1, 2, 0)
+    gray = rgb2gray(img)
+    
+    # 2. HOG with visualization
+    hog_feat, hog_image = hog(
+        gray,
+        orientations=9,
+        pixels_per_cell=(8, 8),
+        cells_per_block=(2, 2),
+        block_norm='L2-Hys',
+        feature_vector=False,
+        visualize=True  # ← 시각화!
+    )
+    
+    # 3. Plot
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    
+    # Original RGB
+    axes[0].imshow(img)
+    axes[0].set_title('Original Image', fontsize=14, fontweight='bold')
+    axes[0].axis('off')
+    
+    # Grayscale
+    axes[1].imshow(gray, cmap='gray')
+    axes[1].set_title('Grayscale', fontsize=14, fontweight='bold')
+    axes[1].axis('off')
+    
+    # HOG visualization
+    axes[2].imshow(hog_image, cmap='hot')
+    axes[2].set_title('HOG Features', fontsize=14, fontweight='bold')
+    axes[2].axis('off')
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"Saved: {save_path}")
+    
+    plt.show()
+
+'''
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/utils.py", line 99, in extract_hog_batch
+    hog_feat = extract_hog_simple(images[b])
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/utils.py", line 82, in extract_hog_simple
+    hog_feat = hog_feat.squeeze().reshape(256, 9)
+ValueError: cannot reshape array of size 26244 into shape (256,9)
+'''
+
+def extract_hog_batch(images):
+    """
+    Args:
+        images: [B, 3, 224, 224] torch.Tensor
+    
+    Returns:
+        hog_features: [B, 256, 9] torch.Tensor
+    """
+    B = images.size(0)
+    device = images.device
+    
+    hog_list = []
+    for b in range(B):
+        hog_feat = extract_hog_simple(images[b])
+        hog_list.append(hog_feat)
+    
+    return torch.stack(hog_list, dim=0).to(device)
