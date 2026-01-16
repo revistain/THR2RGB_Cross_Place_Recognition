@@ -375,8 +375,8 @@ def inference(args, eval_ds, model, scene_name="", pca=None, k=1, use_cuda=True,
             prev_recalls = prev_recalls / eval_ds.queries_num * 100
             
             logging.info(f"=================================================")
-            logging.info(f"recalls before RERANKING: {','.join(map(str, prev_predictions))}")
-            prev_recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, prev_predictions)])
+            logging.info(f"recalls before RERANKING: {','.join(map(str, prev_recalls))}")
+            prev_recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, prev_recalls)])
             logging.info(f"Recalls for {scene_name}: {prev_recalls_str}")
             logging.info(f"=================================================")
         return recalls, recalls_str
