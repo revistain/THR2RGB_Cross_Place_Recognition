@@ -64,13 +64,15 @@ if __name__ == "__main__":
     train_ds = datasets_T2R.BaseSTheReODual(args, DATASET_FOLDER, split='train')
 
     args.sequences = ['SNU', 'Valley']
-    test_sequences = args.sequences
+    test_sequences = args.sequences.copy()
     test_ds_list = []
     for seq in test_sequences:
         args.sequences = [seq]
         test_ds = datasets_T2R.BaseSTheReODual(args, DATASET_FOLDER, split='test')
         test_ds_list.append(test_ds)
 
+    args.sequences = test_sequences
+    
     '''Model'''
     if args.use_decode_mask:
         model = network_decode.CrossModalVPR_Net(
@@ -278,7 +280,8 @@ if __name__ == "__main__":
                 global_step += 1
 
                 del overall_loss, triplet_loss, recon_loss
-                # break # for fast debug
+                if args.use_fast_track:
+                    break # for fast debug
             
             logging.info(f"Epoch[{epoch_num:02d}]({loop_num + 1}/{loops_num}): " +
                         f"current batch triplet loss = {batch_loss:.8f}, " +

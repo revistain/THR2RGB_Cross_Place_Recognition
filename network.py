@@ -405,9 +405,9 @@ class CrossModalVPR_Net(nn.Module):
                 # 9. Prediction Head
                 target_hogs = extract_hog_batch(x) # torch.Size([B, 256, 36])
                 reconstructed_hogs = self.hog_prediction_head(thermal_full_dec) # [4, 256, 36]
-                recon_loss = recon_loss_fn(reconstructed_hogs, mask, target_hogs)
                 
                 # 10. Reconstruction loss 계산
+                recon_loss = recon_loss_fn(reconstructed_hogs, mask, target_hogs)
                 
                 # 11. VPR용 patch tokens
                 if return_masked_patch:

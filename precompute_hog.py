@@ -90,49 +90,30 @@ def precompute_hog_features(args, dataset, split='queries', save_dir='./hog_cach
 
 def load_hog_features(sequences, split='queries', hog_cache_dir='./hog_cache', device='cuda'):
     """
-    Pre-computed HOG features를 NPY에서 로드하여 Tensor로 변환
-    
-    Args:
-        sequences: list of str (e.g., ['KAIST'], ['SNU'], ['Valley'])
-        split: 'queries' or 'database'
-        hog_cache_dir: HOG NPY 파일이 저장된 디렉토리
-        device: 'cuda' or 'cpu'
-    
-    Returns:
-        hog_tensor: torch.Tensor [num_samples, 256, 36] on specified device
-    
-    Raises:
-        FileNotFoundError: HOG 파일이 없을 때
-    
-    Example:
-        >>> hog_features = load_hog_features(['SNU'], split='queries', device='cuda')
-        >>> print(hog_features.shape)  # torch.Size([800, 256, 36])
-        >>> print(hog_features.device)  # cuda:0
+    여러 sequence의 HOG features를 로드하고 concatenate
     """
-    # 1. 파일명 생성
-    seq_name = '_'.join(sequences)
-    hog_filename = f'{split}_hog_{seq_name}.npy'
-    hog_path = os.path.join(hog_cache_dir, hog_filename)
+    hog_list = []
     
-    # 2. 파일 존재 확인
-    if not os.path.exists(hog_path):
-        raise FileNotFoundError(
-            f"HOG features not found: {hog_path}\n"
-            f"Please run precompute_hog.py first to generate HOG features!\n"
-            f"Expected file: {hog_filename}"
-        )
+    for seq in sequences:
+        # 각 sequence별로 파일 찾기
+        hog_filename = f'{split}_hog_{seq}.npy'
+        hog_path = os.path.join(hog_cache_dir, hog_filename)
+        
+        if not os.path.exists(hog_path):
+            raise FileNotFoundError(
+                f"HOG features not found: {hog_path}\n"
+                f"Please run precompute_hog.py for sequence '{seq}' first!"
+            )
+        
+        print(f"Loading HOG from: {hog_path}")
+        hog_numpy = np.load(hog_path)
+        hog_list.append(hog_numpy)
     
-    # 3. NPY 로드
-    print(f"Loading pre-computed HOG from: {hog_path}")
-    hog_numpy = np.load(hog_path)  # [num_samples, 256, 36]
+    # Concatenate along batch dimension
+    hog_all = np.concatenate(hog_list, axis=0)  # [total_samples, 256, 36]
+    hog_tensor = torch.from_numpy(hog_all).float().to(device)
     
-    # 4. Tensor 변환 및 디바이스 이동
-    hog_tensor = torch.from_numpy(hog_numpy).float().to(device)
-    
-    # 5. 정보 출력
-    file_size_mb = os.path.getsize(hog_path) / 1024 / 1024
-    print(f"Loaded HOG features: shape={hog_tensor.shape}, "
-          f"device={hog_tensor.device}, size={file_size_mb:.2f}MB")
+    print(f"Loaded HOG features: shape={hog_tensor.shape}, device={hog_tensor.device}")
     
     return hog_tensor
 

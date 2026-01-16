@@ -113,6 +113,9 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
     * hard_size method for all database images
     * selected test_method for all query images
     '''
+    print(f"[DEBUG] args.sequences: {args.sequences}")
+    print(f"[DEBUG] eval_ds.queries_num: {eval_ds.queries_num}")
+    print(f"[DEBUG] eval_ds.seq_num: {eval_ds.seq_num}")
     try:
         test_method = args.test_method
         model = model.eval()
@@ -138,7 +141,8 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
                     patches = outputs[1]
                     patches = patches.cpu().numpy()
                     database_patch_tokens[indices.numpy(), :] = patches
-                # break # for fast debug
+                if args.use_fast_track:
+                    break # for fast debug
 
             logging.info(f"Finished extracting {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
 
@@ -165,7 +169,8 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
                     patches = outputs[1]
                     patches = patches.cpu().numpy()
                     queries_patch_tokens[indices.numpy()-eval_ds.database_num, :] = patches
-                # break # for fast debug
+                if args.use_fast_track:
+                    break # for fast debug
 
             logging.info(f"Finished extracting {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
 
@@ -285,12 +290,10 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
                     
                     # f. Decoder 통과
                     thermal_dec = encoded_query_flat
-                    for blk in model.module.decoder_blocks:
+                    for i, blk in enumerate(model.module.decoder_blocks):
                         thermal_dec = blk(thermal_dec, encoded_dbs_flat)
                     thermal_full_dec = model.module.decoder_norm(thermal_dec)
-                    
-                    # g. Reconstruction
-                    reconstructed_hogs = model.module.hog_prediction_head(thermal_full_dec)  # [B*K, 256, 588]
+                    reconstructed_hogs = model.module.hog_prediction_head(thermal_full_dec)
                     
                     # h. Target patches (batch)
                     # query_abs_indices = list(range(eval_ds.database_num + start_idx, eval_ds.database_num + end_idx))
@@ -302,55 +305,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
                     target_hogs = hog_queries_targets[start_idx:end_idx]  # [B, 256, 36]
                     target_hogs_batch = target_hogs.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1)
                     target_hogs_flat = target_hogs_batch.reshape(-1, 256, 36)
-                    # if batch_idx == 0: # 첫 번째 배치에서만 확인
-                    #     import matplotlib.pyplot as plt
-                    #     from skimage.feature import hog
-                        
-                    #     # 1. 검증할 샘플 인덱스 (배치의 0번째)
-                    #     check_idx = 0
-                    #     abs_idx = eval_ds.database_num + start_idx + check_idx
-                        
-                    #     # 2. 원본 이미지 가져오기 (Dataset에서 다시 로드)
-                    #     # eval_ds[idx] -> (image, index, flag)
-                    #     img_tensor, _, _ = eval_ds[abs_idx] 
-                    #     img_np = img_tensor.permute(1, 2, 0).numpy() # [H, W, C] for plot
-                        
-                    #     # 3. 데이터 정합성 체크 (값 비교)
-                    #     # 지금 로딩된 HOG값 vs 이미지에서 방금 다시 뽑은 HOG값 비교
-                    #     current_hog_feat = target_hogs[check_idx].cpu().numpy() # [256, 36]
-                    #     recalc_hog_feat = extract_hog_simple(img_tensor).numpy() # [256, 36]
-                        
-                    #     diff = np.abs(current_hog_feat - recalc_hog_feat).mean()
-                    #     print(f"\n[Validation] Index: {abs_idx}")
-                    #     print(f"HOG Difference (Loaded vs Recalculated): {diff:.6f}")
-                    #     if diff < 1e-5:
-                    #         print(">> ✅ SUCCESS: HOG Features Match Perfectly!")
-                    #     else:
-                    #         print(">> ❌ WARNING: HOG Features Do Not Match!")
 
-                    #     # 4. 시각화 (이미지 vs HOG 이미지)
-                    #     # HOG 시각화 이미지를 얻기 위해 skimage 다시 호출
-                    #     from skimage.color import rgb2gray
-                    #     gray = rgb2gray(img_np)
-                    #     _, hog_image = hog(gray, orientations=9, pixels_per_cell=(7, 7),
-                    #                     cells_per_block=(1, 1), visualize=True)
-
-                    #     fig, ax = plt.subplots(1, 2, figsize=(10, 5))
-                    #     ax[0].imshow(img_np)
-                    #     ax[0].set_title(f"Query Image (Idx: {abs_idx})")
-                    #     ax[0].axis('off')
-                        
-                    #     ax[1].imshow(hog_image, cmap='hot')
-                    #     ax[1].set_title("Computed HOG Visualization")
-                    #     ax[1].axis('off')
-                        
-                    #     plt.savefig('debug_hog.png')
-                    #     breakpoint() # 여기서 멈춰서 확인
-                    
-                    # target_hogs = hog_queries_targets[start_idx:end_idx]
-                    # target_hogs_batch = target_hogs.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1) # torch.Size([B, K, 256, 36])
-                    # target_hogs_flat = target_hogs_batch.reshape(-1, *target_hogs.shape[1:])  # [B*K, 256, 36]
-                    
                     # i. Masks (batch)
                     masks_batch = queries_features_mask[start_idx:end_idx]  # [B, 256]
                     masks_batch = torch.tensor(masks_batch, dtype=torch.bool).to('cuda')
@@ -358,11 +313,26 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
                     masks_flat = masks_flat.reshape(-1, 256)  # [B*K, 256]
                     
                     # j. Reconstruction loss
-                    loss = reconstruction_criterion(
-                        pred=reconstructed_hogs,
-                        mask=masks_flat,
-                        target=target_hogs_flat
-                    )  # [B*K]
+                    try:
+                        loss = reconstruction_criterion(
+                            pred=reconstructed_hogs,
+                            mask=masks_flat,
+                            target=target_hogs_flat
+                        )  # [B*K]
+                    except:
+                        breakpoint()
+                    '''
+Traceback (most recent call last):
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/inference.py", line 361, in inference
+    loss = reconstruction_criterion(
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1532, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1541, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/croco/models/criterion.py", line 59, in forward
+    loss = (pred - target) ** 2  # [B, 256, 588]
+RuntimeError: The size of tensor a (160) must match the size of tensor b (10) at non-singleton dimension 0
+                    '''
                     
                     # k. Reshape and rerank
                     loss = loss.reshape(batch_size, RERANKING_TOP_K)  # [B, K]

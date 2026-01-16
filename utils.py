@@ -71,8 +71,8 @@ def extract_hog_simple(image):
     hog_feat = hog(
         gray,
         orientations=9,           # 9개 방향
-        pixels_per_cell=(14, 14),
-        cells_per_block=(2, 2),
+        pixels_per_cell=(7, 7),
+        cells_per_block=(1, 1),
         block_norm='L2-Hys',
         feature_vector=False
     )
@@ -193,7 +193,7 @@ def extract_hog_batch(images):
     
     hog_list = []
     for b in range(B):
-        hog_feat = extract_hog_fixed(images[b])
+        hog_feat = extract_hog_simple(images[b])
         hog_list.append(hog_feat)
     
     return torch.stack(hog_list, dim=0).to(device)

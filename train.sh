@@ -9,7 +9,7 @@ python3 train_wandb.py \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 4 \
     --num_trainable_blocks_THERMAL 4 \
-    --comment "Croco-0.8-alpha10.0-decDepth8-mse-HoG-Rerank" \
+    --comment "Croco-0.8-alpha10.0-decDepth8-mse-HoG-simple-Rerank" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
@@ -18,6 +18,7 @@ python3 train_wandb.py \
     --recon_weight 10 \
     --recon_loss_type 'mse' \
     --use_reranking
+    # --use_fast_track
     # --use_contrastive_recon_loss \
     # --ssim-contrastLoss
     # --use_confidence_map
