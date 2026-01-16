@@ -347,7 +347,9 @@ class TripletsSTheReODual(BaseSTheReODual):
             query = self.query_transform(self.get_thermal_img(self.t_queries_paths[query_index]))
             
             torch.manual_seed(seed)
-            aligned_rgb = self.query_transform(self.get_rgb_img(self.rgb_queries_paths[query_index]))
+            # aligned_rgb = self.query_transform(self.get_rgb_img(self.rgb_queries_paths[query_index]))
+            aligned_rgb = self.query_transform(self.get_rgb_img(self.rgb_database_paths[query_index]))
+            
         else:
             query = self.query_transform(self.get_thermal_img(self.t_queries_paths[query_index]))
             aligned_rgb = None
