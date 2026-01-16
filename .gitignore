@@ -6,6 +6,7 @@ __pycache__/
 logs/
 STheReO/
 wandb/
+hog_cache/
 
 *.pth
 *.png

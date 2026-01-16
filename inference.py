@@ -18,6 +18,7 @@ from croco.models.criterion import MaskedMSE
 
 from utils import *
 from recon_vis import *
+from precompute_hog import *
 
 def patchify(imgs):
     """
@@ -137,7 +138,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
                     patches = outputs[1]
                     patches = patches.cpu().numpy()
                     database_patch_tokens[indices.numpy(), :] = patches
-                # break # for fast debug
+                break # for fast debug
 
             logging.info(f"Finished extracting {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
 
@@ -164,7 +165,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
                     patches = outputs[1]
                     patches = patches.cpu().numpy()
                     queries_patch_tokens[indices.numpy()-eval_ds.database_num, :] = patches
-                # break # for fast debug
+                break # for fast debug
 
             logging.info(f"Finished extracting {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
 
@@ -209,6 +210,14 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
 
                 logging.info(f"Finished extracting (FOR RERANK) {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
 
+                # npy 불러오기
+                hog_queries_targets = load_hog_features(
+                    sequences=args.sequences,
+                    split='queries',
+                    hog_cache_dir='./hog_cache',
+                    device=args.device  # 'cuda' or 'cpu'
+                ) 
+            
                 # rerank2. masked된 query 전부 추출 (before decoder)
                 start_time = time.time()
                 queries_infer_batch_size = args.infer_batch_size
@@ -218,18 +227,16 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
 
                 queries_features_mask = np.empty((eval_ds.queries_num, 256), dtype="bool")
                 masked_queries_features = np.empty((eval_ds.queries_num, 256, args.features_dim), dtype="float32")
-                hog_queries_targets = np.empty((eval_ds.queries_num, 256, 36), dtype="float32")
                 model.module.use_masked_inference = True
                 for inputs, indices, flags in tqdm(queries_dataloader, ncols=100):
                     features = model(inputs.to(args.device), flags, return_mask=True)
                     encoded_features = features[1].reshape(inputs.size(0), 256, -1).cpu().numpy()
                     masked_queries_features[indices.numpy()-eval_ds.database_num,:,:] = encoded_features
                     queries_features_mask[indices.numpy()-eval_ds.database_num,:] = features[3].detach().cpu().numpy()
-                    hog_queries_targets[indices.numpy()-eval_ds.database_num,:] = features[4].detach().cpu().numpy()
                 model.module.use_masked_inference = False
 
                 logging.info(f"Finished extracting (FOR RERANK) {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
-                     
+            
             # rerank3. Decoder 쭉쭉 태워서 rerank 진행하기
             # masked_database_features.shape: [1197, 256, 768]
             RERANKING_TOP_K = 5
@@ -292,15 +299,9 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
                     # query_imgs_flat = query_imgs_batch.reshape(-1, *query_imgs.shape[1:])  # [B*K, 3, 224, 224]
                     
                     # 1. Numpy 배열에서 슬라이싱 (CPU 메모리 상)
-                    target_hogs_np = hog_queries_targets[start_idx:end_idx]
-                    # 2. Tensor로 변환 및 GPU 이동
-                    # from_numpy는 메모리를 공유하려 하지만, to(device)로 이동하면서 복사가 일어납니다.
-                    target_hogs = torch.from_numpy(target_hogs_np).to(args.device)
-                    # 3. 기존 로직 그대로 실행 (이제 target_hogs가 Tensor이므로 작동함)
-                    # [B, N, C] -> [B, 1, N, C] -> [B, K, N, C] (Memory View)
-                    target_hogs_batch = target_hogs.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1) 
-                    # [B, K, N, C] -> [B*K, N, C]
-                    target_hogs_flat = target_hogs_batch.reshape(-1, *target_hogs.shape[1:])
+                    target_hogs = hog_queries_targets[start_idx:end_idx]  # [B, 256, 36]
+                    target_hogs_batch = target_hogs.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1)
+                    target_hogs_flat = target_hogs_batch.reshape(-1, 256, 36)
                     
                     # target_hogs = hog_queries_targets[start_idx:end_idx]
                     # target_hogs_batch = target_hogs.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1) # torch.Size([B, K, 256, 36])
@@ -352,10 +353,11 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
                         distances=distances,
                         reconstructed_images=None,
                         save_dir=os.path.join(args.save_dir, 'rerank_vis'),
+                        scene_name=seq_name,
                         num_samples=5
                     )
                 #########################
-                prev_predictions = predictions
+                prev_predictions = predictions.clone()
                 predictions = reranked_predictions
         
         # 4. positive query(정답)가 몇 번째 top-N에 속하는지 검사하기

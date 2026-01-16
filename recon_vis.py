@@ -211,6 +211,7 @@ def visualize_reranking_comparison(args, eval_ds,
                                    distances=None,
                                    reconstructed_images=None,
                                    save_dir='./rerank_visualizations',
+                                   scene_name="",
                                    num_samples=2):
     """
     Reranking 전/후를 비교하는 시각화 + Loss 통계
@@ -238,7 +239,7 @@ def visualize_reranking_comparison(args, eval_ds,
     }
     
     # ===== CSV 저장 =====
-    csv_path = os.path.join(save_dir, 'loss_stats.csv')
+    csv_path = os.path.join(save_dir, f'loss_stats_{scene_name}.csv')
     file_exists = os.path.exists(csv_path)
     
     with open(csv_path, 'a', newline='') as f:
@@ -261,7 +262,7 @@ def visualize_reranking_comparison(args, eval_ds,
     ax.set_title('Loss Mean ± Std per Epoch', fontsize=14, fontweight='bold')
     ax.grid(alpha=0.3)
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, 'loss_trend.png'), dpi=120)
+    plt.savefig(os.path.join(save_dir, f'loss_trend_{scene_name}.png'), dpi=120)
     plt.close()
     
     # ===== 콘솔 출력 =====
@@ -499,7 +500,7 @@ def visualize_reranking_comparison(args, eval_ds,
                     fontsize=16, fontweight='bold', color=color)
         
         # Save
-        save_path = os.path.join(save_dir, f'epoch_{epoch:03d}_query_{query_idx:05d}.png')
+        save_path = os.path.join(save_dir, f'epoch_{epoch:03d}_query_{query_idx:05d}_{scene_name}.png')
         plt.savefig(save_path, dpi=120, bbox_inches='tight')
         plt.close()
         
