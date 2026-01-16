@@ -87,6 +87,7 @@ class BaseSTheReODual(data.Dataset):
         self.resize = args.resize
         self.test_method = args.test_method
         # 这里是拿到所有databse的位置
+        self.use_pos_by_distance = args.use_pos_by_distance
         self.database_utms = np.concatenate(
             [mat['db_pose'][0, 0] for mat in self.matStruct]
         )
@@ -113,8 +114,40 @@ class BaseSTheReODual(data.Dataset):
 
         knn = NearestNeighbors(n_jobs=4)
         knn.fit(self.database_utms)
-        self.soft_positives_per_query = knn.radius_neighbors(
-            self.queries_utms, radius=args.soft_positives_dist_threshold, return_distance=False
+        if self.use_pos_by_distance:
+            distances, indices = knn.radius_neighbors(
+                self.queries_utms, 
+                radius=args.soft_positives_dist_threshold, 
+                return_distance=True
+            )
+
+            # ✓ 각 query별로 거리순 정렬!
+            self.soft_positives_per_query = []
+            self.soft_distances_per_query = []
+
+            for dists, inds in zip(distances, indices):
+                if len(dists) > 0:
+                    # 거리순 정렬
+                    sorted_idx = np.argsort(dists)  # 오름차순 인덱스
+                    
+                    sorted_dists = dists[sorted_idx]
+                    sorted_inds = inds[sorted_idx]
+                    
+                    self.soft_distances_per_query.append(sorted_dists)
+                    self.soft_positives_per_query.append(sorted_inds)
+                else:
+                    # Empty
+                    self.soft_distances_per_query.append(np.array([]))
+                    self.soft_positives_per_query.append(np.array([]))
+
+            # NumPy array로 변환
+            self.soft_positives_per_query = np.array(self.soft_positives_per_query, dtype=object)
+            self.soft_distances_per_query = np.array(self.soft_distances_per_query, dtype=object)
+        else:
+            indices = knn.radius_neighbors(
+            self.queries_utms, 
+            radius=args.soft_positives_dist_threshold, 
+            return_distance=False
         )
 
         self.rgb_database_paths = np.concatenate(
@@ -403,12 +436,15 @@ class TripletsSTheReODual(BaseSTheReODual):
         return query_features
 
     def get_best_positive_index(self, args, query_index, cache, query_features):
-        positives_features = cache[self.hard_positives_per_query[query_index]]
-        faiss_index = faiss.IndexFlatL2(args.features_dim)
-        faiss_index.add(positives_features)
-        # Search the best positive (within 10 meters AND nearest in features space)
-        _, best_positive_num = faiss_index.search(query_features.reshape(1, -1), 1)
-        best_positive_index = self.hard_positives_per_query[query_index][best_positive_num[0]].item()
+        if self.use_pos_by_distance:
+            best_positive_index = self.hard_positives_per_query[query_index][0].item()
+        else:
+            positives_features = cache[self.hard_positives_per_query[query_index]]
+            faiss_index = faiss.IndexFlatL2(args.features_dim)
+            faiss_index.add(positives_features)
+            # Search the best positive (within 10 meters AND nearest in features space)
+            _, best_positive_num = faiss_index.search(query_features.reshape(1, -1), 1)
+            best_positive_index = self.hard_positives_per_query[query_index][best_positive_num[0]].item()
         return best_positive_index
 
     def get_hardest_negatives_indexes(self, args, cache, query_features, neg_samples):

@@ -317,7 +317,6 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                     encoded_dbs_flat = masked_database_features[all_db_indices]  # [B*K, 256, 768]
                     encoded_dbs_flat = torch.tensor(encoded_dbs_flat, dtype=torch.float32).to('cuda')
                     encoded_dbs = encoded_dbs_flat.reshape(batch_size, RERANKING_TOP_K, 256, -1)  # [B, K, 256, 768]
-                    
                     # c. Query batch 생성 (각 query를 K번 반복)
                     encoded_query_batch = encoded_queries.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1)  # [B, K, 256, 768]
                     
@@ -333,12 +332,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True):
                     
                     # e. Reconstruction
                     reconstructed_patches = model.module.prediction_head(thermal_full_dec)  # [B*K, 256, 588]
-                    
-                    # 추가! confidence score 패치 시각화 추가
-                    if args.use_confidence_map:
-                        confidence_score_map = model.module.confidence_head(thermal_full_dec)  # [B, 256]
-                    # confidence_map 시각화(grayscale), rgb/thermal 시각화, rgb/thermal과 confidence map 겹친 사진 시각화
-                    
+
                     # f. Target patches (batch)
                     query_abs_indices = list(range(eval_ds.database_num + start_idx, eval_ds.database_num + end_idx))
                     query_imgs = torch.stack([eval_ds[idx][0] for idx in query_abs_indices]).to('cuda')  # [B, 3, 224, 224]
