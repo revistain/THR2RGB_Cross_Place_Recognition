@@ -138,7 +138,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
                     patches = outputs[1]
                     patches = patches.cpu().numpy()
                     database_patch_tokens[indices.numpy(), :] = patches
-                break # for fast debug
+                # break # for fast debug
 
             logging.info(f"Finished extracting {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
 
@@ -165,7 +165,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
                     patches = outputs[1]
                     patches = patches.cpu().numpy()
                     queries_patch_tokens[indices.numpy()-eval_ds.database_num, :] = patches
-                break # for fast debug
+                # break # for fast debug
 
             logging.info(f"Finished extracting {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
 
@@ -379,7 +379,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
                         if predictions[query_idx, 0] != reranked_predictions[query_idx, 0]:
                             top1_change_count += 1
                         total_count += 1
-                    break # for fast debug
+                    # break # for fast debug
                 
                 logging.info(f"Reranking completed in {time.time() - start_time:.2f} s")
                 print(f"RERANK: changed {top1_change_count} / {total_count}")
@@ -428,8 +428,8 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, 
             prev_recalls = prev_recalls / eval_ds.queries_num * 100
             
             logging.info(f"=================================================")
-            logging.info(f"recalls before RERANKING: {','.join(map(str, recalls))}")
-            prev_recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, recalls)])
+            logging.info(f"recalls before RERANKING: {','.join(map(str, prev_recalls))}")
+            prev_recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, prev_recalls)])
             logging.info(f"Recalls for {seq_name}: {prev_recalls_str}")
             logging.info(f"=================================================")
         return recalls, recalls_str
