@@ -289,6 +289,19 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                             if predictions[query_idx, 0] != reranked_predictions[query_idx, 0]:
                                 top1_change_count += 1
                             total_count += 1
+
+                        # inference.py - reranking 직후
+                        print(f"[Thermal→RGB Attention Stats]")
+                        print(f"  Mean: {thermal_cross_attn_map.mean():.4f}")
+                        print(f"  Std: {thermal_cross_attn_map.std():.4f}")
+                        print(f"  Max: {thermal_cross_attn_map.max():.4f}")
+                        print(f"  Entropy: {-(thermal_cross_attn_map * torch.log(thermal_cross_attn_map + 1e-8)).sum(dim=-1).mean():.4f}")
+
+                        print(f"\n[RGB→Thermal Attention Stats]")
+                        print(f"  Mean: {rgb_cross_attn_map.mean():.4f}")
+                        print(f"  Std: {rgb_cross_attn_map.std():.4f}")
+                        print(f"  Max: {rgb_cross_attn_map.max():.4f}")
+                        print(f"  Entropy: {-(rgb_cross_attn_map * torch.log(rgb_cross_attn_map + 1e-8)).sum(dim=-1).mean():.4f}")
                         
                         # ========== Statistics Logging (첫 배치만) ==========
                         if batch_idx == 0:
@@ -352,20 +365,20 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                             
                             print(f"Saved mutual agreement log: {log_path}")
                             
-                            if batch_idx % 200 == 100:
-                                VIS_QUERY_COUNT = 5
-                                save_mnn_visualization(
-                                    eval_ds=eval_ds,
-                                    query_indices=list(range(start_idx, min(start_idx + VIS_QUERY_COUNT, end_idx))),
-                                    top_k_db_indices=top_k_db_indices_batch[:VIS_QUERY_COUNT],
-                                    mutual_matches_list=mutual_matches_list,
-                                    rerank_scores=rerank_scores_batch[:VIS_QUERY_COUNT].cpu().numpy(),
-                                    thermal_cross_attn_maps=thermal_cross_attn_map[:VIS_QUERY_COUNT*5],  # 5 queries × 5 ranks
-                                    rgb_cross_attn_maps=rgb_cross_attn_map[:VIS_QUERY_COUNT*5],
-                                    save_dir=os.path.join(args.save_dir, 'mnn_matches'),
-                                    epoch=args.current_epoch,
-                                )
-                        # ==================================================
+                        if batch_idx % 20 == 0:
+                            VIS_QUERY_COUNT = 5
+                            save_mnn_visualization(
+                                eval_ds=eval_ds,
+                                query_indices=list(range(start_idx, min(start_idx + VIS_QUERY_COUNT, end_idx))),
+                                top_k_db_indices=top_k_db_indices_batch[:VIS_QUERY_COUNT],
+                                mutual_matches_list=mutual_matches_list,
+                                rerank_scores=rerank_scores_batch[:VIS_QUERY_COUNT].cpu().numpy(),
+                                thermal_cross_attn_maps=thermal_cross_attn_map[:VIS_QUERY_COUNT*5],  # 5 queries × 5 ranks
+                                rgb_cross_attn_maps=rgb_cross_attn_map[:VIS_QUERY_COUNT*5],
+                                save_dir=os.path.join(args.save_dir, 'mnn_matches'),
+                                epoch=args.current_epoch,
+                            )
+                    # ==================================================
                         
                 except Exception as e:
                     import traceback

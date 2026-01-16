@@ -232,7 +232,6 @@ class CrossModalVPR_Net(nn.Module):
         self._set_decode_positional_embedding(self.output_dim)
         self._set_mask_generator(16*16, args.croco_mask_ratio)
         self._set_prediction_head(self.output_dim, 14)
-        self._set_confidence_head(self.output_dim, 16*16)
         
         self.reconstruction_criterion = MaskedMSE(
             norm_pix_loss=False,
@@ -263,17 +262,6 @@ class CrossModalVPR_Net(nn.Module):
     def _set_mask_token(self, dec_embed_dim):
         self.mask_token = nn.Parameter(torch.zeros(1, 1, dec_embed_dim))
         nn.init.normal_(self.mask_token, std=.02)
-
-    def _set_confidence_head(self, dec_embed_dim, hidden_dim=256):
-        self.confidence_head = nn.Sequential(
-            nn.Linear(dec_embed_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, 1),
-            nn.Sigmoid()
-        )
-
-        nn.init.xavier_uniform_(self.confidence_head[0].weight)
-        nn.init.zeros_(self.confidence_head[0].bias)
         
     def _set_decode_positional_embedding(self, dec_embed_dim):
         self.decoder_pos_embed = nn.Parameter(torch.zeros(1, 256, dec_embed_dim))
@@ -378,6 +366,7 @@ class CrossModalVPR_Net(nn.Module):
         elif modality == 'thermal':
             if self.training:
                 # 1-4. masked thermal encoder
+                # FIXME: 같은 곳을 masking해야하나? 일단 성능 잘 나오니...
                 thermal_visible, mask_thermal, patch_B, patch_N, patch_D = self.croco_like_encoder(x, modality='thermal')
                 rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb = self.croco_like_encoder(paired_rgb, modality='rgb')
                 

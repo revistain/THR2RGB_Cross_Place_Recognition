@@ -23,7 +23,7 @@ def load_model(args, model):
     print(args.resume)
     args.resume = args.resume[0]
     model, _, _, start_epoch_num, _ = utils.resume_train(args, model, strict=False)
-    print(f"Resuming from epoch {start_epoch_num}")
+    print(f"- Resuming from epoch {start_epoch_num}")
 
     args.sequences = ['SNU', 'Valley']
     test_sequences = args.sequences

@@ -520,14 +520,14 @@ def save_simple_cross_attn(attn_map, save_path, query_idx=None):
 
 def save_mnn_visualization(eval_ds, query_indices, top_k_db_indices, 
                           mutual_matches_list, rerank_scores,
-                          thermal_cross_attn_maps, rgb_cross_attn_maps,  # ← 추가
-                          save_dir, epoch):
+                          thermal_cross_attn_maps, rgb_cross_attn_maps,
+                          save_dir, epoch, top_k=5):
     """
-    MNN matching + Cross-Attention 시각화
+    MNN matching + Cross-Attention 시각화 (Top-K 전체)
     
     Args:
         eval_ds: dataset
-        query_indices: list of query indices
+        query_indices: list of query indices to visualize
         top_k_db_indices: [num_queries, K] - Top-K DB indices
         mutual_matches_list: list of (matches_i, matches_j, conf) tuples
         rerank_scores: [num_queries, K] - Reranking scores
@@ -535,186 +535,252 @@ def save_mnn_visualization(eval_ds, query_indices, top_k_db_indices,
         rgb_cross_attn_maps: [num_queries*K, 256, 256] - RGB→Thermal attention
         save_dir: save directory
         epoch: current epoch
+        top_k: number of top retrievals to show (default: 5)
     """
     import matplotlib.pyplot as plt
     import matplotlib.patches as patches
+    from matplotlib.gridspec import GridSpec
     
     os.makedirs(save_dir, exist_ok=True)
     
-    for q_idx, (query_idx, db_indices, matches, scores) in enumerate(
-        zip(query_indices, top_k_db_indices, mutual_matches_list, rerank_scores)
-    ):
-        # Load images
+    # Denormalization helper
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+    
+    def denormalize(img_tensor):
+        """[3, H, W] → [H, W, 3] numpy, range [0, 1]"""
+        img = (img_tensor * std + mean).permute(1, 2, 0).cpu().numpy()
+        return np.clip(img, 0, 1)
+    
+    def patch_to_pixel(patch_idx, patch_size=14, grid_size=16):
+        """Patch index → pixel coordinates (center)"""
+        row, col = divmod(patch_idx, grid_size)
+        y = row * patch_size + patch_size // 2
+        x = col * patch_size + patch_size // 2
+        return x, y
+    
+    def aggregate_attention(attn_map, method='max'):
+        """
+        Aggregate [256, 256] attention → [16, 16] heatmap
+        
+        Args:
+            attn_map: [num_queries, num_keys] = [256, 256]
+            method: 'max' (각 key의 max attention) or 'mean' (평균)
+        """
+        if method == 'max':
+            aggregated = attn_map.max(dim=0)[0]  # [256]
+        elif method == 'mean':
+            aggregated = attn_map.mean(dim=0)
+        else:
+            raise ValueError(f"Unknown method: {method}")
+        
+        heatmap = aggregated.cpu().numpy().reshape(16, 16)
+        return heatmap
+    
+    # Process each query
+    for list_idx, query_idx in enumerate(query_indices):
+        # === Load query image ===
         thermal_abs_idx = eval_ds.database_num + query_idx
-        thermal_img = eval_ds[thermal_abs_idx][0]  # [3, 224, 224]
+        thermal_img = denormalize(eval_ds[thermal_abs_idx][0])
         
-        # Denormalize
-        mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-        thermal_img = (thermal_img * std + mean).permute(1, 2, 0).numpy()
-        thermal_img = np.clip(thermal_img, 0, 1)
+        db_indices = top_k_db_indices[list_idx]
+        scores = rerank_scores[list_idx]
+        matches = mutual_matches_list[list_idx]
         
-        # Top-1 RGB
-        db_idx = db_indices[0]
-        rgb_img = eval_ds[int(db_idx)][0]
-        rgb_img = (rgb_img * std + mean).permute(1, 2, 0).numpy()
-        rgb_img = np.clip(rgb_img, 0, 1)
+        # Load all Top-K RGB images
+        rgb_imgs = [denormalize(eval_ds[int(db_idx)][0]) for db_idx in db_indices[:top_k]]
         
-        # ========== Figure with 3 rows ==========
-        fig = plt.figure(figsize=(24, 18))
-        gs = fig.add_gridspec(3, 6, hspace=0.3, wspace=0.3)
+        # === Create large figure ===
+        # Layout: 
+        # Row 0: Query + Top-5 RGB images (6 cols)
+        # Row 1-5: Each rank's attention maps (6 cols each)
+        # Row 6: MNN matching visualization (full width)
         
-        # ===== Row 1: Top-5 RGB Retrieval =====
+        fig = plt.figure(figsize=(30, 36))
+        gs = GridSpec(7, 6, figure=fig, hspace=0.4, wspace=0.3)
+        
+        # ==========================================
+        # Row 0: Query + Top-K Retrieved Images
+        # ==========================================
         ax_query = fig.add_subplot(gs[0, 0])
         ax_query.imshow(thermal_img)
-        ax_query.set_title(f'Query {query_idx}\n(Thermal)', fontsize=12, fontweight='bold')
+        ax_query.set_title(f'Query {query_idx}\n(Thermal)', fontsize=14, fontweight='bold')
         ax_query.axis('off')
         
-        for k in range(5):
+        for k in range(min(top_k, 5)):
             ax = fig.add_subplot(gs[0, k+1])
-            db_idx_k = db_indices[k]
-            rgb_k = eval_ds[int(db_idx_k)][0]
-            rgb_k = (rgb_k * std + mean).permute(1, 2, 0).numpy()
-            rgb_k = np.clip(rgb_k, 0, 1)
-            
-            ax.imshow(rgb_k)
-            ax.set_title(f'Rank {k+1}\nScore: {scores[k]:.3f}', fontsize=10)
+            ax.imshow(rgb_imgs[k])
+            ax.set_title(f'Rank {k+1}\nScore: {scores[k]:.3f}', fontsize=12, fontweight='bold')
             ax.axis('off')
-        
-        # ===== Row 2: Cross-Attention Maps =====
-        # Thermal → RGB attention (Top-1)
-        ax_thermal_attn = fig.add_subplot(gs[1, 0])
-        thermal_attn = thermal_cross_attn_maps[q_idx * 5]  # Top-1
-        # Average over all query patches
-        thermal_attn_avg = thermal_attn.max(dim=0)[0].cpu().numpy().reshape(16, 16) # .mean(dim=0)
-        thermal_attn_resized = cv2.resize(thermal_attn_avg, (224, 224), interpolation=cv2.INTER_NEAREST)
-        
-        im1 = ax_thermal_attn.imshow(thermal_attn_resized, cmap='hot', vmin=0, vmax=thermal_attn_avg.max())
-        ax_thermal_attn.set_title('Thermal→RGB\n(Avg Attention)', fontsize=11, fontweight='bold')
-        ax_thermal_attn.axis('off')
-        plt.colorbar(im1, ax=ax_thermal_attn, fraction=0.046, pad=0.04)
-        
-        # RGB → Thermal attention (Top-1)
-        ax_rgb_attn = fig.add_subplot(gs[1, 1])
-        rgb_attn = rgb_cross_attn_maps[q_idx * 5]  # Top-1
-        # Average over all RGB patches
-        rgb_attn_avg = rgb_attn.max(dim=0)[0].cpu().numpy().reshape(16, 16) # .mean(dim=0)
-        rgb_attn_resized = cv2.resize(rgb_attn_avg, (224, 224), interpolation=cv2.INTER_NEAREST)
-        
-        im2 = ax_rgb_attn.imshow(rgb_attn_resized, cmap='hot', vmin=0, vmax=rgb_attn_avg.max())
-        ax_rgb_attn.set_title('RGB→Thermal\n(Avg Attention)', fontsize=11, fontweight='bold')
-        ax_rgb_attn.axis('off')
-        plt.colorbar(im2, ax=ax_rgb_attn, fraction=0.046, pad=0.04)
-        
-        # Mutual Agreement (element-wise product)
-        ax_mutual = fig.add_subplot(gs[1, 2])
-        mutual_attn = (thermal_attn * rgb_attn.transpose(0, 1)).cpu().numpy()
-        mutual_attn_avg = mutual_attn.mean(axis=0).reshape(16, 16)
-        mutual_attn_resized = cv2.resize(mutual_attn_avg, (224, 224), interpolation=cv2.INTER_NEAREST)
-        
-        im3 = ax_mutual.imshow(mutual_attn_resized, cmap='hot', vmin=0, vmax=mutual_attn_avg.max())
-        ax_mutual.set_title('Mutual Agreement\n(T→R × R→T)', fontsize=11, fontweight='bold')
-        ax_mutual.axis('off')
-        plt.colorbar(im3, ax=ax_mutual, fraction=0.046, pad=0.04)
-        
-        # Patch-level attention heatmaps (sample patches)
-        # Select 3 sample patches with high attention
-        if len(matches[0]) > 0:
-            matches_i, matches_j, matches_conf = matches
             
-            # Top-3 confident matches
-            top_3_indices = np.argsort(matches_conf)[-3:][::-1]
+            # Highlight if it's the best score
+            if k == 0:
+                for spine in ax.spines.values():
+                    spine.set_edgecolor('lime')
+                    spine.set_linewidth(4)
+        
+        # ==========================================
+        # Row 1-5: Attention Maps for Each Rank
+        # ==========================================
+        for k in range(min(top_k, 5)):
+            row_idx = k + 1
             
-            for idx, sample_idx in enumerate(top_3_indices):
-                if sample_idx >= len(matches_i):
-                    continue
+            # Get attention maps for this rank
+            attn_idx = list_idx * top_k + k
+            thermal_attn_raw = thermal_cross_attn_maps[attn_idx]  # [256, 256]
+            rgb_attn_raw = rgb_cross_attn_maps[attn_idx]
+            
+            # Aggregate to spatial heatmap
+            thermal_heatmap = aggregate_attention(thermal_attn_raw, method='max')  # [16, 16]
+            rgb_heatmap = aggregate_attention(rgb_attn_raw, method='max')
+            
+            # Mutual agreement
+            mutual_attn = (thermal_attn_raw * rgb_attn_raw.T).cpu().numpy()  # [256, 256]
+            mutual_heatmap = mutual_attn.mean(axis=0).reshape(16, 16)
+            
+            # Resize for visualization
+            thermal_heatmap_vis = cv2.resize(thermal_heatmap, (224, 224), interpolation=cv2.INTER_LINEAR)
+            rgb_heatmap_vis = cv2.resize(rgb_heatmap, (224, 224), interpolation=cv2.INTER_LINEAR)
+            mutual_heatmap_vis = cv2.resize(mutual_heatmap, (224, 224), interpolation=cv2.INTER_LINEAR)
+            
+            # Col 0: Thermal→RGB attention
+            ax1 = fig.add_subplot(gs[row_idx, 0])
+            im1 = ax1.imshow(thermal_heatmap_vis, cmap='hot', vmin=0, vmax=thermal_heatmap.max())
+            ax1.set_title(f'Rank {k+1}: Thermal→RGB\n(Max Attn)', fontsize=11, fontweight='bold')
+            ax1.axis('off')
+            plt.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
+            
+            # Col 1: RGB→Thermal attention
+            ax2 = fig.add_subplot(gs[row_idx, 1])
+            im2 = ax2.imshow(rgb_heatmap_vis, cmap='hot', vmin=0, vmax=rgb_heatmap.max())
+            ax2.set_title(f'Rank {k+1}: RGB→Thermal\n(Max Attn)', fontsize=11, fontweight='bold')
+            ax2.axis('off')
+            plt.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
+            
+            # Col 2: Mutual agreement
+            ax3 = fig.add_subplot(gs[row_idx, 2])
+            im3 = ax3.imshow(mutual_heatmap_vis, cmap='hot', vmin=0, vmax=mutual_heatmap.max())
+            ax3.set_title(f'Rank {k+1}: Mutual\n(T→R × R→T)', fontsize=11, fontweight='bold')
+            ax3.axis('off')
+            plt.colorbar(im3, ax=ax3, fraction=0.046, pad=0.04)
+            
+            # Col 3: Thermal→RGB overlay on RGB image
+            ax4 = fig.add_subplot(gs[row_idx, 3])
+            heatmap_overlay = plt.cm.hot(thermal_heatmap_vis / (thermal_heatmap.max() + 1e-8))[:, :, :3]
+            overlay_img = 0.5 * rgb_imgs[k] + 0.5 * heatmap_overlay
+            ax4.imshow(overlay_img)
+            ax4.set_title(f'Rank {k+1}: T→R Overlay\non RGB', fontsize=11, fontweight='bold')
+            ax4.axis('off')
+            
+            # Col 4: RGB→Thermal overlay on Thermal image
+            ax5 = fig.add_subplot(gs[row_idx, 4])
+            rgb_heatmap_overlay = plt.cm.hot(rgb_heatmap_vis / (rgb_heatmap.max() + 1e-8))[:, :, :3]
+            thermal_overlay_img = 0.5 * thermal_img + 0.5 * rgb_heatmap_overlay
+            ax5.imshow(thermal_overlay_img)
+            ax5.set_title(f'Rank {k+1}: R→T Overlay\non Thermal', fontsize=11, fontweight='bold')
+            ax5.axis('off')
+            
+            # Col 5: Top-3 confident patch matches for this rank
+            ax6 = fig.add_subplot(gs[row_idx, 5])
+            
+            # For Rank 1 (k=0), show MNN matches
+            if k == 0 and len(matches[0]) > 0:
+                matches_i, matches_j, matches_conf = matches
+                
+                # Get top-3 confident matches
+                top_3_idx = np.argsort(matches_conf)[-3:][::-1] if len(matches_conf) >= 3 else range(len(matches_conf))
+                
+                # Show combined image with match lines
+                combined_small = np.hstack([
+                    cv2.resize(thermal_img, (112, 112)),
+                    cv2.resize(rgb_imgs[0], (112, 112))
+                ])
+                ax6.imshow(combined_small)
+                
+                # Draw top matches
+                for idx in top_3_idx:
+                    i, j, conf = matches_i[idx], matches_j[idx], matches_conf[idx]
                     
-                ax = fig.add_subplot(gs[1, 3+idx])
+                    x1, y1 = patch_to_pixel(i, patch_size=7, grid_size=16)
+                    x2, y2 = patch_to_pixel(j, patch_size=7, grid_size=16)
+                    x2 += 112  # Offset
+                    
+                    color = plt.cm.hot(min(conf / 0.1, 1.0))
+                    ax6.plot([x1, x2], [y1, y2], color=color, linewidth=2, alpha=0.8)
+                    ax6.scatter([x1, x2], [y1, y2], c=['cyan', 'lime'], 
+                               s=20, zorder=5, edgecolors='white', linewidths=0.8)
                 
-                i = matches_i[sample_idx]
-                j = matches_j[sample_idx]
-                conf = matches_conf[sample_idx]
-                
-                # Show attention for this specific patch
-                patch_attn = thermal_attn[i].cpu().numpy().reshape(16, 16)
-                patch_attn_resized = cv2.resize(patch_attn, (224, 224), interpolation=cv2.INTER_NEAREST)
-                
-                # Overlay on RGB
-                rgb_overlay = rgb_img.copy()
-                heatmap = plt.cm.hot(patch_attn_resized)[:, :, :3]
-                rgb_overlay = 0.6 * rgb_overlay + 0.4 * heatmap
-                
-                ax.imshow(rgb_overlay)
-                
-                # Mark the matched patch
-                row_j = j // 16
-                col_j = j % 16
-                y_j = row_j * 14
-                x_j = col_j * 14
-                rect = patches.Rectangle((x_j, y_j), 14, 14, linewidth=2, edgecolor='cyan', facecolor='none')
-                ax.add_patch(rect)
-                
-                ax.set_title(f'Patch {i}→{j}\nConf: {conf:.3f}', fontsize=9)
-                ax.axis('off')
+                ax6.axvline(x=112, color='white', linewidth=2, linestyle='--', alpha=0.6)
+                ax6.set_title(f'Top-3 MNN Matches\n({len(matches_i)} total)', fontsize=11, fontweight='bold')
+                ax6.axis('off')
+            else:
+                # For other ranks, show attention distribution histogram
+                attn_values = thermal_attn_raw.cpu().numpy().flatten()
+                ax6.hist(attn_values, bins=50, color=f'C{k}', alpha=0.7, edgecolor='black')
+                ax6.set_title(f'Rank {k+1}: Attention\nDistribution', fontsize=11, fontweight='bold')
+                ax6.set_xlabel('Attention Value', fontsize=9)
+                ax6.set_ylabel('Frequency', fontsize=9)
+                ax6.grid(alpha=0.3)
         
-        # ===== Row 3: MNN Matching =====
+        # ==========================================
+        # Row 6: Detailed MNN Matching (Full Width)
+        # ==========================================
+        ax_mnn = fig.add_subplot(gs[6, :])
+        
         if len(matches[0]) > 0:
             matches_i, matches_j, matches_conf = matches
             
-            # Side-by-side with matches
-            combined = np.hstack([thermal_img, rgb_img])
+            # Side-by-side images
+            combined = np.hstack([thermal_img, rgb_imgs[0]])
+            ax_mnn.imshow(combined)
             
-            ax = fig.add_subplot(gs[2, :])
-            ax.imshow(combined)
+            # Draw all matches (or top N)
+            num_draw = min(100, len(matches_i))
+            sorted_idx = np.argsort(matches_conf)[-num_draw:][::-1]  # Top confident matches
             
-            # Draw matches
-            patch_size = 14
-            img_w = 224
-            
-            def patch_to_pixel(patch_idx):
-                row = patch_idx // 16
-                col = patch_idx % 16
-                y = row * patch_size + patch_size // 2
-                x = col * patch_size + patch_size // 2
-                return x, y
-            
-            # Draw lines
-            num_matches = min(50, len(matches_i))
-            for idx in range(num_matches):
-                i = matches_i[idx]
-                j = matches_j[idx]
-                conf = matches_conf[idx]
+            for idx in sorted_idx:
+                i, j, conf = matches_i[idx], matches_j[idx], matches_conf[idx]
                 
                 x1, y1 = patch_to_pixel(i)
                 x2, y2 = patch_to_pixel(j)
-                x2 += img_w  # RGB는 오른쪽
+                x2 += 224  # Offset for right image
                 
                 # Color by confidence
-                color = plt.cm.hot(conf / 0.1)
+                color = plt.cm.hot(min(conf / 0.1, 1.0))
+                alpha = 0.3 + 0.7 * (conf / max(matches_conf))  # More confident = more opaque
                 
-                ax.plot([x1, x2], [y1, y2], 
-                       color=color, linewidth=1.5, alpha=0.7)
-                ax.scatter([x1], [y1], c='cyan', s=15, zorder=5, edgecolors='white', linewidths=0.5)
-                ax.scatter([x2], [y2], c='lime', s=15, zorder=5, edgecolors='white', linewidths=0.5)
+                ax_mnn.plot([x1, x2], [y1, y2], color=color, linewidth=1.5, alpha=alpha)
+                ax_mnn.scatter([x1], [y1], c='cyan', s=20, zorder=5, edgecolors='white', linewidths=0.5)
+                ax_mnn.scatter([x2], [y2], c='lime', s=20, zorder=5, edgecolors='white', linewidths=0.5)
             
-            ax.set_title(f'MNN Matches: {len(matches_i)} pairs (showing top {num_matches})', 
-                        fontsize=14, fontweight='bold')
-            ax.axis('off')
+            # Divider line
+            ax_mnn.axvline(x=224, color='white', linewidth=4, linestyle='--', alpha=0.9)
             
-            # Vertical divider
-            ax.axvline(x=img_w, color='white', linewidth=3, linestyle='--', alpha=0.8)
+            # Statistics
+            avg_conf = np.mean(matches_conf)
+            max_conf = np.max(matches_conf)
+            title_str = (f'Mutual Nearest Neighbor Matches\n'
+                        f'Total: {len(matches_i)} pairs | Shown: Top {num_draw} | '
+                        f'Avg Conf: {avg_conf:.3f} | Max Conf: {max_conf:.3f}')
+            ax_mnn.set_title(title_str, fontsize=14, fontweight='bold')
+            ax_mnn.axis('off')
         else:
-            ax = fig.add_subplot(gs[2, :])
-            ax.text(0.5, 0.5, 'No mutual matches found', 
-                   ha='center', va='center', fontsize=20, color='red')
-            ax.axis('off')
+            ax_mnn.text(0.5, 0.5, 'No Mutual Nearest Neighbor Matches Found', 
+                       ha='center', va='center', fontsize=24, color='red', 
+                       transform=ax_mnn.transAxes, fontweight='bold')
+            ax_mnn.axis('off')
         
-        plt.suptitle(f'Query {query_idx} - Cross-Modal Matching Analysis', 
-                    fontsize=16, fontweight='bold')
+        # ==========================================
+        # Overall title
+        # ==========================================
+        fig.suptitle(f'Query {query_idx} - Complete Cross-Modal Matching Analysis (Epoch {epoch})', 
+                    fontsize=18, fontweight='bold', y=0.995)
         
-        plt.tight_layout()
-        save_path = os.path.join(save_dir, f'epoch_{epoch:03d}_query_{query_idx:05d}.png')
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        # Save
+        save_path = os.path.join(save_dir, f'epoch{epoch:03d}_query{query_idx:05d}_full.png')
+        plt.savefig(save_path, dpi=120, bbox_inches='tight')
         plt.close()
         
-        print(f"Saved MNN visualization: {save_path}")
+        print(f"[{list_idx+1}/{len(query_indices)}] Saved: {save_path}")
+    
+    print(f"✓ Visualization complete: {len(query_indices)} queries saved to {save_dir}")
