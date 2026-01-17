@@ -328,7 +328,6 @@ class TripletsSTheReODual(BaseSTheReODual):
 
         self.queries_num = len(self.rgb_queries_paths)
         self.use_align_rgb = use_align_rgb
-        self.use_paried_morning = args.use_paried_morning
 
     def __getitem__(self, index):
         if self.is_inference:
