@@ -85,29 +85,23 @@ class CroCoDecoderBlock(nn.Module):
         x = x + self.mlp(self.norm3(x))
         
         return x
-    
-class CroCoOnlyCrossDecoderBlock(nn.Module):
-    """
-    CroCo 원본 Decoder Block
-    
-    구조:
-    1. Self-Attention: decoder 내부 token들 간 정보 혼합
-    2. Cross-Attention: RGB encoder output 참조
-    3. MLP: Position-wise feed-forward
-    
-    모두 Pre-LayerNorm + Residual connection 사용
-    """
-    def __init__(self, dim=768, num_heads=12, mlp_ratio=4.0):
+
+class CroCoStrongCrossDecoderBlock(nn.Module):
+    def __init__(self, dim=768, num_heads=12, mlp_ratio=4.0, drop_path=0.0, self_attn_weight=0.25):
         super().__init__()
+        self.self_attn_weight = self_attn_weight
         
         # Self-Attention components
         self.norm1 = nn.LayerNorm(dim)
+        self.self_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
+        
+        # Cross-Attention components
+        self.norm2 = nn.LayerNorm(dim)
         self.norm_cross = nn.LayerNorm(dim)
         self.cross_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
-        # self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         
         # MLP components
-        self.norm2 = nn.LayerNorm(dim)
+        self.norm3 = nn.LayerNorm(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = nn.Sequential(
             nn.Linear(dim, mlp_hidden_dim),
@@ -115,28 +109,58 @@ class CroCoOnlyCrossDecoderBlock(nn.Module):
             nn.Linear(mlp_hidden_dim, dim)
         )
         
-    def forward(self, x, y):
+        # ========== Attention 저장용 ==========
+        self.self_attn_weights = None
+        self.cross_attn_weights = None
+        # ======================================
+    
+    def forward(self, x, y, return_attention=False):
         """
         Args:
-            x: [B, N, D] - decoder input (thermal + mask tokens)
-            encoder_output: [B, M, D] - RGB encoder output (참조할 정보)
+            x: [B, N, D] - decoder input (RGB masked)
+            y: [B, M, D] - encoder output (Thermal reference)
+            return_attention: bool - attention map 반환 여부
         Returns:
             x: [B, N, D] - updated decoder features
         """
-        # Step 1: Cross-Attention
+        # Step 1: Self-Attention
         x_norm = self.norm1(x)
-        encoder_norm = self.norm_cross(y)
-        x = x + self.cross_attn(
-            query=x_norm,
-            key=encoder_norm,
-            value=encoder_norm
-        )[0]
+        if return_attention:
+            self_out, self_attn_weights = self.self_attn(
+                x_norm, x_norm, x_norm, 
+                need_weights=True, 
+                average_attn_weights=True  # [B, N, N]
+            )
+            self.self_attn_weights = self_attn_weights
+        else:
+            self_out = self.self_attn(x_norm, x_norm, x_norm)[0]
+        x = x + self.self_attn_weight * self_out
         
-        # Step 2: MLP
-        x = x + self.mlp(self.norm2(x))
+        # Step 2: Cross-Attention
+        x_norm = self.norm2(x)
+        encoder_norm = self.norm_cross(y)
+        if return_attention:
+            cross_out, cross_attn_weights = self.cross_attn(
+                query=x_norm,
+                key=encoder_norm,
+                value=encoder_norm,
+                need_weights=True,
+                average_attn_weights=True  # [B, N, M]
+            )
+            self.cross_attn_weights = cross_attn_weights
+        else:
+            cross_out = self.cross_attn(
+                query=x_norm,
+                key=encoder_norm,
+                value=encoder_norm
+            )[0]
+        x = x + cross_out
+        
+        # Step 3: MLP
+        x = x + self.mlp(self.norm3(x))
         
         return x
-
+       
 class GeM(nn.Module):
     def __init__(self, p=3, eps=1e-6, work_with_tokens=False):
         super().__init__()
@@ -209,11 +233,11 @@ class CrossModalVPR_Net(nn.Module):
         dec_num_heads = 16
         if args.use_only_cross_decoder:
             self.decoder_thermal_blocks = nn.ModuleList([
-                CroCoOnlyCrossDecoderBlock(self.output_dim, dec_num_heads) 
+                CroCoStrongCrossDecoderBlock(self.output_dim, dec_num_heads) 
                 for _ in range(dec_depth)
             ])
             self.decoder_rgb_blocks = nn.ModuleList([
-                CroCoOnlyCrossDecoderBlock(self.output_dim, dec_num_heads) 
+                CroCoStrongCrossDecoderBlock(self.output_dim, dec_num_heads) 
                 for _ in range(dec_depth)
             ])
         else:
@@ -272,6 +296,7 @@ class CrossModalVPR_Net(nn.Module):
         self.mask_generator = RandomMask(num_patches, mask_ratio)
 
     def _set_prediction_head(self, dec_embed_dim, patch_size):
+        # FIXME: 이것도 같은거 써도됨...?
         self.prediction_head = nn.Sequential(
             nn.Linear(dec_embed_dim, patch_size**2 * 3), # 768 → 588
         )
@@ -356,10 +381,15 @@ class CrossModalVPR_Net(nn.Module):
         masked_patch_thermal = None
         if modality == 'rgb':
             if self.use_masked_inference:
-                rgb_full = self.rgb_backbone(x)
-                rgb_full = rgb_full["x_norm_patchtokens"] 
-                rgb_full = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
-                out = {"x_norm_patchtokens": rgb_full}
+                # rgb_full = self.rgb_backbone(x)
+                # rgb_full = rgb_full["x_norm_patchtokens"] 
+                # rgb_full = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
+                # out = {"x_norm_patchtokens": rgb_full}
+
+                rgb_visible, mask_rgb, patch_B, patch_N, patch_D = self.croco_like_encoder(x, modality='rgb')
+                rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B, patch_N, patch_D)
+                rgb_full_dec = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
+                out = {"x_norm_patchtokens": rgb_full_dec}
             else:
                 out = self.rgb_backbone(x)
             agg_layer = self.rgb_aggregation

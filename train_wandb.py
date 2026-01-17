@@ -21,7 +21,6 @@ import utils
 import datasets_T2R
 import inference
 import network
-import network_decode
 import random
 from croco.models.criterion import MaskedMSE
 from recon_vis import visualize_during_training
@@ -340,7 +339,7 @@ if __name__ == "__main__":
                 global_step += 1
 
                 del overall_loss, triplet_loss, recon_loss
-                # break # for fast debug
+                if args.use_fast_track: break
             
             logging.info(f"Epoch[{epoch_num:02d}]({loop_num + 1}/{loops_num}): " +
                         f"current batch triplet loss = {batch_loss:.8f}, " +

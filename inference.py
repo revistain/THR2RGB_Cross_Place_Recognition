@@ -151,17 +151,22 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 patch_features = outputs[1].view(-1, 16*16, args.features_dim)
                 queries_features[indices.numpy()-eval_ds.database_num, :] = features.cpu().numpy()
                 queries_patch_features[indices.numpy()-eval_ds.database_num, :, :] = patch_features.cpu().numpy()
-                # break # for fast debug
+                if args.use_fast_track: break
+
                 
             logging.info(f"Finished extracting {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
 
         # 3. faiss를 이용하여, L2 distance로 가까운 descriptor 찾기
         faiss_index = faiss.IndexFlatL2(args.features_dim)
         faiss_index.add(database_features)
+        del database_features
         
         start_time = time.time()
         distances, predictions = faiss_index.search(queries_features, max(args.recall_values))
+        del queries_features
         del faiss_index
+        
+        import gc; gc.collect()
         
         #########################
         ### RERANKING Process ###
@@ -171,13 +176,59 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
             torch.cuda.empty_cache()
             ##### 시각화용 #####
             original_predictions = predictions.copy()
+            ##################
+            with torch.no_grad():
+                # NOTE: decoder에 들어가기 완전 직전 상태를 저장해놔야함
+                # rerank1. RGB database 전부 추출 (before decoder)
+                # FIXME: 이거 위에꺼 이용해서 합칠 수 있는데, 일단 그렇게 느리지 않으니 일단 두기
+                start_time = time.time()
+
+                database_subset_ds = Subset(eval_ds, list(range(eval_ds.database_num)))
+                database_dataloader = DataLoader(dataset=database_subset_ds, num_workers=args.num_workers,
+                                                batch_size=args.infer_batch_size, pin_memory=(args.device=="cuda"))
             
+                masked_database_features = np.empty((eval_ds.database_num, 256, args.features_dim), dtype="float32")
+                model.module.use_masked_inference = True
+                for inputs, indices, flags in tqdm(database_dataloader, ncols=100):
+                    features = model(inputs.to(args.device), flags)
+                    encoded_features = features[1].reshape(inputs.size(0), 256, -1).cpu().numpy()
+                    masked_database_features[indices.numpy(), :, :] = encoded_features
+                    if args.use_fast_track: break
+                model.module.use_masked_inference = False
+
+                logging.info(f"Finished extracting (FOR RERANK) {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
+
+                # rerank2. masked된 query 전부 추출 (before decoder)
+                start_time = time.time()
+                queries_infer_batch_size = args.infer_batch_size
+                queries_subset_ds = Subset(eval_ds, list(range(eval_ds.database_num, len(eval_ds))))
+                queries_dataloader = DataLoader(dataset=queries_subset_ds, num_workers=args.num_workers,
+                                                batch_size=queries_infer_batch_size, pin_memory=(args.device=="cuda"))
+
+                queries_features_mask = np.empty((eval_ds.queries_num, 256), dtype="bool")
+                masked_queries_features = np.empty((eval_ds.queries_num, 256, args.features_dim), dtype="float32")
+                model.module.use_masked_inference = True
+                for inputs, indices, flags in tqdm(queries_dataloader, ncols=100):
+                    features = model(inputs.to(args.device), flags, return_mask=True)
+                    encoded_features = features[1].reshape(inputs.size(0), 256, -1).cpu().numpy()
+                    masked_queries_features[indices.numpy()-eval_ds.database_num,:,:] = encoded_features
+                    queries_features_mask[indices.numpy()-eval_ds.database_num,:] = features[3].detach().cpu().numpy()
+                    if args.use_fast_track: break
+                model.module.use_masked_inference = False
+
+                logging.info(f"Finished extracting (FOR RERANK) {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
             ##################
             # rerank3. Decoder 쭉쭉 태워서 rerank 진행하기
             # masked_database_features.shape: [1197, 256, 768]
             RERANKING_TOP_K = 5
             RERANK_BATCH_SIZE = 32
             reranked_predictions = predictions.copy()  # 원본 보존
+            reconstruction_criterion = MaskedMSE(
+                norm_pix_loss=False,
+                masked=True,
+                reduction='none',
+                loss_type=args.recon_loss_type
+            )
             reconstruction_losses_dict = {}
             
             total_count = 0
@@ -194,19 +245,26 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                         batch_size = end_idx - start_idx
 
                         # a. Query thermal encoding (batch)
-                        encoded_queries = queries_patch_features[start_idx:end_idx]  # [B, 256, 768]
-                        encoded_queries = torch.tensor(encoded_queries, dtype=torch.float32).to('cuda')
-                        encoded_queries += model.module.decoder_pos_embed
+                        if args.rerank_with_RGB:
+                            encoded_queries = queries_patch_features[start_idx:end_idx]  # [B, 256, 768]
+                        else:
+                            encoded_queries = masked_queries_features[start_idx:end_idx]  # [B, 256, 768]
+                        encoded_queries = torch.tensor(encoded_queries, dtype=torch.float32).to('cuda')                            
 
                         # b. Top-K database RGB encoding (batch)
                         top_k_db_indices_batch = predictions[start_idx:end_idx, :RERANKING_TOP_K]  # [B, K]
 
                         # c. Flatten indices to fetch all at once
                         all_db_indices = top_k_db_indices_batch.flatten() # [B*K]
-                        encoded_dbs_flat = database_patch_features[all_db_indices]  # [B*K, 256, 768]
+                        if args.rerank_with_RGB:
+                            encoded_dbs_flat = masked_database_features[all_db_indices]  # [B*K, 256, 768]
+                        else:
+                            encoded_dbs_flat = database_patch_features[all_db_indices]  # [B*K, 256, 768]
                         encoded_dbs_flat = torch.tensor(encoded_dbs_flat, dtype=torch.float32).to('cuda')
                         encoded_dbs = encoded_dbs_flat.reshape(batch_size, RERANKING_TOP_K, 256, -1)  # [B, K, 256, 768]
-                        encoded_dbs += model.module.decoder_pos_embed
+                        
+                        if not args.rerank_with_RGB:
+                            encoded_dbs += model.module.decoder_pos_embed
                         
                         # d. Query batch 생성 (각 query를 K번 반복)
                         encoded_query_batch = encoded_queries.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1)  # [B, K, 256, 768]
@@ -216,95 +274,115 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                         encoded_dbs_flat = encoded_dbs.reshape(-1, 256, encoded_dbs.size(-1))
                         
                         # f. Decoder 통과 (thermal-rgb pair)
-                        thermal_dec = encoded_query_flat.clone()
-                        for blk in model.module.decoder_thermal_blocks:
-                            thermal_dec = blk(thermal_dec, encoded_dbs_flat, return_attention=True)
-                        thermal_dec = model.module.decoder_norm(thermal_dec)
-                        thermal_cross_attn_map = model.module.decoder_thermal_blocks[-1].cross_attn_weights
-                        
-                        rgb_dec = encoded_dbs_flat.clone()
-                        for blk in model.module.decoder_rgb_blocks:
-                            rgb_dec = blk(rgb_dec, encoded_query_flat, return_attention=True)
-                        rgb_dec = model.module.decoder_norm(rgb_dec)
-                        rgb_cross_attn_map = model.module.decoder_rgb_blocks[-1].cross_attn_weights
-                        
-                        # ========== LoFTR-style Mutual Agreement ==========
-                        rgb_map_transposed = rgb_cross_attn_map.transpose(1, 2)
-                        mutual_agreement = thermal_cross_attn_map * rgb_map_transposed  # [B*K, 256, 256]
-                        
-                        # ========== MNN (Mutual Nearest Neighbor) ==========
-                        B_K, N_thermal, N_rgb = thermal_cross_attn_map.shape
-                        
-                        # 1. Best matches (argmax)
-                        thermal_to_rgb = thermal_cross_attn_map.argmax(dim=2)  # [B*K, 256]
-                        rgb_to_thermal = rgb_cross_attn_map.argmax(dim=2)      # [B*K, 256]
-                        
-                        # 2. Mutual check + Threshold
-                        threshold = 0.01
-                        mutual_scores = torch.zeros(B_K, device=thermal_cross_attn_map.device)
-                        mutual_matches_list = []  # For visualization
-                        
-                        for b in range(B_K):
-                            i_range = torch.arange(N_thermal, device=thermal_cross_attn_map.device)
-                            j_from_i = thermal_to_rgb[b]
-                            i_from_j = rgb_to_thermal[b, j_from_i]
-                            
-                            # Mutual mask
-                            is_mutual = (i_from_j == i_range)
-                            
-                            # Confidence check
-                            conf_thermal = thermal_cross_attn_map[b, i_range, j_from_i]
-                            conf_rgb = rgb_cross_attn_map[b, j_from_i, i_range]
-                            conf_avg = (conf_thermal + conf_rgb) / 2
-                            
-                            # Threshold
-                            is_confident = conf_avg > threshold
-                            
-                            # Final mask
-                            valid_matches = is_mutual & is_confident
-                            
-                            # Score
-                            mutual_scores[b] = (conf_avg * valid_matches).sum()
-                            
-                            # Save matches for visualization (첫 5개만)
-                            if b < 5:
-                                matches_i = i_range[valid_matches].cpu().numpy()
-                                matches_j = j_from_i[valid_matches].cpu().numpy()
-                                matches_conf = conf_avg[valid_matches].cpu().numpy()
-                                mutual_matches_list.append((matches_i, matches_j, matches_conf))
-                        
-                        # 3. Reshape
-                        rerank_scores_batch = mutual_scores.view(batch_size, RERANKING_TOP_K)
+                        if args.rerank_with_RGB:
+                            decoded_result = encoded_dbs_flat.clone()
+                            for blk in model.module.decoder_rgb_blocks:
+                                decoded_result = blk(decoded_result, encoded_query_flat, return_attention=True)
+                            decoded_result = model.module.decoder_norm(decoded_result)
+                            rgb_cross_attn_map = model.module.decoder_rgb_blocks[-1].cross_attn_weights
+                        else:
+                            decoded_result = encoded_query_flat.clone()
+                            for blk in model.module.decoder_thermal_blocks:
+                                decoded_result = blk(decoded_result, encoded_dbs_flat, return_attention=True)
+                            decoded_result = model.module.decoder_norm(decoded_result)
+                            thermal_cross_attn_map = model.module.decoder_thermal_blocks[-1].cross_attn_weights
+
+                        # rgb_dec = encoded_dbs_flat.clone()
+                        # for blk in model.module.decoder_rgb_blocks:
+                        #     rgb_dec = blk(rgb_dec, encoded_query_flat, return_attention=True)
+                        # rgb_dec = model.module.decoder_norm(rgb_dec)
+                        # rgb_cross_attn_map = model.module.decoder_rgb_blocks[-1].cross_attn_weights
+
+                        # e. Reconstruction
+                        reconstructed_patches_thermal = model.module.prediction_head(decoded_result)  # [B*K, 256, 588]
+                        # reconstructed_patches_rgb = model.module.prediction_head(rgb_dec)  # [B*K, 256, 588]
+
+                        # h. Target patches (batch)
+                        query_abs_indices = list(range(eval_ds.database_num + start_idx, eval_ds.database_num + end_idx))
+                        query_imgs = torch.stack([eval_ds[idx][0] for idx in query_abs_indices]).to('cuda') # [B, 3, 224, 224]
+                        query_imgs_batch = query_imgs.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1, -1, -1) # [B, K, 3, 224, 224]
+                        query_imgs_flat = query_imgs_batch.reshape(-1, *query_imgs.shape[1:])  # [B*K, 3, 224, 224]
+                        target_patches = patchify(query_imgs_flat)
+
+                        # i. Masks (batch)
+                        masks_batch = queries_features_mask[start_idx:end_idx]  # [B, 256]
+                        masks_batch = torch.tensor(masks_batch, dtype=torch.bool).to('cuda')
+                        masks_flat = masks_batch.unsqueeze(1).expand(-1, RERANKING_TOP_K, -1)  # [B, K, 256]
+                        masks_flat = masks_flat.reshape(-1, 256)  # [B*K, 256]
+                    
+                        loss = reconstruction_criterion(
+                            pred=reconstructed_patches_thermal,
+                            mask=masks_flat,
+                            target=target_patches
+                        )  # [B*K]
+                        loss = loss.reshape(batch_size, RERANKING_TOP_K)  # [B, K]
                         
                         # 4. Reranking
-                        for i in range(batch_size):
-                            query_idx = start_idx + i
-                            scores = rerank_scores_batch[i].cpu().numpy()
-                            reranked_order = np.argsort(-scores)  # Descending
+                        for i, query_idx in enumerate(range(start_idx, end_idx)):
+                            reconstruction_losses = loss[i].cpu().numpy()
+                            reranked_order = np.argsort(reconstruction_losses)
+                            
+                            reconstruction_losses_dict[query_idx] = reconstruction_losses.tolist()
                             
                             top_k_db_indices = top_k_db_indices_batch[i]
-                            reranked_predictions[query_idx, :RERANKING_TOP_K] = \
-                                top_k_db_indices[reranked_order]
+                            reranked_predictions[query_idx, :RERANKING_TOP_K] = top_k_db_indices[reranked_order]
                             
                             if predictions[query_idx, 0] != reranked_predictions[query_idx, 0]:
                                 top1_change_count += 1
                             total_count += 1
+                        if args.use_fast_track: break
 
-                        # inference.py - reranking 직후
-                        print(f"[Thermal→RGB Attention Stats]")
-                        print(f"  Mean: {thermal_cross_attn_map.mean():.4f}")
-                        print(f"  Std: {thermal_cross_attn_map.std():.4f}")
-                        print(f"  Max: {thermal_cross_attn_map.max():.4f}")
-                        print(f"  Entropy: {-(thermal_cross_attn_map * torch.log(thermal_cross_attn_map + 1e-8)).sum(dim=-1).mean():.4f}")
-
-                        print(f"\n[RGB→Thermal Attention Stats]")
-                        print(f"  Mean: {rgb_cross_attn_map.mean():.4f}")
-                        print(f"  Std: {rgb_cross_attn_map.std():.4f}")
-                        print(f"  Max: {rgb_cross_attn_map.max():.4f}")
-                        print(f"  Entropy: {-(rgb_cross_attn_map * torch.log(rgb_cross_attn_map + 1e-8)).sum(dim=-1).mean():.4f}")
-                        
+                        '''
                         # ========== Statistics Logging (첫 배치만) ==========
-                        if batch_idx == 0:
+                        if batch_idx == 0:                        
+                            # ========== LoFTR-style Mutual Agreement ==========
+                            rgb_map_transposed = rgb_cross_attn_map.transpose(1, 2)
+                            mutual_agreement = thermal_cross_attn_map * rgb_map_transposed  # [B*K, 256, 256]
+                            
+                            # ========== MNN (Mutual Nearest Neighbor) ==========
+                            B_K, N_thermal, N_rgb = thermal_cross_attn_map.shape
+                            
+                            # 1. Best matches (argmax)
+                            thermal_to_rgb = thermal_cross_attn_map.argmax(dim=2)  # [B*K, 256]
+                            rgb_to_thermal = rgb_cross_attn_map.argmax(dim=2)      # [B*K, 256]
+                            
+                            # 2. Mutual check + Threshold
+                            threshold = 0.01
+                            mutual_scores = torch.zeros(B_K, device=thermal_cross_attn_map.device)
+                            mutual_matches_list = []  # For visualization
+                            
+                            for b in range(B_K):
+                                i_range = torch.arange(N_thermal, device=thermal_cross_attn_map.device)
+                                j_from_i = thermal_to_rgb[b]
+                                i_from_j = rgb_to_thermal[b, j_from_i]
+                                
+                                # Mutual mask
+                                is_mutual = (i_from_j == i_range)
+                                
+                                # Confidence check
+                                conf_thermal = thermal_cross_attn_map[b, i_range, j_from_i]
+                                conf_rgb = rgb_cross_attn_map[b, j_from_i, i_range]
+                                conf_avg = (conf_thermal + conf_rgb) / 2
+                                
+                                # Threshold
+                                is_confident = conf_avg > threshold
+                                
+                                # Final mask
+                                valid_matches = is_mutual & is_confident
+                                
+                                # Score
+                                mutual_scores[b] = (conf_avg * valid_matches).sum()
+                                
+                                # Save matches for visualization (첫 5개만)
+                                if b < 5:
+                                    matches_i = i_range[valid_matches].cpu().numpy()
+                                    matches_j = j_from_i[valid_matches].cpu().numpy()
+                                    matches_conf = conf_avg[valid_matches].cpu().numpy()
+                                    mutual_matches_list.append((matches_i, matches_j, matches_conf))
+                            
+                            # 3. Reshape
+                            rerank_scores_batch = mutual_scores.view(batch_size, RERANKING_TOP_K)
+
                             # MNN Statistics
                             print(f"\n{'='*60}")
                             print(f"MNN Statistics (Batch {batch_idx}):")
@@ -363,23 +441,23 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                                     avg_count = threshold_counts[th].mean()
                                     f.write(f"    > {th:.3f}: {avg_count:.1f} / 65536 ({100*avg_count/65536:.2f}%)\n")
                             
+                                VIS_QUERY_COUNT = 5
+                                save_mnn_visualization(
+                                    eval_ds=eval_ds,
+                                    query_indices=list(range(start_idx, min(start_idx + VIS_QUERY_COUNT, end_idx))),
+                                    top_k_db_indices=top_k_db_indices_batch[:VIS_QUERY_COUNT],
+                                    mutual_matches_list=mutual_matches_list,
+                                    rerank_scores=rerank_scores_batch[:VIS_QUERY_COUNT].cpu().numpy(),
+                                    thermal_cross_attn_maps=thermal_cross_attn_map[:VIS_QUERY_COUNT*5],  # 5 queries × 5 ranks
+                                    rgb_cross_attn_maps=rgb_cross_attn_map[:VIS_QUERY_COUNT*5],
+                                    save_dir=os.path.join(args.save_dir, 'mnn_matches'),
+                                    epoch=args.current_epoch,
+                                )
                             print(f"Saved mutual agreement log: {log_path}")
-                            
-                        if batch_idx % 20 == 0:
-                            VIS_QUERY_COUNT = 5
-                            save_mnn_visualization(
-                                eval_ds=eval_ds,
-                                query_indices=list(range(start_idx, min(start_idx + VIS_QUERY_COUNT, end_idx))),
-                                top_k_db_indices=top_k_db_indices_batch[:VIS_QUERY_COUNT],
-                                mutual_matches_list=mutual_matches_list,
-                                rerank_scores=rerank_scores_batch[:VIS_QUERY_COUNT].cpu().numpy(),
-                                thermal_cross_attn_maps=thermal_cross_attn_map[:VIS_QUERY_COUNT*5],  # 5 queries × 5 ranks
-                                rgb_cross_attn_maps=rgb_cross_attn_map[:VIS_QUERY_COUNT*5],
-                                save_dir=os.path.join(args.save_dir, 'mnn_matches'),
-                                epoch=args.current_epoch,
-                            )
                     # ==================================================
-                        
+                    '''
+                    logging.info(f"Reranking completed in {time.time() - start_time:.2f} s")
+                    print(f"RERANK: changed {top1_change_count} / {total_count}")                        
                 except Exception as e:
                     import traceback
                     print(f"ERROR caught: {e}")
@@ -409,10 +487,6 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 prev_predictions = predictions.copy()
                 predictions = reranked_predictions
         
-        import gc; gc.collect()
-        del database_features
-        del queries_features # predictions: [Query, top20]
-        
         # 4. positive query(정답)가 몇 번째 top-N에 속하는지 검사하기
         positives_per_query = eval_ds.get_positives()
         recalls = np.zeros(len(args.recall_values))
@@ -437,8 +511,8 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
             prev_recalls = prev_recalls / eval_ds.queries_num * 100
             
             logging.info(f"=================================================")
-            logging.info(f"recalls before RERANKING: {','.join(map(str, recalls))}")
-            prev_recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, recalls)])
+            logging.info(f"recalls before RERANKING: {','.join(map(str, prev_recalls))}")
+            prev_recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, prev_recalls)])
             logging.info(f"Recalls for RERANKING {seq_name}: {prev_recalls_str}")
             logging.info(f"=================================================")
         
