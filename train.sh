@@ -1,6 +1,6 @@
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
-CUDA_VISIBLE_DEVICES=5 \
+CUDA_VISIBLE_DEVICES=0 \
 python3 train_wandb.py \
     --save_dir './logs' \
     --features_dim 768 \
@@ -9,16 +9,16 @@ python3 train_wandb.py \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 4 \
     --num_trainable_blocks_THERMAL 4 \
-    --comment "LoFTR-croco-0.8-alpha10.0-decDepth12-mse+ssim-RGBReranking" \
+    --comment "BiRecon-croco-0.8-alpha10.0-decDepth4-mse+ssim" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
     --croco_mask_ratio 0.8 \
-    --num_decoder_depth 12 \
+    --num_decoder_depth 4 \
     --recon_weight 10 \
-    --recon_loss_type 'mse+ssim' \
-    --rerank_with_RGB \
-    --use_reranking
+    --recon_loss_type 'mse+ssim'
+    # --rerank_with_RGB \
+    # --use_reranking
     
     # --use_fast_track
     # --use_only_cross_decoder \
