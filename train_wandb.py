@@ -43,7 +43,7 @@ if __name__ == "__main__":
     args = parser.parse_arguments()
 
     # wandb 초기화
-    wandb.init(project="cross-modal-vpr", name=args.comment, config=vars(args))
+    wandb.init(project="cross-modal-vpr-2", name=args.comment, config=vars(args))
 
     args.save_dir = os.path.join(args.save_dir, args.comment, utils.get_timestamp())
     commons.setup_logging(args.save_dir)
@@ -211,7 +211,7 @@ if __name__ == "__main__":
             logging.debug(f"Start loading {len(triplets_ds)} triplets as {len(triplets_dl)} batches")
 
             print("- Training...")
-            for images, triplets_local_indexes, _, aligned_rgbs in tqdm(triplets_dl, ncols=100, desc=f"Epoch {epoch_num:02d}"):
+            for images, triplets_local_indexes, _, aligned_rgbs, dist_pos, dist_neg in tqdm(triplets_dl, ncols=100, desc=f"Epoch {epoch_num:02d}"):
                 curr_batch_len = len(images) // num_bundle_flags
                 flags = bundle_flags * curr_batch_len
                 
@@ -230,7 +230,9 @@ if __name__ == "__main__":
                     flags=flags,
                     aligned_rgb=aligned_rgbs.to(args.device),
                     return_mask=True,
-                    return_masked_patch=True
+                    return_masked_patch=True,
+                    dist_pos=dist_pos,
+                    dist_neg=dist_neg,
                 )
 
                 # triplets_local_indexes = (batch, 3, neg_num) => [[[0, 1, 2], [0, 1, 3] ... [0, 1, neg_num+2]] * batch]
@@ -247,6 +249,9 @@ if __name__ == "__main__":
                     query_features = global_features[queries_indexes]
                     positive_features = global_features[positives_indexes]
                     negative_features = global_features[negatives_indexes]
+                    # query_tokens = patch_embedding[queries_indexes]
+                    # positive_tokens = patch_embedding[positives_indexes]
+                    # negative_tokens = patch_embedding[negatives_indexes]
 
                     triplet_loss = GlobalTriplet(query_features, positive_features, negative_features)
                     triplet_loss_sum += triplet_loss
@@ -256,7 +261,6 @@ if __name__ == "__main__":
                 
                 # train_batch_size: 4, arg.negs_num_per_query: 10
                 recon_weight = args.recon_weight
-                rerank_weight = args.rerank_weight
                 overall_loss += (recon_loss * recon_weight)
                 overall_loss /= (args.train_batch_size * args.negs_num_per_query)
 

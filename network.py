@@ -11,7 +11,29 @@ import torchvision.models as models
 
 from croco.models.masking import RandomMask
 from croco.models.criterion import MaskedMSE
-        
+
+class DistanceBasedRerankLoss(nn.Module):
+    def __init__(self, midpoint=25.0, steepness=0.15):
+        super().__init__()
+        self.midpoint = midpoint
+        self.steepness = steepness
+    
+    def distance_to_label(self, distance):
+        """Sigmoid-based soft label"""
+        return 1.0 / (1.0 + torch.exp(
+            self.steepness * (distance - self.midpoint)
+        ))
+    
+    def forward(self, logits, distances):
+        """
+        Args:
+            logits: [B] or [B*K] - model predictions
+            distances: [B] or [B*K] - GPS distances in meters
+        """
+        soft_labels = self.distance_to_label(distances)
+        loss = F.binary_cross_entropy_with_logits(logits, soft_labels)
+        return loss
+    
 class CroCoDecoderBlock(nn.Module):
     """
     CroCo 원본 Decoder Block
@@ -188,6 +210,17 @@ class CrossModalVPR_Net(nn.Module):
         self.use_only_cross_decdoer = args.use_only_cross_decoder
         self.use_contrastive_recon_loss = args.use_contrastive_recon_loss
         self.recon_loss_type = args.recon_loss_type
+        self.rerank_weight = args.rerank_weight
+
+        # decoder에 들어갈 CLS 토큰 (학습 가능)
+        self.rerank_cls_token = nn.Parameter(torch.zeros(1, 1, self.output_dim))
+        nn.init.normal_(self.rerank_cls_token, std=.02)
+
+        # CLS 토큰을 점수(0~1)로 변환할 Head (BCEWithLogitsLoss 사용 예정이므로 Sigmoid 생략 권장)
+        self.criterion = DistanceBasedRerankLoss(midpoint=25, steepness=0.15)
+        self.rerank_head = nn.Linear(self.output_dim, 1)
+        nn.init.xavier_uniform_(self.rerank_head.weight)
+        nn.init.zeros_(self.rerank_head.bias)
                
         # Croco settings
         dec_depth = args.num_decoder_depth
@@ -289,6 +322,9 @@ class CrossModalVPR_Net(nn.Module):
         x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 3))
         
         return x
+    
+    def through_thermal_decoder(thermal_patch, rgb_patch):
+        ...
 
     def unpatchify(self, x, channels=3):
         """
@@ -342,7 +378,7 @@ class CrossModalVPR_Net(nn.Module):
             breakpoint()
         return thermal_full
     
-    def forward_model(self, x, aligned_rgb=None, modality='rgb', return_masked_patch=False):
+    def forward_model(self, x, aligned_rgb=None, modality='rgb', return_masked_patch=False,rgbs=None,dist_pos=None,dist_neg=None):
         """단일 모달리티에 대한 Forward"""
         # self.use_masked_inference: rerank를 위해, decoder에 들어가기 바로 전 단계를 뱉는다
         
@@ -364,7 +400,7 @@ class CrossModalVPR_Net(nn.Module):
                 # 1-4. masked thermal encoder
                 thermal_visible, mask, patch_B, patch_N, patch_D = self.croco_like_encoder(x)
                 
-                # 5. aligned RGB도 feature tokens 추출하기
+                # 5. aligned RGB feature tokens 추출
                 rgb_full = self.rgb_backbone(aligned_rgb)
                 rgb_full = rgb_full["x_norm_patchtokens"] 
                 
@@ -372,98 +408,100 @@ class CrossModalVPR_Net(nn.Module):
                 thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask, patch_B, patch_N, patch_D)
             
                 # 7. Decoder Positional Encoding
-                thermal_full_dec = thermal_full + self.decoder_pos_embed  # [B, 256, 768]
-                rgb_full = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
+                thermal_full_dec = thermal_full + self.decoder_pos_embed
+                rgb_full = rgb_full + self.decoder_pos_embed
                 
-                # 8. decoder 통과시키기
-                for blk in self.decoder_blocks:
-                    thermal_full_dec = blk(thermal_full_dec, rgb_full)
-                thermal_full_dec = self.decoder_norm(thermal_full_dec)
-                
-                def calculate_contrastive_recon_loss(pred, mask, target, confidence_map=None, method='MEAN'):
-                    """
-                    pred_pos: [B, 256, 588] - positive reconstruction
-                    pred_negs: [B, N, 256, 588] - N negative reconstructions
-                    mask: [B, 256]
-                    target: [B, 256, 588]
-                    """
-                    # Positive loss
-                    loss_pos = self.reconstruction_criterion(
-                        pred=pred_pos,
-                        mask=mask,
-                        target=target
-                    )  # [B] or scalar
-                    
-                    # Negative losses
-                    B, N = pred_negs.shape[:2]
-                    loss_negs = []
-                    
-                    for n in range(N):
-                        loss_neg = self.reconstruction_criterion(
-                            pred=pred_negs[:, n],  # [B, 256, 588]
-                            mask=mask,
-                            target=target,
-                        )  # [B] or scalar
-                        loss_negs.append(loss_neg)
-                    
-                    loss_negs = torch.stack(loss_negs, dim=0)  # [N, B] or [N]
-                    
-                    loss_method = method
-                    if loss_method == 'MEAN':
-                        # Simple difference
-                        loss = loss_pos - loss_negs.mean(dim=0)
-                    elif loss_method == 'infoNCE':
-                        # InfoNCE (loss → similarity score via negative)
-                        # Lower loss = higher similarity
-                        sim_pos = torch.exp(-loss_pos)  # [B]
-                        sim_negs = torch.exp(-loss_negs)  # [N, B]
-                        
-                        denominator = sim_pos + sim_negs.sum(dim=0)  # [B]
-                        loss = -torch.log(sim_pos / denominator)  # [B]
-                    
-                    return loss # 이거 mean해야함? 체크하기
-                    
-                
-                def calculate_recon_loss(pred, mask, target, confidence_map=None):
-                    recon_loss = self.reconstruction_criterion(
-                        pred=pred,        # [B, 256, 768]
-                        mask=mask,        # [B, 256]
-                        target=target,    # [B, 3, 256, 768]
-                    )
-                    return recon_loss
+                # 8. Positive pair decoder (thermal + aligned_rgb)
+                B = thermal_full_dec.shape[0]
+                cls_token_pos = self.rerank_cls_token.expand(B, -1, -1)
+                thermal_full_dec_cls = torch.cat((cls_token_pos, thermal_full_dec), dim=1)
 
-                if self.use_contrastive_recon_loss:
-                    recon_loss_fn = calculate_contrastive_recon_loss
-                else:
-                    recon_loss_fn = calculate_recon_loss
+                for blk in self.decoder_blocks:
+                    thermal_full_dec_cls = blk(thermal_full_dec_cls, rgb_full)
+                thermal_full_dec_cls = self.decoder_norm(thermal_full_dec_cls)
                 
-                # 9. Prediction Head
-                if self.use_feature_level_recon_loss:
-                    out = self.thermal_backbone(x)
-                    thermal_not_masked_enc = out["x_norm_patchtokens"]
-                    
-                    # 10. Reconstruction loss 계산
-                    recon_loss = recon_loss_fn(thermal_full_dec, mask, thermal_not_masked_enc)
+                # 9. Reconstruction loss
+                thermal_full_cls = thermal_full_dec_cls[:, 0, :]
+                thermal_full_patch = thermal_full_dec_cls[:, 1:, :]
+                reconstructed_patches = self.prediction_head(thermal_full_patch)
+                target_patches = self.patchify(x)
+                recon_loss = self.reconstruction_criterion(
+                    pred=reconstructed_patches,
+                    mask=mask,
+                    target=target_patches
+                )
+                
+                # 10. Negative pairs decoder (thermal + random_rgbs)
+                NEG_COUNT = 3
+                # rgbs에서 필요한 negative만 추출 (B개씩 NEG_COUNT묶음)
+                rgb_neg_samples = []
+                dist_neg_samples = []
+                for i in range(B):
+                    start_idx = i * 11 + 1  # positive 건너뛰기
+                    neg_indices = list(range(start_idx, start_idx + NEG_COUNT))
+                    rgb_neg_samples.append(rgbs[neg_indices])
+
+                    neg_indices_neg = list(range(0, 0 + NEG_COUNT))
+                    dist_neg_samples.append(dist_neg[i, neg_indices_neg])
+                rgb_neg_batch = torch.cat(rgb_neg_samples, dim=0)  # [B*NEG_COUNT, 3, H, W]
+                dist_neg_batch = torch.cat(dist_neg_samples, dim=0)  # [B*NEG_COUNT, 3, H, W]
+                
+                # Negative RGB encoder
+                rgb_negs = self.rgb_backbone(rgb_neg_batch)["x_norm_patchtokens"]
+                rgb_negs = rgb_negs
+                rgb_negs = rgb_negs + self.decoder_pos_embed  # [B*NEG_COUNT, 256, 768]
+                
+                # Thermal 복제 및 decoder
+                thermal_expanded = torch.repeat_interleave(
+                    thermal_full_dec,
+                    repeats=NEG_COUNT,
+                    dim=0
+                )
+                cls_tokens_neg = self.rerank_cls_token.expand(B * NEG_COUNT, -1, -1)
+                decoder_input_neg = torch.cat((cls_tokens_neg, thermal_expanded), dim=1)
+                
+                for blk in self.decoder_blocks:
+                    decoder_input_neg = blk(decoder_input_neg, rgb_negs)
+                decoder_output_neg = self.decoder_norm(decoder_input_neg)
+                
+                # 11. Rerank loss
+                cls_neg = decoder_output_neg[:, 0, :]
+                logits_pos = self.rerank_head(thermal_full_cls)  # [B, 1]
+                logits_neg = self.rerank_head(cls_neg)  # [B*NEG_COUNT, 1]
+                
+                if None:
+                    loss_pos = self.criterion(logits_pos, dist_pos.unsqueeze(1))
+                    loss_neg = self.criterion(logits_neg, dist_neg_batch.unsqueeze(1))
+    
+                    rerank_loss = loss_pos + loss_neg / NEG_COUNT
+                    # recon_loss = recon_loss + self.rerank_weight * rerank_loss  # weight 조절 필요
+                    recon_loss = recon_loss + self.rerank_weight * rerank_loss  # weight 조절 필요
                 else:
-                    reconstructed_patches = self.prediction_head(thermal_full_dec)
-                    target_patches = self.patchify(x)
-                    
-                    # 10. Reconstruction loss 계산
-                    confidence_scores = None
-                    if self.use_confidence_map:
-                        confidence_scores = self.confidence_head(thermal_full_dec) # [B, 256]
-                    recon_loss = recon_loss_fn(reconstructed_patches, mask, target_patches, confidence_scores)
-                    
-                    # 11. VPR용 patch tokens
-                    if return_masked_patch:
-                        masked_patch = thermal_full
-                        
-                    if self.use_single_pass:
-                        thermal_for_vpr = thermal_full.clone()
-                        thermal_for_vpr[mask] = thermal_full_dec[mask]
-                        out = {"x_norm_patchtokens": thermal_for_vpr}
-                    else:
-                        out = self.thermal_backbone(x)
+                    # 1. Sigmoid로 확신도(Confidence) 계산 (0.0 ~ 1.0)
+                    # 모델이 "이 쌍은 같은 장소다"라고 생각하는 확률
+                    confidence_pos = torch.sigmoid(logits_pos)
+
+                    # 2. Rerank Loss 계산 (CLS 토큰의 정답 학습용)
+                    # CLS가 GPS 거리(dist_pos) 기반으로 정답을 맞추도록 유도
+                    loss_pos = self.criterion(logits_pos, dist_pos.unsqueeze(1))
+                    loss_neg = self.criterion(logits_neg, dist_neg_batch.unsqueeze(1))
+                    rerank_loss = loss_pos + (loss_neg / NEG_COUNT)
+
+                    # 3. Weighted Reconstruction Loss (핵심 로직)
+                    # "CLS가 확신할수록(Confidence가 높을수록) 복원 Loss를 중요하게 다룬다."
+                    # CLS가 0.1(오답)을 내뱉으면 복원 Loss도 0.1배만 반영되어 무시됨
+                    # CLS가 0.9(정답)를 내뱉으면 복원 Loss가 0.9배 반영되어 강하게 학습됨
+                    weighted_recon_loss = recon_loss * confidence_pos.mean()
+
+                    # 4. 최종 Loss 합산
+                    # 기존 recon_loss 변수를 덮어씌워 리턴
+                    recon_loss = weighted_recon_loss # + (self.rerank_weight * rerank_loss)
+
+                # VPR용 patch tokens
+                if return_masked_patch:
+                    masked_patch = thermal_full
+                
+                out = self.thermal_backbone(x)
             else:
                 # when inference
                 # NOTE: 부르는 곳에 no_grad 호출하기
@@ -500,7 +538,7 @@ class CrossModalVPR_Net(nn.Module):
         
         return global_desc, patch_tokens, recon_loss, mask, masked_patch
 
-    def forward(self, x, flags, aligned_rgb=None, return_mask=False, return_masked_patch=False):
+    def forward(self, x, flags, aligned_rgb=None, return_mask=False, return_masked_patch=False,dist_pos=None, dist_neg=None):
         is_rgb = torch.tensor([f == 'rgb' for f in flags], device=x.device)
         final_emb = torch.zeros((x.size(0), self.output_dim), device=x.device)
         patch_emb = torch.zeros((x.size(0), 256, self.output_dim), device=x.device)
@@ -517,7 +555,9 @@ class CrossModalVPR_Net(nn.Module):
                 if global_emb is not None: final_emb[is_rgb] = global_emb
                 patch_emb[is_rgb] = patch_rgb
             if (~is_rgb).any():
-                global_emb, patch_thermal, recon_loss, mask, masked_patch_thermal = self.forward_model(x[~is_rgb], modality='thermal', aligned_rgb=aligned_rgb, return_masked_patch=return_masked_patch)
+                global_emb, patch_thermal, recon_loss, mask, masked_patch_thermal = self.forward_model(x[~is_rgb], modality='thermal',
+                            aligned_rgb=aligned_rgb, return_masked_patch=return_masked_patch,rgbs=x[is_rgb],
+                            dist_pos=dist_pos, dist_neg=dist_neg)
                 if global_emb is not None: final_emb[~is_rgb] = global_emb
                 patch_emb[~is_rgb] = patch_thermal
                 if return_mask: masks[~is_rgb] = mask

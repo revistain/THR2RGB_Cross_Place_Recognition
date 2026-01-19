@@ -70,8 +70,14 @@ def collate_fn(batch):
         aligned_rgbs = torch.stack([e[3] for e in batch], 0)
     else:
         aligned_rgbs = None
+        
+    # ===== 거리 정보 =====
+    dists_pos = torch.tensor([e[4] for e in batch], dtype=torch.float32)  # [B]
+    dists_neg = torch.stack([torch.tensor(e[5], dtype=torch.float32) for e in batch], 0)  # [B, K]
+    # ===== 거리 정보 끝 =====
          
-    return images, torch.cat(tuple(triplets_local_indexes)), triplets_global_indexes, aligned_rgbs
+    return (images, torch.cat(tuple(triplets_local_indexes)), 
+            triplets_global_indexes, aligned_rgbs, dists_pos, dists_neg)
 
 
 class BaseSTheReODual(data.Dataset):
@@ -337,7 +343,24 @@ class TripletsSTheReODual(BaseSTheReODual):
             self.triplets_global_indexes[index],
             (1, 1, self.negs_num_per_query)
         )
-        
+
+        # ===== 거리 정보 추가 =====
+        # Positive distance
+        # self.soft_distances_per_query[query_index]는 정렬된 거리 배열
+        # best_positive_index는 첫 번째(가장 가까운) positive
+        # Fallback: GPS로 직접 계산
+        query_utm = self.queries_utms[query_index]
+        pos_utm = self.database_utms[best_positive_index]
+        dist_pos = np.linalg.norm(query_utm - pos_utm)
+        # Negative distances
+        dists_neg = []
+        for neg_idx in neg_indexes:
+            neg_utm = self.database_utms[neg_idx]
+            dist = np.linalg.norm(query_utm - neg_utm)
+            dists_neg.append(dist)
+        dists_neg = np.array(dists_neg)
+        # ===== 거리 정보 끝 =====
+
         if self.use_align_rgb:
             seed = np.random.randint(2147483647)
             
@@ -354,38 +377,14 @@ class TripletsSTheReODual(BaseSTheReODual):
         positive = self.resized_transform(self.get_rgb_img(self.rgb_database_paths[best_positive_index]))
         negatives = [self.resized_transform(self.get_rgb_img(self.rgb_database_paths[i])) for i in neg_indexes]
 
-        # ######################################
-        # # Denormalize
-        # query_denorm = denormalize(query.clone())
-        # aligned_rgb_denorm = denormalize(aligned_rgb.clone()) if aligned_rgb is not None else None
-        # positive_denorm = denormalize(positive.clone())
-        # negatives_denorm = [denormalize(neg.clone()) for neg in negatives]
-
-        # # 한 이미지로 합치기
-        # images_to_concat = [query_denorm]
-        # if aligned_rgb_denorm is not None:
-        #     images_to_concat.append(aligned_rgb_denorm)
-        # images_to_concat.append(positive_denorm)
-        # images_to_concat.extend(negatives_denorm)
-
-        # # Horizontal concatenation
-        # combined = torch.cat(images_to_concat, dim=2)  # [3, H, W*N]
-
-        # # Tensor to PIL Image
-        # combined_np = combined.permute(1, 2, 0).numpy()  # [H, W*N, 3]
-        # combined_np = (combined_np * 255).astype(np.uint8)
-        # combined_img = Image.fromarray(combined_np)
-
-        # # 저장 (덮어씌우기)
-        # combined_img.save(os.path.join(save_dir, 'comparison.png'))
-
-        # breakpoint()  # ← 필요하면 활성화
-        # ######################################
-
         images = torch.stack((query, positive, *negatives), 0)
         triplets_local_indexes = torch.tensor([[0, 1, neg_num + 2] for neg_num in range(len(neg_indexes))])
-        
-        return images, triplets_local_indexes, self.triplets_global_indexes[index], aligned_rgb
+
+        return images, \
+            triplets_local_indexes, \
+            self.triplets_global_indexes[index], \
+            aligned_rgb, \
+            dist_pos, dists_neg
 
     def __len__(self):
         if self.is_inference:

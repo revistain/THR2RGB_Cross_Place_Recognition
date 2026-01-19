@@ -183,7 +183,7 @@ def visualize_during_training(args, model, triplets_dl, device, epoch, save_dir=
     model.eval()
     
     # 첫 번째 batch 가져오기
-    images, _, _, aligned_rgbs = next(iter(triplets_dl))
+    images, _, _, aligned_rgbs, _, _ = next(iter(triplets_dl))
     if args.use_contrastive_recon_loss:
         assert images.size(0) % args.train_batch_size == 0
         size_of_batch = int(images.size(0) / args.train_batch_size)
