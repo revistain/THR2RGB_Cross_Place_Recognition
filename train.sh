@@ -19,9 +19,9 @@ python3 train_wandb.py \
     --recon_loss_type 'mse+ssim' \
     --rerank_with_RGB \
     --use_reranking
+    
     # --use_fast_track
     # --use_only_cross_decoder \
-
     # --use_only_cross_decoder \
     # --use_contrastive_recon_loss \
     # --ssim-contrastLoss
@@ -31,7 +31,6 @@ python3 train_wandb.py \
     # --use_only_cross_decoder
     # --use_pos_as_aligned_rgb \
     # --use_decode_mask \
-
     # --num_workers 0 \
     # --use_feature_level_recon_loss \
     # --use_bireconstruction \

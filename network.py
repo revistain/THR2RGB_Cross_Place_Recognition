@@ -222,10 +222,7 @@ class CrossModalVPR_Net(nn.Module):
         self.thermal_backbone = get_backbone(pretrained_foundation, foundation_model_path)
         self.output_dim = 768
         self.use_masked_inference = False
-        self.use_feature_level_recon_loss = args.use_feature_level_recon_loss
-        self.use_confidence_map = args.use_confidence_map
         self.use_only_cross_decdoer = args.use_only_cross_decoder
-        self.use_contrastive_recon_loss = args.use_contrastive_recon_loss
         self.recon_loss_type = args.recon_loss_type
                
         # Croco settings
@@ -264,24 +261,16 @@ class CrossModalVPR_Net(nn.Module):
         )
 
         # 2. Aggregation Layer (각각 따로 두는 것을 추천)
-        # GeM의 파라미터 p가 모달리티별로 다르게 학습될 수 있도록 분리합니다.
-        if args.use_GeMAdditionalLayer:
-            print("="*30)
-            print("USING GEM ADDITIONAL LAYER !!!!!")
-            print("="*30)
-            self.rgb_aggregation = AggregationHead(dim=768, bottleneck=192)
-            self.thermal_aggregation = AggregationHead(dim=768, bottleneck=192)
-        else:
-            self.rgb_aggregation = nn.Sequential(
-                L2Norm(), 
-                GeM(work_with_tokens=None), 
-                Flatten(),
-            )
-            self.thermal_aggregation = nn.Sequential(
-                L2Norm(), 
-                GeM(work_with_tokens=None), 
-                Flatten()
-            )
+        self.rgb_aggregation = nn.Sequential(
+            L2Norm(), 
+            GeM(work_with_tokens=None), 
+            Flatten(),
+        )
+        self.thermal_aggregation = nn.Sequential(
+            L2Norm(), 
+            GeM(work_with_tokens=None), 
+            Flatten()
+        )
     
     def _set_mask_token(self, dec_embed_dim):
         self.mask_token = nn.Parameter(torch.zeros(1, 1, dec_embed_dim))
@@ -429,8 +418,7 @@ class CrossModalVPR_Net(nn.Module):
                     rgb_full_dec = blk(rgb_full_dec, paired_thermal_full)
                 rgb_full_dec = self.decoder_norm(rgb_full_dec)
 
-                if self.use_contrastive_recon_loss: recon_loss_fn = self.calculate_contrastive_recon_loss
-                else: recon_loss_fn = self.calculate_recon_loss
+                recon_loss_fn = self.calculate_recon_loss
                 
                 # 9. Prediction Head
                 reconstructed_thermal_patches = self.prediction_head(thermal_full_dec)
@@ -486,72 +474,24 @@ class CrossModalVPR_Net(nn.Module):
         
         recon_loss = None
         masked_patch_emb = None
-        try:
-            if is_rgb.any():
-                global_emb, patch_rgb, _, _, _ = self.forward_model(x[is_rgb], modality='rgb')
-                if global_emb is not None: final_emb[is_rgb] = global_emb
-                patch_emb[is_rgb] = patch_rgb
-            if (~is_rgb).any():
-                global_emb, patch_thermal, recon_loss, mask, masked_patch_thermal = self.forward_model(x[~is_rgb], modality='thermal', paired_rgb=paired_rgb, return_masked_patch=return_masked_patch)
-                if global_emb is not None: final_emb[~is_rgb] = global_emb
-                patch_emb[~is_rgb] = patch_thermal
-                if return_mask: masks[~is_rgb] = mask
-                if return_masked_patch:
-                    masked_patch_emb = masked_patch_thermal # torch.Size([4, 256, 768])
-        except Exception as e:
-            import traceback
-            print(f"ERROR caught: {e}")
-            traceback.print_exc()  # 전체 stack trace 출력
-            breakpoint()
+        if is_rgb.any():
+            global_emb, patch_rgb, _, _, _ = self.forward_model(x[is_rgb], modality='rgb')
+            if global_emb is not None: final_emb[is_rgb] = global_emb
+            patch_emb[is_rgb] = patch_rgb
+        if (~is_rgb).any():
+            global_emb, patch_thermal, recon_loss, mask, masked_patch_thermal = self.forward_model(x[~is_rgb], modality='thermal', paired_rgb=paired_rgb, return_masked_patch=return_masked_patch)
+            if global_emb is not None: final_emb[~is_rgb] = global_emb
+            patch_emb[~is_rgb] = patch_thermal
+            if return_mask: masks[~is_rgb] = mask
+            if return_masked_patch:
+                masked_patch_emb = masked_patch_thermal # torch.Size([4, 256, 768])
+
         
         if return_masked_patch:
             return final_emb, patch_emb, recon_loss, masks, masked_patch_emb
         else:
             return final_emb, patch_emb, recon_loss, masks
 
-    def calculate_contrastive_recon_loss(self, pred_pos, pred_negs, mask, target, confidence_map=None, method='infoNCE'):
-        """
-        pred_pos: [B, 256, 588] - positive reconstruction
-        pred_negs: [B, N, 256, 588] - N negative reconstructions
-        mask: [B, 256]
-        target: [B, 256, 588]
-        """
-        # Positive loss
-        loss_pos = self.reconstruction_criterion(
-            pred=pred_pos,
-            mask=mask,
-            target=target
-        )  # [B] or scalar
-        
-        # Negative losses
-        B, N = pred_negs.shape[:2]
-        loss_negs = []
-        
-        for n in range(N):
-            loss_neg = self.reconstruction_criterion(
-                pred=pred_negs[:, n],  # [B, 256, 588]
-                mask=mask,
-                target=target,
-            )  # [B] or scalar
-            loss_negs.append(loss_neg)
-        
-        loss_negs = torch.stack(loss_negs, dim=0)  # [N, B] or [N]
-        
-        loss_method = method
-        if loss_method == 'MEAN':
-            # Simple difference
-            loss = loss_pos - loss_negs.mean(dim=0)
-        elif loss_method == 'infoNCE':
-            # InfoNCE (loss → similarity score via negative)
-            # Lower loss = higher similarity
-            sim_pos = torch.exp(-loss_pos)  # [B]
-            sim_negs = torch.exp(-loss_negs)  # [N, B]
-            
-            denominator = sim_pos + sim_negs.sum(dim=0)  # [B]
-            loss = -torch.log(sim_pos / denominator)  # [B]
-        
-        return loss # 이거 mean해야함? 체크하기
-        
     def calculate_recon_loss(self, pred, mask, target, confidence_map=None):
         recon_loss = self.reconstruction_criterion(
             pred=pred,        # [B, 256, 768]

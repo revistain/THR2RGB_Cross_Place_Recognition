@@ -172,19 +172,6 @@ class BaseSTheReODual(data.Dataset):
         self.database_num = len(self.rgb_database_paths)
         self.queries_num = len(self.rgb_queries_paths)
         
-        if args.debug_subset is not None:
-            self.rgb_database_paths = self.rgb_database_paths[:args.debug_subset]
-            self.t_database_paths = self.t_database_paths[:args.debug_subset]
-            self.rgb_queries_paths = self.rgb_queries_paths[:args.debug_subset//10]
-            self.t_queries_paths = self.t_queries_paths[:args.debug_subset//10]
-            
-            self.database_num = len(self.rgb_database_paths)
-            self.queries_num = len(self.rgb_queries_paths)
-            self.rgb_img_paths = list(self.rgb_database_paths) + list(self.rgb_queries_paths)
-            self.t_img_paths = list(self.t_database_paths) + list(self.t_queries_paths)
-            
-            print(f"[DEBUG] DB: {self.database_num}, Query: {self.queries_num}")
-                    
     def get_rgb_img(self, path):
         img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
         img = cv2.cvtColor(img, cv2.COLOR_BAYER_BG2RGB)
