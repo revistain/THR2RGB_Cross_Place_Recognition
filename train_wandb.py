@@ -42,7 +42,7 @@ if __name__ == "__main__":
     args = parser.parse_arguments()
 
     # wandb 초기화
-    wandb.init(project="cross-modal-vpr", name=args.comment, config=vars(args))
+    wandb.init(project="cross-modal-vpr-2", name=args.comment, config=vars(args))
 
     args.save_dir = os.path.join(args.save_dir, args.comment, utils.get_timestamp())
     commons.setup_logging(args.save_dir)
@@ -52,7 +52,6 @@ if __name__ == "__main__":
 
     utils.save_to_yaml(args)
     logging.debug(f"The outputs are being saved in {args.save_dir}")
-
     logging.info(f"Use {torch.cuda.device_count()} GPUs and {multiprocessing.cpu_count()} CPUs")
 
     DATASET_FOLDER = "./Dataset/save_mat"
@@ -208,8 +207,8 @@ if __name__ == "__main__":
                     pos_rgbs = [images[idx] for idx in range(1, images.size(0), size_of_batch)]
                     pos_rgbs = torch.stack(pos_rgbs)
                     aligned_rgbs = pos_rgbs
-                    
-                global_features, patch_embedding, recon_loss, masks, masked_patch_embedding = model(
+
+                global_features, patch_embedding, recon_loss, masks, cls_attn_map, masked_patch_embedding = model(
                     images.to(args.device),
                     flags=flags,
                     paired_rgb=aligned_rgbs.to(args.device),
@@ -223,6 +222,7 @@ if __name__ == "__main__":
                 
                 overall_loss = 0
                 triplet_loss_sum = 0
+                rerank_loss_sum = 0
                 # 각 triplet에 대해 triplet loss 계산
                 for triplets in triplets_local_indexes:
                     queries_indexes, positives_indexes, negatives_indexes = triplets.T
@@ -232,12 +232,22 @@ if __name__ == "__main__":
                     positive_features = global_features[positives_indexes]
                     negative_features = global_features[negatives_indexes]
 
+                    # Triplet Loss
                     triplet_loss = GlobalTriplet(query_features, positive_features, negative_features)
                     triplet_loss_sum += triplet_loss
                     
-                    # triplet_loss
-                    overall_loss += triplet_loss
-                
+                    # Reranking loss
+                    reranker = model.module.reranker
+                    if args.r2loss_div < 0.001:
+                        rerank_loss = reranker(patch_embedding.detach(), cls_attn_map.detach(), queries_indexes, positives_indexes, negatives_indexes)
+                        overall_loss += (triplet_loss + rerank_loss)
+                        rerank_loss_sum += rerank_loss
+                    else:
+                        rerank_loss = reranker(patch_embedding, cls_attn_map, queries_indexes, positives_indexes, negatives_indexes)
+                        overall_loss += (triplet_loss + rerank_loss / args.r2loss_div)
+                        rerank_loss_sum += (rerank_loss / args.r2loss_div)
+                    
+                    
                 # train_batch_size: 4, arg.negs_num_per_query: 10
                 recon_weight = args.recon_weight
                 overall_loss += (recon_loss * recon_weight)
@@ -256,6 +266,7 @@ if __name__ == "__main__":
                 wandb.log({
                     "train/overall_loss": overall_loss,
                     "train/triplet_loss(scaled)": triplet_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query),
+                    "train/reranking_loss(scaled)": rerank_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query),
                     "train/recon_loss(scaled)": (recon_loss * recon_weight).item() / (args.train_batch_size * args.negs_num_per_query) if isinstance(recon_loss, torch.Tensor) else 0,
                 }, step=global_step)
                 

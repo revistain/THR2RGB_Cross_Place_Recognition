@@ -139,6 +139,356 @@ class AggregationHead(nn.Module):
         x = self.gem(x)
         return x + self.mlp(x)
 
+class RerankingModule(nn.Module):
+    def __init__(self, args):
+        super().__init__()
+        self.args = args
+        self.num_classes = 2
+        self.decoder_embed_dim = 32
+        self.r2_decoder_norm = nn.LayerNorm(self.decoder_embed_dim)
+        
+        self.local_head_rgb = nn.Linear(768, 128, bias=True)
+        self.local_head_thermal = nn.Linear(768, 128, bias=True)
+        self.local_head_rgb.weight.data.normal_(mean=0.0, std=0.01)
+        self.local_head_thermal.weight.data.normal_(mean=0.0, std=0.01)
+        self.local_head_rgb.bias.data.zero_()
+        self.local_head_thermal.bias.data.zero_()
+        
+        self.pair_head = nn.Linear(7, self.decoder_embed_dim, bias=True)
+        self.pair_head_2 = nn.Linear(self.decoder_embed_dim, self.decoder_embed_dim, bias=True)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, self.decoder_embed_dim))
+        self.cls_token_2 = nn.Parameter(torch.zeros(1, 1, self.decoder_embed_dim))
+        self.decoder_pred = nn.Linear(self.decoder_embed_dim, self.num_classes, bias=True)  # decoder to patch
+        trunc_normal_(self.cls_token, std=.02)
+        trunc_normal_(self.cls_token_2, std=.02)
+        
+        self.num_corr = 5
+        decoder_num_heads = 4
+        decoder_mlp_ratio = 4.
+        decoder_depth = 6
+        self.blocks = nn.ModuleList([
+            Block(self.decoder_embed_dim, decoder_num_heads, decoder_mlp_ratio, qkv_bias=True, norm_layer=nn.LayerNorm)
+            for i in range(decoder_depth)])
+
+        self.blocks_2 = nn.ModuleList([
+            Block(self.decoder_embed_dim, decoder_num_heads, decoder_mlp_ratio, qkv_bias=True, norm_layer=nn.LayerNorm)
+            for i in range(2)])
+        
+        self.CE = torch.nn.CrossEntropyLoss(ignore_index=-100).cuda()
+    
+    def forward(self, patch_embeddings, cls_attn_map, query_index, pos_index, neg_index):
+        '''
+        patch_embeddings: [48, 256, 768]
+        cls_attn_map: [48, 256]
+        paired_thermal_cls_attn: [4, 256]
+        paired_thermal_full: [4, 256, 768]
+        '''
+        if self.training:
+            # 5. paired RGB도 feature tokens 추출하기
+            paired_thermal_full = patch_embeddings[query_index] # [4, 256, 768]
+            paired_thermal_cls_attn = cls_attn_map[query_index] # [4, 256]
+            
+            target_pos_full = patch_embeddings[pos_index] # [4, 256, 768]
+            target_neg_full = patch_embeddings[neg_index] # [4, 256, 768]
+            target_pos_cls_attn = cls_attn_map[pos_index] # [4, 256]
+            target_neg_cls_attn = cls_attn_map[neg_index] # [4, 256]
+
+            # R2Former Reranking module 학습 구현부
+            # 1. rgb/thermal에서 중요한 feature tokens(100개)만 남기기
+            rerank_loss_pos = None
+            rerank_loss_neg = None
+            for pos_neg in ['pos', 'neg']:
+                if pos_neg == 'pos':
+                    current_target_full = target_pos_full
+                    current_target_cls_attn = target_pos_cls_attn
+                else:
+                    current_target_full = target_neg_full
+                    current_target_cls_attn = target_neg_cls_attn                
+                TOP_PATCH_COUNT = 100
+                thermal_order = torch.argsort(paired_thermal_cls_attn, dim=1, descending=True) # thermal_order: [B, 256]
+                thermal_order = thermal_order[:, :TOP_PATCH_COUNT]
+                rgb_order = torch.argsort(current_target_cls_attn, dim=1, descending=True) # thermal_order: [B, 256]
+                rgb_order = rgb_order[:, :TOP_PATCH_COUNT] # rgb_order: [4, 100]
+                rgb_idx = rgb_order.unsqueeze(2).expand(-1, -1, 768)
+                thermal_idx = thermal_order.unsqueeze(2).expand(-1, -1, 768)
+                selected_rgb_patches = torch.gather(current_target_full, axis=1, index=rgb_idx)
+                selected_thermal_patches = torch.gather(paired_thermal_full, axis=1, index=thermal_idx)
+                
+                # 2. 선택된 patch를 각각 linear을 태워서 768 -> 128 dimension
+                ## local_features 만들기
+                local_rgb_features = self.local_head_rgb(selected_rgb_patches)
+                local_thermal_features = self.local_head_thermal(selected_thermal_patches)
+                
+                # 3. linear에 추가정보 넣어서 128 -> 131 차원 만들어주기 (positional embedding은 넣어야할지 말지 고민중)
+                B_sz, _, W, H = paired_thermal_full.shape, None, 256, 256 # x: [4, 3, 224, 224] 가정
+                patch_size = 16
+                grid_W = int(np.ceil(W / patch_size)) # 14
+                HW = max(H, W) # 정규화를 위한 분모 (224)
+
+                # --- [RGB] x_xy (좌표) 계산 ---
+                # Col (X좌표): index % 14
+                rgb_col = (rgb_order % grid_W) * patch_size + (patch_size // 2)
+                # Row (Y좌표): index // 14
+                rgb_row = (rgb_order // grid_W) * patch_size + (patch_size // 2)
+                
+                # 정규화 후 합치기: [B, 100, 2]
+                x_xy_rgb = torch.stack([rgb_col / float(HW), rgb_row / float(HW)], dim=2) # x_xy_rgb: [B, 100, 2]
+
+                # --- [Thermal] x_xy (좌표) 계산 ---
+                thermal_col = (thermal_order % grid_W) * patch_size + (patch_size // 2)
+                thermal_row = (thermal_order // grid_W) * patch_size + (patch_size // 2)
+                
+                # 정규화 후 합치기: [B, 100, 2]
+                x_xy_thermal = torch.stack([thermal_col / float(HW), thermal_row / float(HW)], dim=2) # x_xy_thermal: [B, 100, 2]
+
+                # --- [RGB] x_attention (중요도) 계산 ---
+                # 선택된 패치의 attention score 가져오기 (Gather)
+                rgb_att_val = torch.gather(current_target_cls_attn, axis=1, index=rgb_order) # [B, 100]
+                rgb_att_norm = rgb_att_val / torch.max(rgb_att_val, dim=1, keepdim=True)[0]
+                rgb_att_norm = rgb_att_norm.unsqueeze(2) # [B, 100, 1]
+
+                # --- [Thermal] x_attention (중요도) 계산 ---
+                thermal_att_val = torch.gather(paired_thermal_cls_attn, axis=1, index=thermal_order)
+                thermal_att_norm = thermal_att_val / torch.max(thermal_att_val, dim=1, keepdim=True)[0]
+                thermal_att_norm = thermal_att_norm.unsqueeze(2) # [B, 100, 1]
+
+                # ---------------------------------------------------------
+                # 4. Final Concatenation (Feature + Coord + Score)
+                # ---------------------------------------------------------
+                # 결과 Shape: [B, 100, 2 + 1 + 128] = [B, 100, 131]
+                # R2Former에 들어갈 최종 입력 (x_rerank, y_rerank)
+                rgb_rerank_input = torch.cat([x_xy_rgb, rgb_att_norm, local_rgb_features], dim=2)
+                thermal_rerank_input = torch.cat([x_xy_thermal, thermal_att_norm, local_thermal_features], dim=2)
+                ####################################################################
+                
+                # 4. correlation matrix 만들기 (100x100x7)
+                '''
+                paired_rgb_attn.shape: [4, 12, 256, 256]
+                local_rgb_features.shape: [4, 100, 128]
+                local_thermal_features.shape: [4, 100, 128]
+                global_score: [4, 128]
+                '''
+                B = rgb_rerank_input.shape[0]
+                N = rgb_rerank_input.shape[1]
+                rgb_rerank_token = F.normalize(rgb_rerank_input[:, :, 3:], p=2, dim=2)
+                thermal_rerank_token = F.normalize(thermal_rerank_input[:, :, 3:], p=2, dim=2)
+                rgb_coordinate = rgb_rerank_input[:, :, :3].detach().clamp(min=0, max=1)
+                thermal_coordinate = thermal_rerank_input[:, :, :3].detach().clamp(min=0, max=1)
+                correlation = torch.matmul(rgb_rerank_token, thermal_rerank_token.permute((0, 2, 1)))
+                xy_matrix = torch.cat(
+                    [rgb_coordinate.unsqueeze(2).repeat(1, 1, thermal_rerank_token.shape[1], 1),
+                    thermal_coordinate.unsqueeze(1).repeat(1, rgb_rerank_token.shape[1], 1, 1), correlation.unsqueeze(3)],
+                    dim=3)
+                
+                ###########
+                order_q = torch.argsort(correlation.unsqueeze(3), dim=2, descending=True).repeat(1, 1, 1, 7)
+                order_k = torch.argsort(correlation.unsqueeze(3), dim=1, descending=True).repeat(1, 1, 1, 7)
+                select_q = torch.gather(input=xy_matrix, index=order_q[:, :, :self.num_corr, :], dim=2)
+                select_k = torch.gather(input=xy_matrix, index=order_k[:, :self.num_corr, :, :], dim=1)
+                select_k_copy = select_k.clone()
+                select_k_copy[:,:,:,:6] = torch.flip(select_k[:,:,:,:6].reshape(select_k.shape[0], select_k.shape[1],select_k.shape[2],2,3),dims=(3,)).reshape(select_k.shape[0], select_k.shape[1],select_k.shape[2],6)
+                select = torch.cat([select_q, select_k.permute((0, 2, 1, 3))], dim=1)
+                select_copy = torch.cat([select_q, select_k.permute((0, 2, 1, 3))], dim=1)
+                N_select = select.shape[1]
+
+                ###########
+                # Linear1
+                pair_matrix = self.pair_head(select.reshape(B * N_select * self.num_corr, 7)).reshape(B * N_select, self.num_corr, self.decoder_embed_dim)
+                pair_matrix += get_2d_sincos_pos_embed_from_grid(self.decoder_embed_dim, select_copy.reshape(B * N_select, self.num_corr, 7)[:,:,3:5])
+                concatedTop5Pairs = torch.cat([self.cls_token_2.repeat(B*N_select, 1, 1), pair_matrix], dim=1)
+                # Transformer1
+                for blk in self.blocks_2:
+                    concatedTop5Pairs = blk(concatedTop5Pairs)
+                concatedTop5Pairs = self.r2_decoder_norm(concatedTop5Pairs)
+
+                # Linear2
+                concatedTop5Pairs = self.pair_head_2(concatedTop5Pairs[:,0,:].reshape(B*N_select, self.decoder_embed_dim)).reshape(B, N_select, self.decoder_embed_dim)
+                concatedTop5Pairs = concatedTop5Pairs.reshape(B, N_select, self.decoder_embed_dim) + get_2d_sincos_pos_embed_from_grid(self.decoder_embed_dim, select_copy[:,:,0,0:2])
+                concatedTop5Pairs = torch.cat([self.cls_token.repeat(B, 1, 1), concatedTop5Pairs], dim=1)
+
+                # Transformer2
+                if torch.isnan(concatedTop5Pairs).any():
+                    print("NaN in concatedTop5Pairs before Transformer2!")
+                    breakpoint()
+                    
+                for blk in self.blocks:
+                    concatedTop5Pairs = blk(concatedTop5Pairs)
+                concatedTop5Pairs = self.r2_decoder_norm(concatedTop5Pairs)
+                
+                if self.num_classes == 1:
+                    local_score = self.decoder_pred(concatedTop5Pairs[:, 0]).reshape(-1)
+                    local_score = torch.sigmoid(local_score)
+                elif self.num_classes == 2:
+                    local_score = self.decoder_pred(concatedTop5Pairs[:, 0])
+                    if torch.isnan(local_score).any():
+                        print("NaN immediately after decoder_pred!")
+                        print(f"concatedTop5Pairs[:, 0]: {concatedTop5Pairs[:, 0]}")
+                        breakpoint()
+                
+                if pos_neg == 'pos': rerank_loss_pos = local_score
+                elif pos_neg == 'neg': rerank_loss_neg = local_score
+            
+            # CE 기반
+            target = torch.zeros(local_score.shape[0] * 2, dtype=torch.long).cuda()
+            target[:rerank_loss_pos.shape[0]] = 1
+            rerank_loss = self.CE(torch.cat([rerank_loss_pos, rerank_loss_neg], dim=0), target)
+            
+            # NaN 체크
+            if torch.isnan(rerank_loss):
+                print("=" * 80)
+                print("NaN DETECTED IN TRAINING LOSS!")
+                print(f"rerank_loss_pos: {rerank_loss_pos}")
+                print(f"rerank_loss_neg: {rerank_loss_neg}")
+                print(f"rerank_loss_pos has nan: {torch.isnan(rerank_loss_pos).any()}")
+                print(f"rerank_loss_neg has nan: {torch.isnan(rerank_loss_neg).any()}")
+                print(f"target: {target}")
+                print("=" * 80)
+                
+            return rerank_loss
+        else:
+            # 5. paired RGB도 feature tokens 추출하기
+            paired_thermal_full = patch_embeddings[query_index] # [4, 256, 768]
+            paired_thermal_cls_attn = cls_attn_map[query_index] # [4, 256]
+            
+            target_pos_full = patch_embeddings[pos_index] # [4, 256, 768]
+            target_pos_cls_attn = cls_attn_map[pos_index] # [4, 256]
+
+            # R2Former Reranking module 학습 구현부
+            # 1. rgb/thermal에서 중요한 feature tokens(100개)만 남기기
+            TOP_PATCH_COUNT = 100
+            current_target_full = target_pos_full
+            current_target_cls_attn = target_pos_cls_attn
+            thermal_order = torch.argsort(paired_thermal_cls_attn, dim=1, descending=True) # thermal_order: [B, 256]
+            thermal_order = thermal_order[:, :TOP_PATCH_COUNT]
+            rgb_order = torch.argsort(current_target_cls_attn, dim=1, descending=True) # thermal_order: [B, 256]
+            rgb_order = rgb_order[:, :TOP_PATCH_COUNT] # rgb_order: [4, 100]
+            rgb_idx = rgb_order.unsqueeze(2).expand(-1, -1, 768)
+            thermal_idx = thermal_order.unsqueeze(2).expand(-1, -1, 768)
+            selected_rgb_patches = torch.gather(current_target_full, axis=1, index=rgb_idx)
+            selected_thermal_patches = torch.gather(paired_thermal_full, axis=1, index=thermal_idx)
+            
+            # 2. 선택된 patch를 각각 linear을 태워서 768 -> 128 dimension
+            ## local_features 만들기
+            local_rgb_features = self.local_head_rgb(selected_rgb_patches)
+            local_thermal_features = self.local_head_thermal(selected_thermal_patches)
+            
+            # 3. linear에 추가정보 넣어서 128 -> 131 차원 만들어주기 (positional embedding은 넣어야할지 말지 고민중)
+            B_sz, _, W, H = paired_thermal_full.shape, None, 256, 256 # x: [4, 3, 224, 224] 가정
+            patch_size = 16
+            grid_W = int(np.ceil(W / patch_size)) # 14
+            HW = max(H, W) # 정규화를 위한 분모 (224)
+
+            # --- [RGB] x_xy (좌표) 계산 ---
+            # Col (X좌표): index % 14
+            # Row (Y좌표): index // 14
+            rgb_col = (rgb_order % grid_W) * patch_size + (patch_size // 2)
+            rgb_row = (rgb_order // grid_W) * patch_size + (patch_size // 2)
+            
+            # 정규화 후 합치기: [B, 100, 2]
+            x_xy_rgb = torch.stack([rgb_col / float(HW), rgb_row / float(HW)], dim=2) # x_xy_rgb: [B, 100, 2]
+
+            # --- [Thermal] x_xy (좌표) 계산 ---
+            thermal_col = (thermal_order % grid_W) * patch_size + (patch_size // 2)
+            thermal_row = (thermal_order // grid_W) * patch_size + (patch_size // 2)
+            
+            # 정규화 후 합치기: [B, 100, 2]
+            x_xy_thermal = torch.stack([thermal_col / float(HW), thermal_row / float(HW)], dim=2) # x_xy_thermal: [B, 100, 2]
+
+            # --- [RGB] x_attention (중요도) 계산 ---
+            # 선택된 패치의 attention score 가져오기 (Gather)
+            rgb_att_val = torch.gather(current_target_cls_attn, axis=1, index=rgb_order) # [B, 100]
+            rgb_att_norm = rgb_att_val / torch.max(rgb_att_val, dim=1, keepdim=True)[0]
+            rgb_att_norm = rgb_att_norm.unsqueeze(2) # [B, 100, 1]
+
+            # --- [Thermal] x_attention (중요도) 계산 ---
+            thermal_att_val = torch.gather(paired_thermal_cls_attn, axis=1, index=thermal_order)
+            thermal_att_norm = thermal_att_val / torch.max(thermal_att_val, dim=1, keepdim=True)[0]
+            thermal_att_norm = thermal_att_norm.unsqueeze(2) # [B, 100, 1]
+
+            # ---------------------------------------------------------
+            # 4. Final Concatenation (Feature + Coord + Score)
+            # ---------------------------------------------------------
+            # 결과 Shape: [B, 100, 2 + 1 + 128] = [B, 100, 131]
+            # R2Former에 들어갈 최종 입력 (x_rerank, y_rerank)
+            rgb_rerank_input = torch.cat([x_xy_rgb, rgb_att_norm, local_rgb_features], dim=2)
+            thermal_rerank_input = torch.cat([x_xy_thermal, thermal_att_norm, local_thermal_features], dim=2)
+            ####################################################################
+            
+            # 4. correlation matrix 만들기 (100x100x7)
+            '''
+            paired_rgb_attn.shape: [4, 12, 256, 256]
+            local_rgb_features.shape: [4, 100, 128]
+            local_thermal_features.shape: [4, 100, 128]
+            global_score: [4, 128]
+            '''
+            B = rgb_rerank_input.shape[0]
+            N = rgb_rerank_input.shape[1]
+            rgb_rerank_token = F.normalize(rgb_rerank_input[:, :, 3:], p=2, dim=2)
+            thermal_rerank_token = F.normalize(thermal_rerank_input[:, :, 3:], p=2, dim=2)
+            rgb_coordinate = rgb_rerank_input[:, :, :3].detach().clamp(min=0, max=1)
+            thermal_coordinate = thermal_rerank_input[:, :, :3].detach().clamp(min=0, max=1)
+            correlation = torch.matmul(rgb_rerank_token, thermal_rerank_token.permute((0, 2, 1)))
+            xy_matrix = torch.cat(
+                [rgb_coordinate.unsqueeze(2).repeat(1, 1, thermal_rerank_token.shape[1], 1),
+                thermal_coordinate.unsqueeze(1).repeat(1, rgb_rerank_token.shape[1], 1, 1), correlation.unsqueeze(3)],
+                dim=3)
+            
+            ###########
+            order_q = torch.argsort(correlation.unsqueeze(3), dim=2, descending=True).repeat(1, 1, 1, 7)
+            order_k = torch.argsort(correlation.unsqueeze(3), dim=1, descending=True).repeat(1, 1, 1, 7)
+            select_q = torch.gather(input=xy_matrix, index=order_q[:, :, :self.num_corr, :], dim=2)
+            select_k = torch.gather(input=xy_matrix, index=order_k[:, :self.num_corr, :, :], dim=1)
+            select_k_copy = select_k.clone()
+            select_k_copy[:,:,:,:6] = torch.flip(select_k[:,:,:,:6].reshape(select_k.shape[0], select_k.shape[1],select_k.shape[2],2,3),dims=(3,)).reshape(select_k.shape[0], select_k.shape[1],select_k.shape[2],6)
+            select = torch.cat([select_q, select_k.permute((0, 2, 1, 3))], dim=1)
+            select_copy = torch.cat([select_q, select_k.permute((0, 2, 1, 3))], dim=1)
+            N_select = select.shape[1]
+
+            ###########
+            # Linear1
+            pair_matrix = self.pair_head(select.reshape(B * N_select * self.num_corr, 7)).reshape(B * N_select, self.num_corr, self.decoder_embed_dim)
+            pair_matrix += get_2d_sincos_pos_embed_from_grid(self.decoder_embed_dim, select_copy.reshape(B * N_select, self.num_corr, 7)[:,:,3:5])
+            concatedTop5Pairs = torch.cat([self.cls_token_2.repeat(B*N_select, 1, 1), pair_matrix], dim=1)
+            # Transformer1
+            for blk in self.blocks_2:
+                concatedTop5Pairs = blk(concatedTop5Pairs)
+            concatedTop5Pairs = self.r2_decoder_norm(concatedTop5Pairs)
+
+            # Linear2
+            concatedTop5Pairs = self.pair_head_2(concatedTop5Pairs[:,0,:].reshape(B*N_select, self.decoder_embed_dim)).reshape(B, N_select, self.decoder_embed_dim)
+            concatedTop5Pairs = concatedTop5Pairs.reshape(B, N_select, self.decoder_embed_dim) + get_2d_sincos_pos_embed_from_grid(self.decoder_embed_dim, select_copy[:,:,0,0:2])
+            concatedTop5Pairs = torch.cat([self.cls_token.repeat(B, 1, 1), concatedTop5Pairs], dim=1)
+
+            # Transformer2
+            for blk in self.blocks:
+                concatedTop5Pairs = blk(concatedTop5Pairs)
+            concatedTop5Pairs = self.r2_decoder_norm(concatedTop5Pairs)
+            
+            if self.num_classes == 1:
+                local_score = self.decoder_pred(concatedTop5Pairs[:, 0]).reshape(-1)
+                local_score = torch.sigmoid(local_score)
+            elif self.num_classes == 2:
+                local_score = self.decoder_pred(concatedTop5Pairs[:, 0])
+            
+            prob = F.softmax(local_score, dim=1)[:, 1]
+            
+            # NaN 체크
+            if torch.isnan(prob).any():
+                print("=" * 80)
+                print("NaN DETECTED IN INFERENCE PROB!")
+                print(f"local_score: {local_score}")
+                print(f"local_score has nan: {torch.isnan(local_score).any()}")
+                print(f"local_score min/max: {local_score.min()}/{local_score.max()}")
+                print(f"prob: {prob}")
+                print(f"concatedTop5Pairs has nan: {torch.isnan(concatedTop5Pairs).any()}")
+                print(f"rgb_att_val min/max: {rgb_att_val.min()}/{rgb_att_val.max()}")
+                print(f"thermal_att_val min/max: {thermal_att_val.min()}/{thermal_att_val.max()}")
+                print("=" * 80)
+                # 더 깊은 디버깅을 위해 breakpoint
+                breakpoint()
+                
+            return prob
+
 class CrossModalVPR_Net(nn.Module):
     def __init__(self, args, pretrained_foundation=False, foundation_model_path=None):
         # NOTE: 그냥 args를 넘기는게 편하다는건 알지만, 이미 늦어버렸습니다...
@@ -165,40 +515,13 @@ class CrossModalVPR_Net(nn.Module):
             for _ in range(dec_depth)
         ])
         
-        self.decoder_embed_dim = 384
         self.decoder_norm = nn.LayerNorm(self.output_dim)
-        self.r2_decoder_norm = nn.LayerNorm(self.decoder_embed_dim)
-        
         self.mask_token = None
         self._set_mask_token(self.output_dim)
         self._set_decode_positional_embedding(self.output_dim)
         self._set_mask_generator(16*16, args.croco_mask_ratio)
         self._set_prediction_head(self.output_dim, 14)
-        self.local_head_rgb = nn.Linear(768, 128, bias=True)
-        self.local_head_thermal = nn.Linear(768, 128, bias=True)
-        self.local_head_rgb.weight.data.normal_(mean=0.0, std=0.01)
-        self.local_head_thermal.weight.data.normal_(mean=0.0, std=0.01)
-        self.local_head_rgb.bias.data.zero_()
-        self.local_head_thermal.bias.data.zero_()
-        
-        self.pair_head = nn.Linear(7, self.decoder_embed_dim, bias=True)
-        self.pair_head_2 = nn.Linear(self.decoder_embed_dim, self.decoder_embed_dim, bias=True)
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, self.decoder_embed_dim))
-        self.cls_token_2 = nn.Parameter(torch.zeros(1, 1, self.decoder_embed_dim))
-        trunc_normal_(self.cls_token, std=.02)
-        trunc_normal_(self.cls_token_2, std=.02)
-        
-        decoder_num_heads = 6
-        decoder_mlp_ratio = 4.
-        decoder_norm_layer = nn.LayerNorm
-        decoder_depth = 4
-        self.blocks = nn.ModuleList([
-            Block(self.decoder_embed_dim, decoder_num_heads, decoder_mlp_ratio, qkv_bias=True, norm_layer=nn.LayerNorm)
-            for i in range(decoder_depth)])
-
-        self.blocks_2 = nn.ModuleList([
-            Block(self.decoder_embed_dim, decoder_num_heads, decoder_mlp_ratio, qkv_bias=True, norm_layer=nn.LayerNorm)
-            for i in range(2)])
+        self.reranker = RerankingModule(args)
         
         self.reconstruction_criterion = MaskedMSE(
             norm_pix_loss=False,
@@ -243,14 +566,17 @@ class CrossModalVPR_Net(nn.Module):
         imgs: (B, 3, H, W)
         x: (B, L, patch_size**2 *3)
         """
-        p = 14
-        assert imgs.shape[2] == imgs.shape[3] and imgs.shape[2] % p == 0
+        try:
+            p = 14
+            assert imgs.shape[2] == imgs.shape[3] and imgs.shape[2] % p == 0
 
-        h = w = imgs.shape[2] // p
-        x = imgs.reshape(shape=(imgs.shape[0], 3, h, p, w, p))
-        x = torch.einsum('nchpwq->nhwpqc', x)
-        x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 3))
-        
+            h = w = imgs.shape[2] // p
+            x = imgs.reshape(shape=(imgs.shape[0], 3, h, p, w, p))
+            x = torch.einsum('nchpwq->nhwpqc', x)
+            x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 3))
+        except Exception as e:
+            print(e)
+            breakpoint()
         return x
 
     def unpatchify(self, x, channels=3):
@@ -311,10 +637,11 @@ class CrossModalVPR_Net(nn.Module):
         """단일 모달리티에 대한 Forward"""
         # self.use_masked_inference: rerank를 위해, decoder에 들어가기 바로 전 단계를 뱉는다
         
-        global_desc = None
         recon_loss = None
+        global_desc = None
         mask_thermal = None
         masked_patch_thermal = None
+        cls_attn_map = None
         if modality == 'rgb':
             if self.use_masked_inference:
                 # rgb_full = self.rgb_backbone(x)
@@ -327,7 +654,9 @@ class CrossModalVPR_Net(nn.Module):
                 rgb_full_dec = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
                 out = {"x_norm_patchtokens": rgb_full_dec}
             else:
-                out = self.rgb_backbone(x)
+                out = self.rgb_backbone(x, return_attention=True)
+                cls_attn_map = out["cls_attention"][:, :, 1:].sum(dim=1)
+                
             agg_layer = self.rgb_aggregation
         elif modality == 'thermal':
             if self.training:
@@ -339,16 +668,168 @@ class CrossModalVPR_Net(nn.Module):
                 # 5. paired RGB도 feature tokens 추출하기
                 paired_thermal = self.thermal_backbone(x, return_attention=True)
                 paired_thermal_full = paired_thermal["x_norm_patchtokens"]
-                paired_thermal_attn = paired_thermal["attention"][:,:,1:,1:] # [B, MHA, 256, 256] # TODO: 이렇게 제거하는게 맞는지도 한번 체크해보기
-                paired_thermal_cls_attn = paired_thermal["cls_attention"][:, :, 1:] # [B, MHA, 256]
-                paired_thermal_cls_attn_single_head = paired_thermal_cls_attn.sum(dim=1) # [B, 256]
+                paired_thermal_cls_attn_single_head = paired_thermal["cls_attention"][:, :, 1:].sum(dim=1) # [B, MHA, 256]
+                cls_attn_map = paired_thermal_cls_attn_single_head
                 
-                paired_rgb = self.rgb_backbone(paired_rgb, return_attention=True)
-                paired_rgb_full = paired_rgb["x_norm_patchtokens"]
-                paired_rgb_attn = paired_rgb["attention"][:,:,1:,1:] # CLS Token 제거
-                paired_rgb_cls_attn = paired_rgb["cls_attention"][:, :, 1:]
+                paired_rgb_emb = self.rgb_backbone(paired_rgb, return_attention=True)
+                paired_rgb_full = paired_rgb_emb["x_norm_patchtokens"]
+                paired_rgb_attn = paired_rgb_emb["attention"][:,:,1:,1:] # CLS Token 제거
+                paired_rgb_cls_attn = paired_rgb_emb["cls_attention"][:, :, 1:]
                 paired_rgb_cls_attn_single_head = paired_rgb_cls_attn.sum(dim=1)
                 
+            
+                # 6. Mask token expansion
+                thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
+                rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb)
+                
+                # out을 미리 저장
+                out = paired_thermal
+                if return_masked_patch: masked_patch_thermal = thermal_full # 이후로 안건들여서 clone안해도 됨
+                
+                # 7. Decoder Positional Encoding
+                thermal_full_dec = thermal_full + self.decoder_pos_embed  # [B, 256, 768]
+                rgb_full_dec = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
+                paired_thermal_full = paired_thermal_full + self.decoder_pos_embed  # [B, 256, 768]
+                paired_rgb_full = paired_rgb_full + self.decoder_pos_embed  # [B, 256, 768]
+                
+                # 8. decoder 통과시키기
+                for blk in self.decoder_thermal_blocks:
+                    thermal_full_dec = blk(thermal_full_dec, paired_rgb_full)
+                thermal_full_dec = self.decoder_norm(thermal_full_dec)
+
+                for blk in self.decoder_rgb_blocks:
+                    rgb_full_dec = blk(rgb_full_dec, paired_thermal_full)
+                rgb_full_dec = self.decoder_norm(rgb_full_dec)
+
+                recon_loss_fn = self.calculate_recon_loss
+                
+                # 9. Prediction Head
+                reconstructed_thermal_patches = self.prediction_head(thermal_full_dec)
+                reconstructed_rgb_patches = self.prediction_head(rgb_full_dec)
+                target_thermal_patches = self.patchify(x)
+                target_rgb_patches = self.patchify(paired_rgb)
+                
+                # 10. Reconstruction loss 계산
+                recon_loss_thermal = recon_loss_fn(reconstructed_thermal_patches, mask_thermal, target_thermal_patches)
+                recon_loss_rgb = recon_loss_fn(reconstructed_rgb_patches, mask_rgb, target_rgb_patches)
+                recon_loss = (recon_loss_thermal + recon_loss_rgb) / 2
+            else:
+                # when inference
+                # NOTE: 부르는 곳에 no_grad 호출하기
+                if self.use_masked_inference:
+                    # 1-4. masked thermal encoder
+                    thermal_visible, mask_thermal, patch_B, patch_N, patch_D = self.croco_like_encoder(x, modality='thermal')
+                    
+                    # 5. Mask token expansion
+                    thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
+                    
+                    # 6. Decoder Positional Encoding
+                    thermal_full_dec = thermal_full + self.decoder_pos_embed  # [B, 256, 768]
+                    out = {"x_norm_patchtokens": thermal_full_dec}
+                else:
+                    out = self.thermal_backbone(x,return_attention=True)
+                    cls_attn_map = out["cls_attention"][:, :, 1:].sum(dim=1)
+            agg_layer = self.thermal_aggregation
+        else:
+            raise ValueError("Modality must be 'rgb' or 'thermal'")
+            
+        # Backbone 출력 처리 (ViT 기준)
+        # x['x_norm_patchtokens']: (B, num_patchs, D)
+        patch_tokens = out["x_norm_patchtokens"]
+        
+        if not self.use_masked_inference:
+            # attnetion_dict_keys(['x_norm_clstoken', 'x_norm_patchtokens', 'x_prenorm', 'masks'])
+            B, N, D = patch_tokens.shape
+            
+            # 224,224 정방 이미지 입력 가정(patch 2D 복원)
+            H_feat = W_feat = int(math.sqrt(N)) 
+            x_feat = patch_tokens.permute(0, 2, 1).view(B, D, H_feat, W_feat)
+            
+            # Aggregation -> Descriptor
+            global_desc = agg_layer(x_feat) # [B, D]
+        
+        return global_desc, patch_tokens, recon_loss, mask_thermal, masked_patch_thermal, cls_attn_map
+
+    def forward(self, x, flags, paired_rgb=None, return_mask=False, return_masked_patch=False):
+        is_rgb = torch.tensor([f == 'rgb' for f in flags], device=x.device)
+        final_emb = torch.zeros((x.size(0), self.output_dim), device=x.device)
+        patch_emb = torch.zeros((x.size(0), 256, self.output_dim), device=x.device)
+        masks = torch.zeros((x.size(0), 256), dtype=torch.bool, device=x.device)
+        cls_attn_map = torch.zeros((x.size(0), 256), device=x.device)
+        
+        recon_loss = None
+        masked_patch_emb = None
+        if is_rgb.any():
+            global_emb, patch_rgb, _, _, _, cls_rgb_attn_map = self.forward_model(x[is_rgb], modality='rgb')
+            if global_emb is not None: final_emb[is_rgb] = global_emb
+            patch_emb[is_rgb] = patch_rgb
+            if cls_rgb_attn_map is not None:
+                cls_attn_map[is_rgb] = cls_rgb_attn_map
+        if (~is_rgb).any():
+            global_emb, patch_thermal, recon_loss, mask, masked_patch_thermal, cls_thermal_attn_map = self.forward_model(x[~is_rgb], modality='thermal', paired_rgb=paired_rgb, return_masked_patch=return_masked_patch)
+            if global_emb is not None: final_emb[~is_rgb] = global_emb
+            patch_emb[~is_rgb] = patch_thermal
+            if return_mask: masks[~is_rgb] = mask
+            if return_masked_patch:
+                masked_patch_emb = masked_patch_thermal # torch.Size([4, 256, 768])
+            if cls_attn_map is not None:
+                cls_attn_map[~is_rgb] = cls_thermal_attn_map
+
+        if return_masked_patch: # 무조건 masked_patch_emb가 제일 뒤에 오게
+            return final_emb, patch_emb, recon_loss, masks, cls_attn_map, masked_patch_emb
+        else:
+            return final_emb, patch_emb, recon_loss, masks, cls_attn_map
+
+    def calculate_recon_loss(self, pred, mask, target, confidence_map=None):
+        recon_loss = self.reconstruction_criterion(
+            pred=pred,        # [B, 256, 768]
+            mask=mask,        # [B, 256]
+            target=target,    # [B, 3, 256, 768]
+        )
+        return recon_loss
+
+def get_backbone(pretrained_foundation, foundation_model_path):
+    backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0)
+    if pretrained_foundation:
+        assert foundation_model_path is not None, "Please specify foundation model path."
+        model_dict = backbone.state_dict()
+        state_dict = torch.load(foundation_model_path)
+        model_dict.update(state_dict.items())
+        backbone.load_state_dict(model_dict)
+    return backbone
+
+def get_2d_sincos_pos_embed_from_grid(embed_dim, grid):
+    assert embed_dim % 2 == 0
+
+    # use half of dimensions to encode grid_h
+    emb_h = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[:,:, 0])  # (H*W, D/2)
+    emb_w = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[:,:, 1])  # (H*W, D/2)
+
+    emb = torch.cat([emb_h, emb_w], dim=2) # (H*W, D)
+    return emb
+
+
+def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
+    """
+    embed_dim: output dimension for each position
+    pos: a list of positions to be encoded: size (M,)
+    out: (M, D)
+    """
+    assert embed_dim % 2 == 0
+    omega = torch.arange(embed_dim // 2, dtype=torch.float32).cuda()
+    omega /= embed_dim / 2.
+    omega = 1. / 10000**omega  # (D/2,)
+
+    # pos = pos.reshape(-1)  # (M,)
+    out = torch.einsum('bm,d->bmd', pos, omega)  # (M, D/2), outer product
+
+    emb_sin = torch.sin(out) # (M, D/2)
+    emb_cos = torch.cos(out) # (M, D/2)
+
+    emb = torch.cat([emb_sin, emb_cos], dim=2)  # (M, D)
+    return emb
+
+'''
                 if True:
                     # R2Former Reranking module 학습 구현부
                     # 1. rgb/thermal에서 중요한 feature tokens(100개)만 남기기
@@ -410,12 +891,10 @@ class CrossModalVPR_Net(nn.Module):
                     ####################################################################
                     
                     # 4. correlation matrix 만들기 (100x100x7)
-                    '''
-                    paired_rgb_attn.shape: [4, 12, 256, 256]
-                    local_rgb_features.shape: [4, 100, 128]
-                    local_thermal_features.shape: [4, 100, 128]
-                    global_score: [4, 128]
-                    '''
+                    # paired_rgb_attn.shape: [4, 12, 256, 256]
+                    # local_rgb_features.shape: [4, 100, 128]
+                    # local_thermal_features.shape: [4, 100, 128]
+                    # global_score: [4, 128]
                     B = rgb_rerank_input.shape[0]
                     N = rgb_rerank_input.shape[1]
                     self.num_corr = 5
@@ -444,170 +923,31 @@ class CrossModalVPR_Net(nn.Module):
                     # Linear1
                     pair_matrix = self.pair_head(select.reshape(B * N_select * self.num_corr, 7)).reshape(B * N_select, self.num_corr, self.decoder_embed_dim)
                     pair_matrix += get_2d_sincos_pos_embed_from_grid(self.decoder_embed_dim, select_copy.reshape(B * N_select, self.num_corr, 7)[:,:,3:5])
-                    x = torch.cat([self.cls_token_2.repeat(B*N_select, 1, 1), pair_matrix], dim=1)
+                    concatedTop5Pairs = torch.cat([self.cls_token_2.repeat(B*N_select, 1, 1), pair_matrix], dim=1)
                     # Transformer1
                     for blk in self.blocks_2:
-                        x = blk(x)
-                    x = self.r2_decoder_norm(x)
+                        concatedTop5Pairs = blk(concatedTop5Pairs)
+                    concatedTop5Pairs = self.r2_decoder_norm(concatedTop5Pairs)
 
                     # Linear2
-                    x = self.pair_head_2(x[:,0,:].reshape(B*N_select, self.decoder_embed_dim)).reshape(B, N_select, self.decoder_embed_dim)
-                    x = x.reshape(B, N_select, self.decoder_embed_dim) + get_2d_sincos_pos_embed_from_grid(self.decoder_embed_dim, select_copy[:,:,0,0:2])
-                    x = torch.cat([self.cls_token.repeat(B, 1, 1), x], dim=1)
+                    concatedTop5Pairs = self.pair_head_2(concatedTop5Pairs[:,0,:].reshape(B*N_select, self.decoder_embed_dim)).reshape(B, N_select, self.decoder_embed_dim)
+                    concatedTop5Pairs = concatedTop5Pairs.reshape(B, N_select, self.decoder_embed_dim) + get_2d_sincos_pos_embed_from_grid(self.decoder_embed_dim, select_copy[:,:,0,0:2])
+                    concatedTop5Pairs = torch.cat([self.cls_token.repeat(B, 1, 1), concatedTop5Pairs], dim=1)
 
                     # Transformer2
                     for blk in self.blocks:
-                        x = blk(x)
-                    x = self.r2_decoder_norm(x)
+                        concatedTop5Pairs = blk(concatedTop5Pairs)
+                    concatedTop5Pairs = self.r2_decoder_norm(concatedTop5Pairs)
+                    
+                    local_score = self.decoder_pred(concatedTop5Pairs[:, 0]).reshape(-1) # CLS token만 넘겨서 평가하기
+                    local_score = torch.sigmoid(local_score)
+                    print(local_score.tolist())
+                    # print(f"concatedTop5Pairs: {concatedTop5Pairs.shape}") # concatedTop5Pairs: torch.Size([4, 201, 384])
 
                     # 4-1. cosine similarity 구하기
                     # 4-2. attention value 구하기
                     # 4-3. positional embedding값 구하기
                     # 4-4. 자기와 대응되는 좌표값 넣어주기
                     # 5. top5를 골라 두개로 나눠주기
-                
-                # 6. Mask token expansion
-                thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
-                rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb)
-                
-                # out을 미리 저장
-                out = {"x_norm_patchtokens": paired_thermal_full.clone()}
-                if return_masked_patch: masked_patch_thermal = thermal_full # 이후로 안건들여서 clone안해도 됨
-                
-                # 7. Decoder Positional Encoding
-                thermal_full_dec = thermal_full + self.decoder_pos_embed  # [B, 256, 768]
-                rgb_full_dec = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
-                paired_thermal_full = paired_thermal_full + self.decoder_pos_embed  # [B, 256, 768]
-                paired_rgb_full = paired_rgb_full + self.decoder_pos_embed  # [B, 256, 768]
-                
-                # 8. decoder 통과시키기
-                for blk in self.decoder_thermal_blocks:
-                    thermal_full_dec = blk(thermal_full_dec, paired_rgb_full)
-                thermal_full_dec = self.decoder_norm(thermal_full_dec)
-
-                for blk in self.decoder_rgb_blocks:
-                    rgb_full_dec = blk(rgb_full_dec, paired_thermal_full)
-                rgb_full_dec = self.decoder_norm(rgb_full_dec)
-
-                recon_loss_fn = self.calculate_recon_loss
-                
-                # 9. Prediction Head
-                reconstructed_thermal_patches = self.prediction_head(thermal_full_dec)
-                reconstructed_rgb_patches = self.prediction_head(rgb_full_dec)
-                target_thermal_patches = self.patchify(x)
-                target_rgb_patches = self.patchify(paired_rgb)
-                
-                # 10. Reconstruction loss 계산
-                recon_loss_thermal = recon_loss_fn(reconstructed_thermal_patches, mask_thermal, target_thermal_patches)
-                recon_loss_rgb = recon_loss_fn(reconstructed_rgb_patches, mask_rgb, target_rgb_patches)
-                recon_loss = (recon_loss_thermal + recon_loss_rgb) / 2
-            else:
-                # when inference
-                # NOTE: 부르는 곳에 no_grad 호출하기
-                if self.use_masked_inference:
-                    # 1-4. masked thermal encoder
-                    thermal_visible, mask_thermal, patch_B, patch_N, patch_D = self.croco_like_encoder(x, modality='thermal')
-                    
-                    # 5. Mask token expansion
-                    thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
-                    
-                    # 6. Decoder Positional Encoding
-                    thermal_full_dec = thermal_full + self.decoder_pos_embed  # [B, 256, 768]
-                    out = {"x_norm_patchtokens": thermal_full_dec}
-                else:
-                    out = self.thermal_backbone(x)
-            agg_layer = self.thermal_aggregation
-        else:
-            raise ValueError("Modality must be 'rgb' or 'thermal'")
-            
-        # Backbone 출력 처리 (ViT 기준)
-        # x['x_norm_patchtokens']: (B, num_patchs, D)
-        patch_tokens = out["x_norm_patchtokens"]
-        
-        if not self.use_masked_inference:
-            # attnetion_dict_keys(['x_norm_clstoken', 'x_norm_patchtokens', 'x_prenorm', 'masks'])
-            B, N, D = patch_tokens.shape
-            
-            # 224,224 정방 이미지 입력 가정(patch 2D 복원)
-            H_feat = W_feat = int(math.sqrt(N)) 
-            x_feat = patch_tokens.permute(0, 2, 1).view(B, D, H_feat, W_feat)
-            
-            # Aggregation -> Descriptor
-            global_desc = agg_layer(x_feat) # [B, D]
-        
-        return global_desc, patch_tokens, recon_loss, mask_thermal, masked_patch_thermal
-
-    def forward(self, x, flags, paired_rgb=None, return_mask=False, return_masked_patch=False):
-        is_rgb = torch.tensor([f == 'rgb' for f in flags], device=x.device)
-        final_emb = torch.zeros((x.size(0), self.output_dim), device=x.device)
-        patch_emb = torch.zeros((x.size(0), 256, self.output_dim), device=x.device)
-        masks = torch.zeros((x.size(0), 256), dtype=torch.bool, device=x.device)
-        
-        recon_loss = None
-        masked_patch_emb = None
-        if is_rgb.any():
-            global_emb, patch_rgb, _, _, _ = self.forward_model(x[is_rgb], modality='rgb')
-            if global_emb is not None: final_emb[is_rgb] = global_emb
-            patch_emb[is_rgb] = patch_rgb
-        if (~is_rgb).any():
-            global_emb, patch_thermal, recon_loss, mask, masked_patch_thermal = self.forward_model(x[~is_rgb], modality='thermal', paired_rgb=paired_rgb, return_masked_patch=return_masked_patch)
-            if global_emb is not None: final_emb[~is_rgb] = global_emb
-            patch_emb[~is_rgb] = patch_thermal
-            if return_mask: masks[~is_rgb] = mask
-            if return_masked_patch:
-                masked_patch_emb = masked_patch_thermal # torch.Size([4, 256, 768])
-
-        
-        if return_masked_patch:
-            return final_emb, patch_emb, recon_loss, masks, masked_patch_emb
-        else:
-            return final_emb, patch_emb, recon_loss, masks
-
-    def calculate_recon_loss(self, pred, mask, target, confidence_map=None):
-        recon_loss = self.reconstruction_criterion(
-            pred=pred,        # [B, 256, 768]
-            mask=mask,        # [B, 256]
-            target=target,    # [B, 3, 256, 768]
-        )
-        return recon_loss
-
-def get_backbone(pretrained_foundation, foundation_model_path):
-    backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0)
-    if pretrained_foundation:
-        assert foundation_model_path is not None, "Please specify foundation model path."
-        model_dict = backbone.state_dict()
-        state_dict = torch.load(foundation_model_path)
-        model_dict.update(state_dict.items())
-        backbone.load_state_dict(model_dict)
-    return backbone
-
-def get_2d_sincos_pos_embed_from_grid(embed_dim, grid):
-    assert embed_dim % 2 == 0
-
-    # use half of dimensions to encode grid_h
-    emb_h = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[:,:, 0])  # (H*W, D/2)
-    emb_w = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[:,:, 1])  # (H*W, D/2)
-
-    emb = torch.cat([emb_h, emb_w], dim=2) # (H*W, D)
-    return emb
-
-
-def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
-    """
-    embed_dim: output dimension for each position
-    pos: a list of positions to be encoded: size (M,)
-    out: (M, D)
-    """
-    assert embed_dim % 2 == 0
-    omega = torch.arange(embed_dim // 2, dtype=torch.float32).cuda()
-    omega /= embed_dim / 2.
-    omega = 1. / 10000**omega  # (D/2,)
-
-    # pos = pos.reshape(-1)  # (M,)
-    out = torch.einsum('bm,d->bmd', pos, omega)  # (M, D/2), outer product
-
-    emb_sin = torch.sin(out) # (M, D/2)
-    emb_cos = torch.cos(out) # (M, D/2)
-
-    emb = torch.cat([emb_sin, emb_cos], dim=2)  # (M, D)
-    return emb
+    
+'''
