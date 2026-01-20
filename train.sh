@@ -16,9 +16,9 @@ python3 train_wandb.py \
     --croco_mask_ratio 0.8 \
     --num_decoder_depth 12 \
     --recon_weight 10 \
-    --recon_loss_type 'mse+ssim' \
-    --rerank_with_RGB \
-    --use_reranking
+    --recon_loss_type 'mse+ssim'
+    # --rerank_with_RGB \
+    # --use_reranking
     # --use_fast_track
     # --use_only_cross_decoder \
 
