@@ -21,7 +21,7 @@ def visualize_reconstruction(model, thermal_img, paired_rgb, device='cuda', save
         _, patch_thermal, recon_loss, mask_thermal, masked_patch_thermal = model.module.forward_model(thermal_img, modality='thermal', paired_rgb=paired_rgb)
     model.eval()
     
-    reconstructed_pixels = model.module.prediction_head(patch_thermal)  # [1, 256, 588]
+    reconstructed_pixels = model.module.prediction_thermal_head(patch_thermal)  # [1, 256, 588]
     reconstructed_img = unpatchify_visual(reconstructed_pixels, patch_size=14) # [1, 3, 224, 224]
     
     # Denormalize (ImageNet stats 사용했다고 가정)
