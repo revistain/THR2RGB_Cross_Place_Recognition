@@ -294,7 +294,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                         # rgb_cross_attn_map = model.module.decoder_rgb_blocks[-1].cross_attn_weights
 
                         # e. Reconstruction
-                        reconstructed_patches_thermal = model.module.prediction_head(decoded_result)  # [B*K, 256, 588]
+                        reconstructed_patches_thermal = model.module.prediction_thermal_head(decoded_result)  # [B*K, 256, 588]
                         # reconstructed_patches_rgb = model.module.prediction_head(rgb_dec)  # [B*K, 256, 588]
 
                         # h. Target patches (batch)

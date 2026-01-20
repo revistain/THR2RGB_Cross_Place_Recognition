@@ -255,7 +255,8 @@ class CrossModalVPR_Net(nn.Module):
         self._set_mask_token(self.output_dim)
         self._set_decode_positional_embedding(self.output_dim)
         self._set_mask_generator(16*16, args.croco_mask_ratio)
-        self._set_prediction_head(self.output_dim, 14)
+        self._set_rgb_prediction_head(self.output_dim, 14)
+        self._set_thermal_prediction_head(self.output_dim, 14)
         
         self.reconstruction_criterion = MaskedMSE(
             norm_pix_loss=False,
@@ -295,13 +296,19 @@ class CrossModalVPR_Net(nn.Module):
         """Random masking generator 초기화"""
         self.mask_generator = RandomMask(num_patches, mask_ratio)
 
-    def _set_prediction_head(self, dec_embed_dim, patch_size):
-        # FIXME: 이것도 같은거 써도됨...?
-        self.prediction_head = nn.Sequential(
+    def _set_rgb_prediction_head(self, dec_embed_dim, patch_size):
+        self.prediction_rgb_head = nn.Sequential(
             nn.Linear(dec_embed_dim, patch_size**2 * 3), # 768 → 588
         )
-        nn.init.normal_(self.prediction_head[0].weight, std=0.02)
-        nn.init.zeros_(self.prediction_head[0].bias)
+        nn.init.normal_(self.prediction_rgb_head[0].weight, std=0.02)
+        nn.init.zeros_(self.prediction_rgb_head[0].bias)
+
+    def _set_thermal_prediction_head(self, dec_embed_dim, patch_size):
+        self.prediction_thermal_head = nn.Sequential(
+            nn.Linear(dec_embed_dim, patch_size**2 * 3), # 768 → 588
+        )
+        nn.init.normal_(self.prediction_thermal_head[0].weight, std=0.02)
+        nn.init.zeros_(self.prediction_thermal_head[0].bias)
 
     def patchify(self, imgs):
         """
@@ -433,8 +440,8 @@ class CrossModalVPR_Net(nn.Module):
                 else: recon_loss_fn = self.calculate_recon_loss
                 
                 # 9. Prediction Head
-                reconstructed_thermal_patches = self.prediction_head(thermal_full_dec)
-                reconstructed_rgb_patches = self.prediction_head(rgb_full_dec)
+                reconstructed_thermal_patches = self.prediction_rgb_head(thermal_full_dec)
+                reconstructed_rgb_patches = self.prediction_thermal_head(rgb_full_dec)
                 target_thermal_patches = self.patchify(x)
                 target_rgb_patches = self.patchify(paired_rgb)
                 
