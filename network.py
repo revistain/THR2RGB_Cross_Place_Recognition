@@ -4,6 +4,7 @@ from torch import nn
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 from backbone.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
+from timm.models.vision_transformer import VisionTransformer, _cfg, PatchEmbed, Block
 import math
 import numpy as np
 from sklearn.neighbors import NearestNeighbors
@@ -12,7 +13,8 @@ from timm.models.layers import trunc_normal_
 
 from croco.models.masking import RandomMask
 from croco.models.criterion import MaskedMSE
-        
+
+  
 class CroCoDecoderBlock(nn.Module):
     def __init__(self, dim=768, num_heads=12, mlp_ratio=4.0, drop_path=0.0):
         super().__init__()
@@ -162,7 +164,10 @@ class CrossModalVPR_Net(nn.Module):
             CroCoDecoderBlock(self.output_dim, dec_num_heads) 
             for _ in range(dec_depth)
         ])
+        
+        self.decoder_embed_dim = 384
         self.decoder_norm = nn.LayerNorm(self.output_dim)
+        self.r2_decoder_norm = nn.LayerNorm(self.decoder_embed_dim)
         
         self.mask_token = None
         self._set_mask_token(self.output_dim)
@@ -175,12 +180,25 @@ class CrossModalVPR_Net(nn.Module):
         self.local_head_thermal.weight.data.normal_(mean=0.0, std=0.01)
         self.local_head_rgb.bias.data.zero_()
         self.local_head_thermal.bias.data.zero_()
-        self.pair_head = nn.Linear(7, 384, bias=True)
-        self.pair_head_2 = nn.Linear(384, 384, bias=True)
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, 384))
-        self.cls_token_2 = nn.Parameter(torch.zeros(1, 1, 384))
+        
+        self.pair_head = nn.Linear(7, self.decoder_embed_dim, bias=True)
+        self.pair_head_2 = nn.Linear(self.decoder_embed_dim, self.decoder_embed_dim, bias=True)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, self.decoder_embed_dim))
+        self.cls_token_2 = nn.Parameter(torch.zeros(1, 1, self.decoder_embed_dim))
         trunc_normal_(self.cls_token, std=.02)
-        trunc_normal_(self.cls_token_2, std=.02)    
+        trunc_normal_(self.cls_token_2, std=.02)
+        
+        decoder_num_heads = 6
+        decoder_mlp_ratio = 4.
+        decoder_norm_layer = nn.LayerNorm
+        decoder_depth = 4
+        self.blocks = nn.ModuleList([
+            Block(self.decoder_embed_dim, decoder_num_heads, decoder_mlp_ratio, qkv_bias=True, norm_layer=nn.LayerNorm)
+            for i in range(decoder_depth)])
+
+        self.blocks_2 = nn.ModuleList([
+            Block(self.decoder_embed_dim, decoder_num_heads, decoder_mlp_ratio, qkv_bias=True, norm_layer=nn.LayerNorm)
+            for i in range(2)])
         
         self.reconstruction_criterion = MaskedMSE(
             norm_pix_loss=False,
@@ -424,13 +442,13 @@ class CrossModalVPR_Net(nn.Module):
 
                     ###########
                     # Linear1
-                    pair_matrix = self.pair_head(select.reshape(B * N_select * self.num_corr, 7)).reshape(B * N_select, self.num_corr, self.output_dim)
+                    pair_matrix = self.pair_head(select.reshape(B * N_select * self.num_corr, 7)).reshape(B * N_select, self.num_corr, self.decoder_embed_dim)
                     pair_matrix += get_2d_sincos_pos_embed_from_grid(self.decoder_embed_dim, select_copy.reshape(B * N_select, self.num_corr, 7)[:,:,3:5])
                     x = torch.cat([self.cls_token_2.repeat(B*N_select, 1, 1), pair_matrix], dim=1)
                     # Transformer1
                     for blk in self.blocks_2:
                         x = blk(x)
-                    x = self.decoder_norm(x)
+                    x = self.r2_decoder_norm(x)
 
                     # Linear2
                     x = self.pair_head_2(x[:,0,:].reshape(B*N_select, self.decoder_embed_dim)).reshape(B, N_select, self.decoder_embed_dim)
@@ -440,7 +458,7 @@ class CrossModalVPR_Net(nn.Module):
                     # Transformer2
                     for blk in self.blocks:
                         x = blk(x)
-                    x = self.decoder_norm(x)
+                    x = self.r2_decoder_norm(x)
 
                     # 4-1. cosine similarity 구하기
                     # 4-2. attention value 구하기
