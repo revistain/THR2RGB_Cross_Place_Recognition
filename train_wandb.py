@@ -59,7 +59,6 @@ if __name__ == "__main__":
 
     '''Datasets'''
     args.sequences = ['KAIST']
-    print("use_alignment_loss: ", args.use_alignment_loss)
     triplets_ds = datasets_T2R.TripletsSTheReODual(args, DATASET_FOLDER, use_align_rgb=True)
     train_ds = datasets_T2R.BaseSTheReODual(args, DATASET_FOLDER, split='train')
 

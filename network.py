@@ -8,6 +8,7 @@ import math
 import numpy as np
 from sklearn.neighbors import NearestNeighbors
 import torchvision.models as models
+from timm.models.layers import trunc_normal_
 
 from croco.models.masking import RandomMask
 from croco.models.criterion import MaskedMSE
@@ -168,6 +169,18 @@ class CrossModalVPR_Net(nn.Module):
         self._set_decode_positional_embedding(self.output_dim)
         self._set_mask_generator(16*16, args.croco_mask_ratio)
         self._set_prediction_head(self.output_dim, 14)
+        self.local_head_rgb = nn.Linear(768, 128, bias=True)
+        self.local_head_thermal = nn.Linear(768, 128, bias=True)
+        self.local_head_rgb.weight.data.normal_(mean=0.0, std=0.01)
+        self.local_head_thermal.weight.data.normal_(mean=0.0, std=0.01)
+        self.local_head_rgb.bias.data.zero_()
+        self.local_head_thermal.bias.data.zero_()
+        self.pair_head = nn.Linear(7, 768, bias=True)
+        self.pair_head_2 = nn.Linear(768, 768, bias=True)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, 768))
+        self.cls_token_2 = nn.Parameter(torch.zeros(1, 1, 768))
+        trunc_normal_(self.cls_token, std=.02)
+        trunc_normal_(self.cls_token_2, std=.02)    
         
         self.reconstruction_criterion = MaskedMSE(
             norm_pix_loss=False,
@@ -259,14 +272,15 @@ class CrossModalVPR_Net(nn.Module):
         
         # 3. patch embedding을 masking 해준다.
         mask = self.mask_generator(image_patch)
-        thermal_visible = image_patch[~mask].reshape(patch_B, -1, patch_D)
+        patch_visible = image_patch[~mask].reshape(patch_B, -1, patch_D)
         
         # 4. unmasked된 patch들만 DINOv2 통과시키기
         for blk in current_backbone.blocks:
-            thermal_visible = blk(thermal_visible)
-        thermal_visible = current_backbone.norm(thermal_visible)
+            patch_visible = blk(patch_visible)
+        patch_visible = current_backbone.norm(patch_visible)
+        # attn_map.shape -> [4, 12, 52, 52]
 
-        return thermal_visible, mask, patch_B, patch_N, patch_D
+        return patch_visible, mask, patch_B, patch_N, patch_D
 
     def croco_encoded_mask_expension(self, thermal_visible, mask, patch_B, patch_N, patch_D):
         # CROCO로 masking된 부분 mask token으로 채워넣기
@@ -305,10 +319,123 @@ class CrossModalVPR_Net(nn.Module):
                 rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb = self.croco_like_encoder(paired_rgb, modality='rgb')
                 
                 # 5. paired RGB도 feature tokens 추출하기
-                paired_thermal_full = self.thermal_backbone(x)
-                paired_thermal_full = paired_thermal_full["x_norm_patchtokens"] 
-                paired_rgb_full = self.rgb_backbone(paired_rgb)
-                paired_rgb_full = paired_rgb_full["x_norm_patchtokens"]
+                paired_thermal = self.thermal_backbone(x, return_attention=True)
+                paired_thermal_full = paired_thermal["x_norm_patchtokens"]
+                paired_thermal_attn = paired_thermal["attention"][:,:,1:,1:] # [B, MHA, 256, 256] # TODO: 이렇게 제거하는게 맞는지도 한번 체크해보기
+                paired_thermal_cls_attn = paired_thermal["cls_attention"][:, :, 1:] # [B, MHA, 256]
+                paired_thermal_cls_attn_single_head = paired_thermal_cls_attn.sum(dim=1) # [B, 256]
+                
+                paired_rgb = self.rgb_backbone(paired_rgb, return_attention=True)
+                paired_rgb_full = paired_rgb["x_norm_patchtokens"]
+                paired_rgb_attn = paired_rgb["attention"][:,:,1:,1:] # CLS Token 제거
+                paired_rgb_cls_attn = paired_rgb["cls_attention"][:, :, 1:]
+                paired_rgb_cls_attn_single_head = paired_rgb_cls_attn.sum(dim=1)
+                
+                if True:
+                    # R2Former Reranking module 학습 구현부
+                    # 1. rgb/thermal에서 중요한 feature tokens(100개)만 남기기
+                    TOP_PATCH_COUNT = 100
+                    thermal_order = torch.argsort(paired_thermal_cls_attn_single_head, dim=1, descending=True) # thermal_order: [B, 256]
+                    thermal_order = thermal_order[:, :TOP_PATCH_COUNT]
+                    rgb_order = torch.argsort(paired_rgb_cls_attn_single_head, dim=1, descending=True) # thermal_order: [B, 256]
+                    rgb_order = rgb_order[:, :TOP_PATCH_COUNT] # rgb_order: [4, 100]
+                    rgb_idx = rgb_order.unsqueeze(2).expand(-1, -1, 768)
+                    thermal_idx = thermal_order.unsqueeze(2).expand(-1, -1, 768)
+                    selected_rgb_patches = torch.gather(paired_rgb_full, axis=1, index=rgb_idx)
+                    selected_thermal_patches = torch.gather(paired_thermal_full, axis=1, index=thermal_idx)
+                    
+                    # 2. 선택된 patch를 각각 linear을 태워서 768 -> 128 dimension
+                    ## local_features 만들기
+                    local_rgb_features = self.local_head_rgb(selected_rgb_patches)
+                    local_thermal_features = self.local_head_thermal(selected_thermal_patches)
+                    
+                    # 3. linear에 추가정보 넣어서 128 -> 131 차원 만들어주기 (positional embedding은 넣어야할지 말지 고민중)
+                    B_sz, _, W, H = x.shape # x: [4, 3, 224, 224] 가정
+                    patch_size = 16
+                    grid_W = int(np.ceil(W / patch_size)) # 14
+                    HW = max(H, W) # 정규화를 위한 분모 (224)
+
+                    # --- [RGB] x_xy (좌표) 계산 ---
+                    # Col (X좌표): index % 14
+                    rgb_col = (rgb_order % grid_W) * patch_size + (patch_size // 2)
+                    # Row (Y좌표): index // 14
+                    rgb_row = (rgb_order // grid_W) * patch_size + (patch_size // 2)
+                    
+                    # 정규화 후 합치기: [B, 100, 2]
+                    x_xy_rgb = torch.stack([rgb_col / float(HW), rgb_row / float(HW)], dim=2) # x_xy_rgb: [B, 100, 2]
+
+                    # --- [Thermal] x_xy (좌표) 계산 ---
+                    thermal_col = (thermal_order % grid_W) * patch_size + (patch_size // 2)
+                    thermal_row = (thermal_order // grid_W) * patch_size + (patch_size // 2)
+                    
+                    # 정규화 후 합치기: [B, 100, 2]
+                    x_xy_thermal = torch.stack([thermal_col / float(HW), thermal_row / float(HW)], dim=2) # x_xy_thermal: [B, 100, 2]
+
+                    # --- [RGB] x_attention (중요도) 계산 ---
+                    # 선택된 패치의 attention score 가져오기 (Gather)
+                    rgb_att_val = torch.gather(paired_rgb_cls_attn_single_head, axis=1, index=rgb_order) # [B, 100]
+                    rgb_att_norm = rgb_att_val / torch.max(rgb_att_val, dim=1, keepdim=True)[0]
+                    rgb_att_norm = rgb_att_norm.unsqueeze(2) # [B, 100, 1]
+
+                    # --- [Thermal] x_attention (중요도) 계산 ---
+                    thermal_att_val = torch.gather(paired_thermal_cls_attn_single_head, axis=1, index=thermal_order)
+                    thermal_att_norm = thermal_att_val / torch.max(thermal_att_val, dim=1, keepdim=True)[0]
+                    thermal_att_norm = thermal_att_norm.unsqueeze(2) # [B, 100, 1]
+
+                    # ---------------------------------------------------------
+                    # 4. Final Concatenation (Feature + Coord + Score)
+                    # ---------------------------------------------------------
+                    # 결과 Shape: [B, 100, 2 + 1 + 128] = [B, 100, 131]
+                    # R2Former에 들어갈 최종 입력 (x_rerank, y_rerank)
+                    rgb_rerank_input = torch.cat([x_xy_rgb, rgb_att_norm, local_rgb_features], dim=2)
+                    thermal_rerank_input = torch.cat([x_xy_thermal, thermal_att_norm, local_thermal_features], dim=2)
+                    ####################################################################
+                    
+                    # 4. correlation matrix 만들기 (100x100x7)
+                    '''
+                    paired_rgb_attn.shape: [4, 12, 256, 256]
+                    local_rgb_features.shape: [4, 100, 128]
+                    local_thermal_features.shape: [4, 100, 128]
+                    global_score: [4, 128]
+                    '''
+                    B = rgb_rerank_input.shape[0]
+                    N = rgb_rerank_input.shape[1]
+                    self.num_corr = 1
+                    rgb_rerank_token = F.normalize(rgb_rerank_input[:, :, 3:], p=2, dim=2)
+                    thermal_rerank_token = F.normalize(thermal_rerank_input[:, :, 3:], p=2, dim=2)
+                    rgb_coordinate = rgb_rerank_token[:, :, :3].detach().clamp(min=0, max=1)
+                    thermal_coordinate = thermal_rerank_token[:, :, :3].detach().clamp(min=0, max=1)
+                    correlation = torch.matmul(rgb_rerank_token, thermal_rerank_token.permute((0, 2, 1)))
+                    xy_matrix = torch.cat(
+                        [rgb_coordinate.unsqueeze(2).repeat(1, 1, thermal_rerank_token.shape[1], 1),
+                        thermal_coordinate.unsqueeze(1).repeat(1, rgb_rerank_token.shape[1], 1, 1), correlation.unsqueeze(3)],
+                        dim=3)
+                    order_q = torch.argsort(correlation.unsqueeze(3), dim=2, descending=True).repeat(1, 1, 1, 7)
+                    order_k = torch.argsort(correlation.unsqueeze(3), dim=1, descending=True).repeat(1, 1, 1, 7)
+                    select_q = torch.gather(input=xy_matrix, index=order_q[:, :, :self.num_corr, :], dim=2)
+                    select_k = torch.gather(input=xy_matrix, index=order_k[:, :self.num_corr, :, :], dim=1)
+                    select_k_copy = select_k.clone()
+                    select_k_copy[:,:,:,:6] = torch.flip(select_k[:,:,:,:6].reshape(select_k.shape[0], select_k.shape[1],select_k.shape[2],2,3),dims=(3,)).reshape(select_k.shape[0], select_k.shape[1],select_k.shape[2],6)
+                    select = torch.cat([select_q, select_k.permute((0, 2, 1, 3))], dim=1)
+                    select_copy = torch.cat([select_q, select_k.permute((0, 2, 1, 3))], dim=1)
+                    N_select = select.shape[1]
+
+                    pair_matrix = self.pair_head(select.reshape(B * N_select * self.num_corr, 7)).reshape(B * N_select, self.num_corr, self.output_dim)
+                    pair_matrix += get_2d_sincos_pos_embed_from_grid(self.decoder_embed_dim, select_copy.reshape(B * N_select, self.num_corr, 7)[:,:,3:5])
+                    x = torch.cat([self.cls_token_2.repeat(B*N_select, 1, 1), pair_matrix], dim=1)
+                    for blk in self.blocks_2:
+                        x = blk(x)
+                    x = self.decoder_norm(x)
+
+                    x = self.pair_head_2(x[:,0,:].reshape(B*N_select, self.decoder_embed_dim)).reshape(B, N_select, self.decoder_embed_dim)
+                    x = x.reshape(B, N_select, self.decoder_embed_dim) + get_2d_sincos_pos_embed_from_grid(self.decoder_embed_dim, select_copy[:,:,0,0:2])
+                    x = torch.cat([self.cls_token.repeat(B, 1, 1), x], dim=1)
+                    
+                    # 4-1. cosine similarity 구하기
+                    # 4-2. attention value 구하기
+                    # 4-3. positional embedding값 구하기
+                    # 4-4. 자기와 대응되는 좌표값 넣어주기
+                    # 5. top5를 골라 두개로 나눠주기
                 
                 # 6. Mask token expansion
                 thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
@@ -424,3 +551,34 @@ def get_backbone(pretrained_foundation, foundation_model_path):
         model_dict.update(state_dict.items())
         backbone.load_state_dict(model_dict)
     return backbone
+
+def get_2d_sincos_pos_embed_from_grid(embed_dim, grid):
+    assert embed_dim % 2 == 0
+
+    # use half of dimensions to encode grid_h
+    emb_h = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[:,:, 0])  # (H*W, D/2)
+    emb_w = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[:,:, 1])  # (H*W, D/2)
+
+    emb = torch.cat([emb_h, emb_w], dim=2) # (H*W, D)
+    return emb
+
+
+def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
+    """
+    embed_dim: output dimension for each position
+    pos: a list of positions to be encoded: size (M,)
+    out: (M, D)
+    """
+    assert embed_dim % 2 == 0
+    omega = torch.arange(embed_dim // 2, dtype=torch.float32).cuda()
+    omega /= embed_dim / 2.
+    omega = 1. / 10000**omega  # (D/2,)
+
+    # pos = pos.reshape(-1)  # (M,)
+    out = torch.einsum('bm,d->bmd', pos, omega)  # (M, D/2), outer product
+
+    emb_sin = torch.sin(out) # (M, D/2)
+    emb_cos = torch.cos(out) # (M, D/2)
+
+    emb = torch.cat([emb_sin, emb_cos], dim=2)  # (M, D)
+    return emb

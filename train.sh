@@ -1,6 +1,6 @@
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
-CUDA_VISIBLE_DEVICES=0 \
+CUDA_VISIBLE_DEVICES=1 \
 python3 train_wandb.py \
     --save_dir './logs' \
     --features_dim 768 \
@@ -9,7 +9,7 @@ python3 train_wandb.py \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 4 \
     --num_trainable_blocks_THERMAL 4 \
-    --comment "BiRecon-croco-0.8-alpha10.0-decDepth4-mse+ssim" \
+    --comment "TEST-BiRecon-croco-0.8-alpha10.0-decDepth4-mse+ssim" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
