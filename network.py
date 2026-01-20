@@ -175,10 +175,10 @@ class CrossModalVPR_Net(nn.Module):
         self.local_head_thermal.weight.data.normal_(mean=0.0, std=0.01)
         self.local_head_rgb.bias.data.zero_()
         self.local_head_thermal.bias.data.zero_()
-        self.pair_head = nn.Linear(7, 768, bias=True)
-        self.pair_head_2 = nn.Linear(768, 768, bias=True)
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, 768))
-        self.cls_token_2 = nn.Parameter(torch.zeros(1, 1, 768))
+        self.pair_head = nn.Linear(7, 384, bias=True)
+        self.pair_head_2 = nn.Linear(384, 384, bias=True)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, 384))
+        self.cls_token_2 = nn.Parameter(torch.zeros(1, 1, 384))
         trunc_normal_(self.cls_token, std=.02)
         trunc_normal_(self.cls_token_2, std=.02)    
         
@@ -400,7 +400,7 @@ class CrossModalVPR_Net(nn.Module):
                     '''
                     B = rgb_rerank_input.shape[0]
                     N = rgb_rerank_input.shape[1]
-                    self.num_corr = 1
+                    self.num_corr = 5
                     rgb_rerank_token = F.normalize(rgb_rerank_input[:, :, 3:], p=2, dim=2)
                     thermal_rerank_token = F.normalize(thermal_rerank_input[:, :, 3:], p=2, dim=2)
                     rgb_coordinate = rgb_rerank_token[:, :, :3].detach().clamp(min=0, max=1)
@@ -410,6 +410,8 @@ class CrossModalVPR_Net(nn.Module):
                         [rgb_coordinate.unsqueeze(2).repeat(1, 1, thermal_rerank_token.shape[1], 1),
                         thermal_coordinate.unsqueeze(1).repeat(1, rgb_rerank_token.shape[1], 1, 1), correlation.unsqueeze(3)],
                         dim=3)
+                    
+                    ###########
                     order_q = torch.argsort(correlation.unsqueeze(3), dim=2, descending=True).repeat(1, 1, 1, 7)
                     order_k = torch.argsort(correlation.unsqueeze(3), dim=1, descending=True).repeat(1, 1, 1, 7)
                     select_q = torch.gather(input=xy_matrix, index=order_q[:, :, :self.num_corr, :], dim=2)
@@ -420,17 +422,26 @@ class CrossModalVPR_Net(nn.Module):
                     select_copy = torch.cat([select_q, select_k.permute((0, 2, 1, 3))], dim=1)
                     N_select = select.shape[1]
 
+                    ###########
+                    # Linear1
                     pair_matrix = self.pair_head(select.reshape(B * N_select * self.num_corr, 7)).reshape(B * N_select, self.num_corr, self.output_dim)
                     pair_matrix += get_2d_sincos_pos_embed_from_grid(self.decoder_embed_dim, select_copy.reshape(B * N_select, self.num_corr, 7)[:,:,3:5])
                     x = torch.cat([self.cls_token_2.repeat(B*N_select, 1, 1), pair_matrix], dim=1)
+                    # Transformer1
                     for blk in self.blocks_2:
                         x = blk(x)
                     x = self.decoder_norm(x)
 
+                    # Linear2
                     x = self.pair_head_2(x[:,0,:].reshape(B*N_select, self.decoder_embed_dim)).reshape(B, N_select, self.decoder_embed_dim)
                     x = x.reshape(B, N_select, self.decoder_embed_dim) + get_2d_sincos_pos_embed_from_grid(self.decoder_embed_dim, select_copy[:,:,0,0:2])
                     x = torch.cat([self.cls_token.repeat(B, 1, 1), x], dim=1)
-                    
+
+                    # Transformer2
+                    for blk in self.blocks:
+                        x = blk(x)
+                    x = self.decoder_norm(x)
+
                     # 4-1. cosine similarity 구하기
                     # 4-2. attention value 구하기
                     # 4-3. positional embedding값 구하기
