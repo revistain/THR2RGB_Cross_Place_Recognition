@@ -215,7 +215,7 @@ class CrossModalVPR_Net(nn.Module):
     def __init__(self, args, pretrained_foundation=False, foundation_model_path=None):
         # NOTE: 그냥 args를 넘기는게 편하다는건 알지만, 이미 늦어버렸습니다...
         super().__init__()
-
+        self.args = args
         # 1. 두 개의 독립적인 Backbone 생성 (Weights Unshared)
         # Cross-modal에서는 모달리티 간 특성이 다르므로 가중치를 공유하지 않는 것이 일반적입니다.
         self.rgb_backbone = get_backbone(pretrained_foundation, foundation_model_path)
@@ -255,8 +255,8 @@ class CrossModalVPR_Net(nn.Module):
         self._set_mask_token(self.output_dim)
         self._set_decode_positional_embedding(self.output_dim)
         self._set_mask_generator(16*16, args.croco_mask_ratio)
-        self._set_rgb_prediction_head(self.output_dim, 14)
-        self._set_thermal_prediction_head(self.output_dim, 14)
+        self._set_prediction_head(self.output_dim, 14)
+        self._set_prediction_head(self.output_dim, 14)
         
         self.reconstruction_criterion = MaskedMSE(
             norm_pix_loss=False,
@@ -296,19 +296,12 @@ class CrossModalVPR_Net(nn.Module):
         """Random masking generator 초기화"""
         self.mask_generator = RandomMask(num_patches, mask_ratio)
 
-    def _set_rgb_prediction_head(self, dec_embed_dim, patch_size):
-        self.prediction_rgb_head = nn.Sequential(
+    def _set_prediction_head(self, dec_embed_dim, patch_size):
+        self.prediction_head = nn.Sequential(
             nn.Linear(dec_embed_dim, patch_size**2 * 3), # 768 → 588
         )
-        nn.init.normal_(self.prediction_rgb_head[0].weight, std=0.02)
-        nn.init.zeros_(self.prediction_rgb_head[0].bias)
-
-    def _set_thermal_prediction_head(self, dec_embed_dim, patch_size):
-        self.prediction_thermal_head = nn.Sequential(
-            nn.Linear(dec_embed_dim, patch_size**2 * 3), # 768 → 588
-        )
-        nn.init.normal_(self.prediction_thermal_head[0].weight, std=0.02)
-        nn.init.zeros_(self.prediction_thermal_head[0].bias)
+        nn.init.normal_(self.prediction_head[0].weight, std=0.02)
+        nn.init.zeros_(self.prediction_head[0].bias)
 
     def patchify(self, imgs):
         """
@@ -365,9 +358,14 @@ class CrossModalVPR_Net(nn.Module):
         thermal_visible = image_patch[~mask].reshape(patch_B, -1, patch_D)
         
         # 4. unmasked된 patch들만 DINOv2 통과시키기
-        for blk in current_backbone.blocks:
-            thermal_visible = blk(thermal_visible)
-        thermal_visible = current_backbone.norm(thermal_visible)
+        if self.args.use_penultimate_layer:
+            for blk in current_backbone.blocks[:-1]:
+                thermal_visible = blk(thermal_visible)
+            thermal_visible = current_backbone.norm(thermal_visible)
+        else:
+            for blk in current_backbone.blocks:
+                thermal_visible = blk(thermal_visible)
+            thermal_visible = current_backbone.norm(thermal_visible)
 
         return thermal_visible, mask, patch_B, patch_N, patch_D
 
@@ -408,17 +406,24 @@ class CrossModalVPR_Net(nn.Module):
                 rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb = self.croco_like_encoder(paired_rgb, modality='rgb')
                 
                 # 5. paired RGB도 feature tokens 추출하기
-                paired_thermal_full = self.thermal_backbone(x)
-                paired_thermal_full = paired_thermal_full["x_norm_patchtokens"] 
-                paired_rgb_full = self.rgb_backbone(paired_rgb)
-                paired_rgb_full = paired_rgb_full["x_norm_patchtokens"]
+                paired_thermal_full = self.thermal_backbone(x, return_attention=True)
+                out = {"x_norm_patchtokens": paired_thermal_full["x_norm_patchtokens"].clone()}
+                if self.args.use_penultimate_layer:
+                    paired_thermal_full = paired_thermal_full["penultimate_norm_patchtokens"]
+                else:
+                    paired_thermal_full = paired_thermal_full["x_norm_patchtokens"]
+
+                paired_rgb_full = self.rgb_backbone(paired_rgb, return_attention=True)
+                if self.args.use_penultimate_layer:
+                    paired_rgb_full = paired_rgb_full["penultimate_norm_patchtokens"]
+                else:
+                    paired_rgb_full = paired_rgb_full["x_norm_patchtokens"]
                 
                 # 6. Mask token expansion
                 thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
                 rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb)
                 
                 # out을 미리 저장
-                out = {"x_norm_patchtokens": paired_thermal_full.clone()}
                 if return_masked_patch: masked_patch_thermal = thermal_full # 이후로 안건들여서 clone안해도 됨
                 
                 # 7. Decoder Positional Encoding
@@ -440,8 +445,8 @@ class CrossModalVPR_Net(nn.Module):
                 else: recon_loss_fn = self.calculate_recon_loss
                 
                 # 9. Prediction Head
-                reconstructed_thermal_patches = self.prediction_rgb_head(thermal_full_dec)
-                reconstructed_rgb_patches = self.prediction_thermal_head(rgb_full_dec)
+                reconstructed_thermal_patches = self.prediction_head(thermal_full_dec)
+                reconstructed_rgb_patches = self.prediction_head(rgb_full_dec)
                 target_thermal_patches = self.patchify(x)
                 target_rgb_patches = self.patchify(paired_rgb)
                 

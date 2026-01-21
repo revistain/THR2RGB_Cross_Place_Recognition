@@ -91,10 +91,8 @@ class Parser():
         self.parser.add_argument("--backbone_lr", type=float, default=0.00001, help="_")
         self.parser.add_argument("--croco_mask_ratio", type=float, default=0.75, help="_")
         self.parser.add_argument("--recon_weight", type=float, default=1, help="_")
-        self.parser.add_argument("--rerank_weight", type=float, default=1, help="_")
         self.parser.add_argument("--use_single_pass", action='store_true', default=False)
         self.parser.add_argument("--use_reranking", action='store_true', default=False)
-        self.parser.add_argument("--use_rerank_loss", action='store_true', default=False)
         self.parser.add_argument("--num_decoder_depth", type=int, default=8, help="_")
         self.parser.add_argument('--debug_subset', type=int, default=None, help='For quick testing, limit dataset size')
         self.parser.add_argument("--use_decode_mask", action='store_true', default=False)
@@ -107,6 +105,7 @@ class Parser():
         self.parser.add_argument("--recon_loss_type", type=str, default="none", choices=['mse', 'l1', 'ssim', 'mse+ssim'])
         self.parser.add_argument("--use_fast_track", action='store_true', default=False)
         self.parser.add_argument("--rerank_with_RGB", action='store_true', default=False)
+        self.parser.add_argument("--use_penultimate_layer", action='store_true', default=False)
         
     
     def parse_arguments(self):

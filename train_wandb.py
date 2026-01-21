@@ -42,7 +42,7 @@ if __name__ == "__main__":
     args = parser.parse_arguments()
 
     # wandb 초기화
-    wandb.init(project="cross-modal-vpr", name=args.comment, config=vars(args))
+    wandb.init(project="cross-modal-vpr-2", name=args.comment, config=vars(args))
 
     args.save_dir = os.path.join(args.save_dir, args.comment, utils.get_timestamp())
     commons.setup_logging(args.save_dir)
@@ -59,7 +59,6 @@ if __name__ == "__main__":
 
     '''Datasets'''
     args.sequences = ['KAIST']
-    print("use_alignment_loss: ", args.use_alignment_loss)
     triplets_ds = datasets_T2R.TripletsSTheReODual(args, DATASET_FOLDER, use_align_rgb=True)
     train_ds = datasets_T2R.BaseSTheReODual(args, DATASET_FOLDER, split='train')
 
@@ -72,25 +71,11 @@ if __name__ == "__main__":
         test_ds_list.append(test_ds)
 
     '''Model'''
-    if args.use_decode_mask:
-        model = network_decode.CrossModalVPR_Net(
-            pretrained_foundation = True,
-            foundation_model_path = args.foundation_model_path, 
-            use_GeMAdditionalLayer=args.use_GeMAdditionalLayer,
-            mask_ratio=args.croco_mask_ratio,
-            use_single_pass=args.use_single_pass, use_reduced_thermal_patch=args.use_reduced_thermal_patch,
-            num_decoder_depth=args.num_decoder_depth,
-            use_bireconstruction=args.use_bireconstruction,
-            use_only_cross_decoder=args.use_only_cross_decoder,
-            use_contrastive_recon_loss=args.use_contrastive_recon_lossm,
-            use_ssim_recon_loss=args.recon_loss_type,
-        )
-    else:
-        model = network.CrossModalVPR_Net(
-            args,
-            pretrained_foundation = True,
-            foundation_model_path = args.foundation_model_path,
-        )
+    model = network.CrossModalVPR_Net(
+        args,
+        pretrained_foundation = True,
+        foundation_model_path = args.foundation_model_path,
+    )
     model = model.to(args.device)
     model = torch.nn.DataParallel(model)
 
@@ -252,71 +237,9 @@ if __name__ == "__main__":
                     
                     # triplet_loss
                     overall_loss += triplet_loss
-                
-                rerank_loss = 0
-                if args.use_rerank_loss:
-                    # TODO: augmentation 문제 없는지도 확인
-                    # constrastive_reconstruction loss 구하기
-                    query_lists = [i for i in range(0, args.train_batch_size)] 
-                    positive_lists = [i for i in range(1, args.train_batch_size * (args.negs_num_per_query+2), (args.negs_num_per_query+2))] 
-                    negative_lists = [i 
-                        for batch_idx in range(args.train_batch_size)
-                        for i in range(
-                            batch_idx * (args.negs_num_per_query + 2) + 2,  # start+2부터
-                            (batch_idx + 1) * (args.negs_num_per_query + 2)  # start+12까지
-                        )
-                    ]
-                    
-                    query_embedding = masked_patch_embedding[query_lists].detach()
-                    positive_embedding = patch_embedding[positive_lists].detach()
-                    negative_embedding = patch_embedding[negative_lists].detach()
-                    
-                    # 아침에 여기 고치기
-                    # loss는 어떻게? 비율은?
-                    
-                    # 2. 전부 pos embedding 추가
-                    decoder_pos_embed = model.module.decoder_pos_embed
-                    query_embedding = query_embedding + decoder_pos_embed
-                    positive_embedding = positive_embedding + decoder_pos_embed
-                    negative_embedding = negative_embedding + decoder_pos_embed
-
-                    decoded_embeddings = torch.zeros(
-                        (args.train_batch_size * (args.negs_num_per_query+1), 256, args.features_dim), device=args.device)
-                    
-                    # c. query를 batch로 만들어주기
-                    for batch_idx in range(args.train_batch_size):
-                        query_embedding_batch = query_embedding[batch_idx,:,:].unsqueeze(0).expand((1+args.negs_num_per_query), -1, -1)  # [RERANKING_TOP_K, N_visible, 768]
-                        
-                        # d. pos/neg 순으로 쌓아주기 (pos, pos, pos, pos, neg, neg ... neg)
-                        pos_neg_embedding_batch = torch.cat(
-                            [positive_embedding[batch_idx,:,:].unsqueeze(0),
-                             negative_embedding[batch_idx*args.negs_num_per_query:(batch_idx+1)*args.negs_num_per_query,:,:]], dim=0)
-                        
-                        # 3. decoder 통과시키기
-                        # 3-1. Thermal decoder 통과
-                        thermal_dec = query_embedding_batch
-                        for blk in model.module.decoder_blocks:
-                            thermal_dec = blk(thermal_dec, pos_neg_embedding_batch)
-                        thermal_dec = model.module.decoder_norm(thermal_dec)
-                        
-                        decoded_embeddings[batch_idx*(args.negs_num_per_query+1):(batch_idx+1)*(args.negs_num_per_query+1)] = thermal_dec
-                    
-                    # 5. infoNCE loss 계산
-                    infoNCE()
-                    decoded_embeddings.shape # (B*12,256,768)
-
-                    # 5. descriptor 기반의 infoNCE loss
-                    
-                    # GAP하고 infoNCE loss 계산(의미 있나?)
-                    # 그리고 GAP를 한다는 것은 global한 레벨에서 본다는것
-                    # 그럼 GeM pooling하는 방법과 다른게 무엇인가?
-                    
 
                 # train_batch_size: 4, arg.negs_num_per_query: 10
                 recon_weight = args.recon_weight
-                rerank_weight = args.rerank_weight
-                overall_loss += (recon_loss * recon_weight)
-                overall_loss += (rerank_loss * rerank_weight)
                 overall_loss /= (args.train_batch_size * args.negs_num_per_query)
 
                 del global_features, query_features, positive_features, negative_features
@@ -333,7 +256,6 @@ if __name__ == "__main__":
                     "train/overall_loss": overall_loss,
                     "train/triplet_loss(scaled)": triplet_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query),
                     "train/recon_loss(scaled)": (recon_loss * recon_weight).item() / (args.train_batch_size * args.negs_num_per_query) if isinstance(recon_loss, torch.Tensor) else 0,
-                    "train/rerank_loss(scaled)": (rerank_loss * rerank_weight).item() / (args.train_batch_size * args.negs_num_per_query) if isinstance(rerank_loss, torch.Tensor) else 0,
                 }, step=global_step)
                 
                 global_step += 1
