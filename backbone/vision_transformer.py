@@ -255,10 +255,19 @@ class DinoVisionTransformer(nn.Module):
 
         x = self.prepare_tokens_with_masks(x, masks)
 
+        attn = None
+        penultimate_attn = None
+        penultimate_x = None 
+
         for i, blk in enumerate(self.blocks):
             if return_attention and i == len(self.blocks) - 1:
-                # 마지막 블록에서 attention 반환
                 x, attn = blk(x, return_attention=True)
+            
+            elif return_attention and i == len(self.blocks) - 2:
+                x, penultimate_attn = blk(x, return_attention=True)
+                # 여기서 raw feature인 x를 일단 받아둡니다.
+                penultimate_x = x  
+            
             else:
                 x = blk(x)
 
@@ -271,9 +280,18 @@ class DinoVisionTransformer(nn.Module):
         }
         
         if return_attention:
-            result["attention"] = attn  # (B, num_heads, num_tokens, num_tokens)
-            result["cls_attention"] = attn[:, :, 0, :]  # CLS의 attention
-        
+            if attn is not None:
+                result["attention"] = attn
+                result["cls_attention"] = attn[:, :, 0, :]
+            
+            if penultimate_attn is not None:
+                result["penultimate_attention"] = penultimate_attn
+                result["cls_penultimate_attention"] = penultimate_attn[:, :, 0, :]
+                
+                if penultimate_x is not None:
+                    penultimate_x_norm = self.norm(penultimate_x)
+                    result["penultimate_norm_patchtokens"] = penultimate_x_norm[:, 1:]
+
         return result
 
     def _get_intermediate_layers_not_chunked(self, x, n=1):
