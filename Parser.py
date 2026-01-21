@@ -101,6 +101,8 @@ class Parser():
         self.parser.add_argument("--r2loss_div", type=float, default=0.0, help="_")
         self.parser.add_argument("--r2_penultimate_layer", action='store_true', default=False)
         self.parser.add_argument("--r2_global_local_score", action='store_true', default=False)
+        self.parser.add_argument("--r2_add_random_patch", action='store_true', default=False)
+        
         
     
     def parse_arguments(self):
