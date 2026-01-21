@@ -124,6 +124,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
         
             database_features = np.empty((eval_ds.database_num, args.features_dim), dtype="float32")
             database_patch_features = np.empty((eval_ds.database_num, 16*16, args.features_dim), dtype="float32")
+            database_penultimate_patch_features = np.empty((eval_ds.database_num, 16*16, args.features_dim), dtype="float32")
             database_attn_map = np.empty((eval_ds.database_num, 16*16), dtype="float32")
             for inputs, indices, flags in tqdm(database_dataloader, ncols=100):
                 outputs = model(inputs.to(args.device), flags)
@@ -133,6 +134,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 database_features[indices.numpy(), :] = features.cpu().numpy()
                 database_patch_features[indices.numpy(), :, :] = patch_features.cpu().numpy()
                 database_attn_map[indices.numpy(),:] = outputs[4].cpu().numpy()
+                database_penultimate_patch_features[indices.numpy(),:] = outputs[5].cpu().numpy()
                 
             logging.info(f"Finished extracting {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
 
@@ -146,6 +148,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
             queries_features = np.empty((eval_ds.queries_num, args.features_dim), dtype="float32")
             queries_patch_features = np.empty((eval_ds.queries_num, 16*16, args.features_dim), dtype="float32")
             queries_attn_map = np.empty((eval_ds.queries_num, 16*16), dtype="float32")
+            queries_penultimate_patch_features = np.empty((eval_ds.queries_num, 16*16, args.features_dim), dtype="float32")
             for inputs, indices, flags in tqdm(queries_dataloader, ncols=100):
                 outputs = model(inputs.to(args.device), flags)
                 
@@ -154,6 +157,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 queries_features[indices.numpy()-eval_ds.database_num, :] = features.cpu().numpy()
                 queries_patch_features[indices.numpy()-eval_ds.database_num, :, :] = patch_features.cpu().numpy()
                 queries_attn_map[indices.numpy()-eval_ds.database_num,:] = outputs[4].cpu().numpy()
+                queries_penultimate_patch_features[indices.numpy()-eval_ds.database_num,:] = outputs[5].cpu().numpy()
                 if args.use_fast_track: break
                 
             logging.info(f"Finished extracting {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
@@ -161,11 +165,9 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
         # 3. faiss를 이용하여, L2 distance로 가까운 descriptor 찾기
         faiss_index = faiss.IndexFlatL2(args.features_dim)
         faiss_index.add(database_features)
-        del database_features
         
         start_time = time.time()
         distances, predictions = faiss_index.search(queries_features, max(args.recall_values))
-        del queries_features
         del faiss_index
         
         import gc; gc.collect()
@@ -182,20 +184,25 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
             total_count = 0
             top1_change_count = 0
             with torch.no_grad():
-                # Batch 단위로 처리
-                num_queries = eval_ds.queries_num
-                
                 for batch_idx in tqdm(range(eval_ds.queries_num), desc="Reranking", ncols=100):
-                    encoded_queries_features = torch.tensor(queries_patch_features[batch_idx], dtype=torch.float32).to('cuda') # [256, 768]                   
-                    encoded_queries_attn_map = torch.tensor(queries_attn_map[batch_idx], dtype=torch.float32).to('cuda') # [256]
+                    if args.r2_penultimate_layer:
+                        encoded_queries_features = torch.from_numpy(queries_penultimate_patch_features[batch_idx]).float().cuda()  # [256, 768]
+                    else:
+                        encoded_queries_features = torch.from_numpy(queries_patch_features[batch_idx]).float().cuda()
                     
-                    top_k_db_indices_batch = predictions[batch_idx, :RERANKING_TOP_K]  # [K]
-                    all_db_indices = top_k_db_indices_batch.flatten() # [5,]
-                    encoded_dbs_features = database_patch_features[all_db_indices] # [5, 256, 768]
-                    encoded_dbs_attn_map = database_attn_map[all_db_indices] # [5, 256, 768]
-                    encoded_dbs_features = torch.tensor(encoded_dbs_features, dtype=torch.float32).to('cuda')
-                    encoded_dbs_attn_map = torch.tensor(encoded_dbs_attn_map, dtype=torch.float32).to('cuda')
+                    encoded_queries_attn_map = torch.from_numpy(queries_attn_map[batch_idx]).float().cuda()  # [256]
+                    encoded_queries_descriptor = torch.from_numpy(queries_features[batch_idx]).float().cuda()  # [768]
                     
+                    top_k_db_indices_batch = predictions[batch_idx, :RERANKING_TOP_K]  # [5]
+                    
+                    if args.r2_penultimate_layer:
+                        encoded_dbs_features = torch.from_numpy(database_penultimate_patch_features[top_k_db_indices_batch]).float().cuda()  # [5, 256, 768]
+                    else:
+                        encoded_dbs_features = torch.from_numpy(database_patch_features[top_k_db_indices_batch]).float().cuda()
+                    
+                    encoded_dbs_attn_map = torch.from_numpy(database_attn_map[top_k_db_indices_batch]).float().cuda()  # [5, 256]
+                    encoded_dbs_descriptor = torch.from_numpy(database_features[top_k_db_indices_batch]).float().cuda()  # [5, 768]
+
                     # [query, db1, db2, db3, db4, db5] 형태로 concat
                     concated_db_patches = torch.cat([encoded_queries_features.unsqueeze(0), encoded_dbs_features], axis=0)  # [6, 256, 768]
                     concated_db_attn_map = torch.cat([encoded_queries_attn_map.unsqueeze(0), encoded_dbs_attn_map], axis=0)  # [6, 256]
@@ -206,12 +213,24 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                     negatives_indexes = None  # Inference에서는 불필요
                     
                     reranker = model.module.reranker
-                    rerank_scores = reranker(concated_db_patches, concated_db_attn_map, 
-                                            queries_indexes, positives_indexes, negatives_indexes)  # [5]
+                    reranker.global_query_cache = encoded_queries_descriptor.unsqueeze(0)  # [1, 768]
+                    
+                    rerank_scores = reranker(
+                        concated_db_patches, 
+                        concated_db_attn_map, 
+                        queries_indexes, 
+                        positives_indexes, 
+                        None,
+                        global_query=encoded_queries_descriptor.unsqueeze(0).repeat(RERANKING_TOP_K, 1),  # [5, 768]
+                        global_pos=encoded_dbs_descriptor,  # [5, 768]
+                        global_neg=None
+                    )
                     
                     # rerank_scores로 top_k_db_indices_batch 재정렬
                     sorted_indices = torch.argsort(rerank_scores, descending=True)
                     predictions[batch_idx, :RERANKING_TOP_K] = top_k_db_indices_batch[sorted_indices.cpu()]
+        del queries_features
+        del database_features
     
         # 4. positive query(정답)가 몇 번째 top-N에 속하는지 검사하기
         positives_per_query = eval_ds.get_positives()

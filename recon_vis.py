@@ -18,7 +18,9 @@ def visualize_reconstruction(model, thermal_img, paired_rgb, device='cuda', save
     """
     model.train()
     with torch.no_grad():
-        _, patch_thermal, recon_loss, mask_thermal, cls_attn_map, masked_patch_thermal = model.module.forward_model(thermal_img, modality='thermal', paired_rgb=paired_rgb)
+        forward_output = model.module.forward_model(thermal_img, modality='thermal', paired_rgb=paired_rgb)
+        patch_thermal = forward_output[1]
+        mask_thermal = forward_output[3]
     model.eval()
     
     reconstructed_pixels = model.module.prediction_head(patch_thermal)  # [1, 256, 588]

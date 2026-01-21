@@ -208,7 +208,9 @@ if __name__ == "__main__":
                     pos_rgbs = torch.stack(pos_rgbs)
                     aligned_rgbs = pos_rgbs
 
-                global_features, patch_embedding, recon_loss, masks, cls_attn_map, masked_patch_embedding = model(
+                global_features, patch_embedding, \
+                recon_loss, masks, cls_attn_map, \
+                penultimate_patch_embedding, masked_patch_embedding = model(
                     images.to(args.device),
                     flags=flags,
                     paired_rgb=aligned_rgbs.to(args.device),
@@ -238,12 +240,21 @@ if __name__ == "__main__":
                     
                     # Reranking loss
                     reranker = model.module.reranker
+                    if args.r2_penultimate_layer:
+                        rerank_patch_embedding = penultimate_patch_embedding
+                    else:
+                        rerank_patch_embedding = patch_embedding
+
                     if args.r2loss_div < 0.001:
-                        rerank_loss = reranker(patch_embedding.detach(), cls_attn_map.detach(), queries_indexes, positives_indexes, negatives_indexes)
+                        rerank_loss = reranker(rerank_patch_embedding.detach(), cls_attn_map.detach(),
+                                               queries_indexes, positives_indexes, negatives_indexes,
+                                               query_features, positive_features, negative_features)
                         overall_loss += (triplet_loss + rerank_loss)
                         rerank_loss_sum += rerank_loss
                     else:
-                        rerank_loss = reranker(patch_embedding, cls_attn_map, queries_indexes, positives_indexes, negatives_indexes)
+                        rerank_loss = reranker(rerank_patch_embedding, cls_attn_map,
+                                               queries_indexes, positives_indexes, negatives_indexes,
+                                               query_features, positive_features, negative_features)
                         overall_loss += (triplet_loss + rerank_loss / args.r2loss_div)
                         rerank_loss_sum += (rerank_loss / args.r2loss_div)
                     
