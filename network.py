@@ -250,15 +250,16 @@ class RerankingModule(nn.Module):
         select_k_copy[:,:,:,:6] = torch.flip(select_k[:,:,:,:6].reshape(select_k.shape[0], select_k.shape[1],select_k.shape[2],2,3),dims=(3,)).reshape(select_k.shape[0], select_k.shape[1],select_k.shape[2],6)
 
         # Random Sample Selection
-        RANDOM_SAMPLE = 5
-        select_q_random_index = random.sample(range(self.num_corr, correlation.shape[2]), RANDOM_SAMPLE)
-        select_k_random_index = random.sample(range(self.num_corr, correlation.shape[2]), RANDOM_SAMPLE)
-        
-        select_q_random = torch.gather(input=xy_matrix, index=order_q[:, :, select_q_random_index, :], dim=2) # torch.Size([4, 100, 5, 7])
-        select_k_random = torch.gather(input=xy_matrix, index=order_k[:, select_k_random_index, :, :], dim=1) # torch.Size([4, 5, 100, 7])
-        
-        select_q = torch.cat([select_q, select_q_random], axis=2) # torch.Size([4, 100, 10, 7])
-        select_k = torch.cat([select_k, select_k_random], axis=1) # torch.Size([4, 10, 100, 7])
+        if self.args.r2_add_random_patch:
+            RANDOM_SAMPLE = 5
+            select_q_random_index = random.sample(range(self.num_corr, correlation.shape[2]), RANDOM_SAMPLE)
+            select_k_random_index = random.sample(range(self.num_corr, correlation.shape[1]), RANDOM_SAMPLE)
+            
+            select_q_random = torch.gather(input=xy_matrix, index=order_q[:, :, select_q_random_index, :], dim=2) # torch.Size([4, 100, 5, 7])
+            select_k_random = torch.gather(input=xy_matrix, index=order_k[:, select_k_random_index, :, :], dim=1) # torch.Size([4, 5, 100, 7])
+            
+            select_q = torch.cat([select_q, select_q_random], axis=2) # torch.Size([4, 100, 10, 7])
+            select_k = torch.cat([select_k, select_k_random], axis=1) # torch.Size([4, 10, 100, 7])
         
         select = torch.cat([select_q, select_k.permute((0, 2, 1, 3))], dim=1) # torch.Size([4, 200, 10, 7])
         select_copy = torch.cat([select_q, select_k.permute((0, 2, 1, 3))], dim=1) # torch.Size([4, 200, 10, 7])
