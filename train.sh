@@ -9,7 +9,7 @@ python3 train_wandb.py \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 4 \
     --num_trainable_blocks_THERMAL 4 \
-    --comment "BiRecon-croco-0.8-alpha10.0-decDepth12-mse+ssi-penultimateLayer-global+local-withCLS" \
+    --comment "R2former-croco-0.8-alpha10.0-decDepth12-randomPatch30-withCLS-reranking" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
@@ -19,10 +19,10 @@ python3 train_wandb.py \
     --recon_loss_type 'mse+ssim' \
     --r2_penultimate_layer \
     --r2_global_local_score \
-    --use_cls_for_vpr
-    # --use_reranking
+    --r2_add_random_patch \
+    --use_cls_for_vpr \
+    --use_reranking
     # --use_fast_track \
-    # --r2_add_random_patch
     # --use_fast_track
     # --r2loss_div 20 \
     # --use_fast_track \

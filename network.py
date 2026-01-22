@@ -279,7 +279,7 @@ class RerankingModule(nn.Module):
         # Random Sample Selection
         RANDOM_SAMPLE = 0
         if self.args.r2_add_random_patch:
-            RANDOM_SAMPLE = 5
+            RANDOM_SAMPLE = 30
             select_q_random_index = random.sample(range(self.num_corr, correlation.shape[2]), RANDOM_SAMPLE)
             select_k_random_index = random.sample(range(self.num_corr, correlation.shape[1]), RANDOM_SAMPLE)
             
