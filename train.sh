@@ -9,7 +9,7 @@ python3 train_wandb.py \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 4 \
     --num_trainable_blocks_THERMAL 4 \
-    --comment "640*480-R2formerWithCroco-0.8-alpha10.0-decDepth12-detach-globalCLS-reranking" \
+    --comment "640*480-R2formerWithCroco-0.8-alpha10.0-decDepth12-detach-globalCLS" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
@@ -19,8 +19,8 @@ python3 train_wandb.py \
     --recon_loss_type 'mse+ssim' \
     --r2_penultimate_layer \
     --r2_global_local_score \
-    --use_cls_for_vpr \
-    --use_reranking
+    --use_cls_for_vpr
+    # --use_reranking
 
     # --use_fast_track \
     # --use_fast_track \
