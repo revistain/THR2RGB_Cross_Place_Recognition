@@ -1,6 +1,6 @@
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
-CUDA_VISIBLE_DEVICES=4 \
+CUDA_VISIBLE_DEVICES=2 \
 python3 train_wandb.py \
     --save_dir './logs' \
     --features_dim 768 \
@@ -9,17 +9,18 @@ python3 train_wandb.py \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 4 \
     --num_trainable_blocks_THERMAL 4 \
-    --comment "TTTEST-BiRecon-croco-0.8-alpha10.0-decDepth12-mse+ssi-penultimateLayer-global+local-withCLS-reranking" \
+    --comment "BiRecon-croco-0.8-alpha10.0-decDepth12-mse+ssi-penultimateLayer-global+local-withCLS" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
     --croco_mask_ratio 0.8 \
-    --num_decoder_depth 12 \
+    --num_decoder_depth 8 \
     --recon_weight 10 \
     --recon_loss_type 'mse+ssim' \
     --r2_penultimate_layer \
     --r2_global_local_score \
-    --use_reranking
+    --use_cls_for_vpr
+    # --use_reranking
     # --use_fast_track \
     # --r2_add_random_patch
     # --use_fast_track
