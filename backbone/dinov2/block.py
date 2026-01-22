@@ -116,7 +116,7 @@ class Block(nn.Module):
 
         self.sample_drop_ratio = drop_path
 
-        self.adapter = VanillaAdapter(768, 384)
+        self.adapter = VanillaAdapter(384, 192)
 
         drop_path = 0.
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()

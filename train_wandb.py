@@ -14,6 +14,9 @@ import os
 from sklearn.cluster import KMeans
 import torchvision.models as models
 import wandb
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 
 from Parser import Parser
 import commons
@@ -42,7 +45,7 @@ if __name__ == "__main__":
     args = parser.parse_arguments()
 
     # wandb 초기화
-    wandb.init(project="cross-modal-vpr-2", name=args.comment, config=vars(args))
+    wandb.init(project="cross-modal-vpr-644x476", name=args.comment, config=vars(args))
 
     args.save_dir = os.path.join(args.save_dir, args.comment, utils.get_timestamp())
     commons.setup_logging(args.save_dir)
@@ -173,6 +176,7 @@ if __name__ == "__main__":
             triplets_ds.is_inference = True
             print("- Computing triplets...")
             triplets_ds.compute_triplets(args, model)
+            torch.cuda.empty_cache()
             triplets_ds.is_inference = False
 
             logging.debug("Finish computing triplets")
@@ -282,23 +286,24 @@ if __name__ == "__main__":
                 }, step=global_step)
                 
                 global_step += 1
-
-                del overall_loss, triplet_loss, recon_loss
+                
+                del patch_embedding, masks, cls_attn_map, penultimate_patch_embedding, masked_patch_embedding
+                del overall_loss, triplet_loss, recon_loss, rerank_loss
                 if args.use_fast_track: break
             
             logging.info(f"Epoch[{epoch_num:02d}]({loop_num + 1}/{loops_num}): " +
                         f"current batch triplet loss = {batch_loss:.8f}, " +
                         f"average epoch triplet loss = {epoch_losses.mean():.8f}")
         
-        visualize_during_training(
-            args,
-            model, 
-            triplets_dl, 
-            args.device, 
-            epoch_num,
-            save_dir=os.path.join(args.save_dir, 'reconstructions'),
-            comment=args.comment
-        )
+        # visualize_during_training(
+        #     args,
+        #     model, 
+        #     triplets_dl, 
+        #     args.device, 
+        #     epoch_num,
+        #     save_dir=os.path.join(args.save_dir, 'reconstructions'),
+        #     comment=args.comment
+        # )
 
         # wandb 로깅 (epoch 단위)
         wandb.log({"train/epoch_avg_loss": epoch_losses.mean(), "epoch": epoch_num}, step=global_step)

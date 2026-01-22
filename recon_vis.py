@@ -7,7 +7,7 @@ from torchvision.utils import make_grid
 from utils import get_timestamp
 import cv2
 
-def visualize_reconstruction(model, thermal_img, paired_rgb, device='cuda', save_path=None):
+def visualize_reconstruction(model, args, thermal_img, paired_rgb, device='cuda', save_path=None):
     """
     Args:
         model: CrossModalVPR_Net
@@ -16,6 +16,8 @@ def visualize_reconstruction(model, thermal_img, paired_rgb, device='cuda', save
         device: 'cuda' or 'cpu'
         save_path: Optional path to save the figure
     """
+    orig_W = args.resize[0]
+    orig_H = args.resize[1]
     model.train()
     with torch.no_grad():
         forward_output = model.module.forward_model(thermal_img, modality='thermal', paired_rgb=paired_rgb)
@@ -24,7 +26,7 @@ def visualize_reconstruction(model, thermal_img, paired_rgb, device='cuda', save
     model.eval()
     
     reconstructed_pixels = model.module.prediction_head(patch_thermal)  # [1, 256, 588]
-    reconstructed_img = unpatchify_visual(reconstructed_pixels, patch_size=14) # [1, 3, 224, 224]
+    reconstructed_img = unpatchify_visual(reconstructed_pixels, orig_H, orig_W, patch_size=14) # [1, 3, 224, 224]
     
     # Denormalize (ImageNet stats 사용했다고 가정)
     mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(device)
@@ -39,7 +41,7 @@ def visualize_reconstruction(model, thermal_img, paired_rgb, device='cuda', save
     hybrid_patches = original_patches.clone()  # [1, 256, 588]
     hybrid_patches[mask_thermal] = reconstructed_pixels[mask_thermal]  # Masked 위치만 reconstruction으로 교체
     
-    hybrid_img = unpatchify_visual(hybrid_patches, patch_size=14)  # [1, 3, 224, 224]
+    hybrid_img = unpatchify_visual(hybrid_patches, orig_H, orig_W, patch_size=14)  # [1, 3, 224, 224]
     hybrid_img_denorm = hybrid_img * std + mean
     
     hybrid_img_denorm = hybrid_img_denorm.detach().cpu()
@@ -54,7 +56,7 @@ def visualize_reconstruction(model, thermal_img, paired_rgb, device='cuda', save
     aligned_rgb_denorm = aligned_rgb_denorm.detach().cpu()
     
     # Mask 시각화 (16x16 grid)
-    mask_2d = mask_thermal.reshape(1, 16, 16).float()  # [1, 16, 16]
+    mask_2d = mask_thermal.reshape(1, int(orig_H/14), int(orig_W/14)).float()
     mask_img = torch.nn.functional.interpolate(
         mask_2d.unsqueeze(1), size=(224, 224), mode='nearest'
     ).squeeze(1)  # [1, 224, 224]
@@ -109,13 +111,14 @@ def visualize_reconstruction(model, thermal_img, paired_rgb, device='cuda', save
     
     return hybrid_img_denorm
 
-def unpatchify_visual(patches, patch_size=14):
+def unpatchify_visual(patches, orig_H, orig_W, patch_size=14):
     """
     patches: [B, N, patch_size**2 * 3]
     return: [B, 3, H, W]
     """
     B = patches.shape[0]
-    h = w = int(patches.shape[1] ** 0.5)  # 16
+    h = int(orig_H / 14)
+    w = int(orig_W / 14)
     
     patches = patches.reshape(B, h, w, patch_size, patch_size, 3)
     patches = torch.einsum('nhwpqc->nchpwq', patches)
@@ -141,7 +144,7 @@ def visualize_during_training(args, model, triplets_dl, device, epoch, save_dir=
     paired_rgb = aligned_rgbs[0:1].to(device)  # [1, 3, 224, 224]
     
     save_path = f"{save_subdir}/epoch_{epoch:03d}.png"
-    visualize_reconstruction(model, thermal_img, paired_rgb, device, save_path)
+    visualize_reconstruction(model, args, thermal_img, paired_rgb, device, save_path)
     
     model.train()
     

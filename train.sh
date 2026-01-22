@@ -1,15 +1,15 @@
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
-CUDA_VISIBLE_DEVICES=5 \
+CUDA_VISIBLE_DEVICES=6 \
 python3 train_wandb.py \
     --save_dir './logs' \
-    --features_dim 768 \
+    --features_dim 384 \
     --sequences KAIST \
-    --foundation_model_path /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/backbone/dinov2/pretrained/dinov2_vitb14_pretrain.pth \
+    --foundation_model_path /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/backbone/dinov2/pretrained/dinov2_vits14_pretrain.pth \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 4 \
     --num_trainable_blocks_THERMAL 4 \
-    --comment "R2formerWithCroco-0.8-alpha10.0-decDepth12-detach-withCLS-reranking" \
+    --comment "640*480-R2formerWithCroco-0.8-alpha10.0-decDepth12-detach-globalCLS-reranking" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
@@ -21,14 +21,13 @@ python3 train_wandb.py \
     --r2_global_local_score \
     --use_cls_for_vpr \
     --use_reranking
-    # --r2_add_random_patch \
+
     # --use_fast_track \
-    # --use_fast_track
+    # --r2_add_random_patch \
     # --r2loss_div 20 \
     # --use_fast_track \
     # --rerank_with_RGB \
-    
-    # --use_fast_track
+    # --use_fast_track \
     # --use_only_cross_decoder \
     # --use_only_cross_decoder \
     # --use_contrastive_recon_loss \

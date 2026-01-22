@@ -70,8 +70,10 @@ class PatchEmbed(nn.Module):
         _, _, H, W = x.shape
         patch_H, patch_W = self.patch_size
 
-        assert H % patch_H == 0, f"Input image height {H} is not a multiple of patch height {patch_H}"
-        assert W % patch_W == 0, f"Input image width {W} is not a multiple of patch width: {patch_W}"
+        # NOTE: changed by jwkim(to handle non-14-dividable image)
+        # assert H % patch_H == 0, f"Input image height {H} is not a multiple of patch height {patch_H}"
+        # assert W % patch_W == 0, f"Input image width {W} is not a multiple of patch width: {patch_W}"
+        
         x = self.proj(x)  # B C H W 通过卷积操作 x before embedding: torch.Size([1, 3, 224, 224]) -> x after embedding: torch.Size([1, 768, 16, 16])
         H, W = x.size(2), x.size(3)
         x = x.flatten(2).transpose(1, 2)  # B HW C torch.Size([1, 256, 768])

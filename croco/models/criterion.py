@@ -8,24 +8,25 @@
 # MAE: https://github.com/facebookresearch/mae
 # --------------------------------------------------------
 
+import math
 import torch
 from info_nce import InfoNCE, info_nce
 from pytorch_msssim import ms_ssim
 
-def unpatchify(x, patch_size=14, channels=3):
+def unpatchify(x, orig_h, orig_w, patch_size=14, channels=3):
     """
     x: (N, L, patch_size**2 *channels)
     imgs: (N, 3, H, W)
     """
-    h = w = int(x.shape[1]**.5)
-    assert h * w == x.shape[1]
+    h = int(orig_h / 14)
+    w = int(orig_w / 14)
     x = x.reshape(shape=(x.shape[0], h, w, patch_size, patch_size, channels))
     x = torch.einsum('nhwpqc->nchpwq', x)
-    imgs = x.reshape(shape=(x.shape[0], channels, h * patch_size, h * patch_size))
+    imgs = x.reshape(shape=(x.shape[0], channels, h * patch_size, w * patch_size))
     return imgs
     
 class MaskedMSE(torch.nn.Module):
-    def __init__(self, norm_pix_loss=False, masked=True, reduction='mean', loss_type='mse'):
+    def __init__(self, args, norm_pix_loss=False, masked=True, reduction='mean', loss_type='mse'):
         """
         Args:
             norm_pix_loss: bool - normalize target
@@ -38,6 +39,7 @@ class MaskedMSE(torch.nn.Module):
         self.masked = masked
         self.reduction = reduction
         self.loss_type = loss_type
+        self.args = args
         
     def forward(self, pred, mask, target):
         """
@@ -66,8 +68,8 @@ class MaskedMSE(torch.nn.Module):
             
         elif self.loss_type == 'ssim':
             # SSIM Loss (이미지로 변환 필요)
-            pred_img = unpatchify(pred)    # [B, 3, 224, 224]
-            target_img = unpatchify(target)
+            pred_img = unpatchify(pred, self.args.resize[0], self.args.resize[1])    # [B, 3, 224, 224]
+            target_img = unpatchify(target, self.args.resize[0], self.args.resize[1])
             
             # MS-SSIM (1 - SSIM, higher is worse)
             ssim_value = ms_ssim(
@@ -100,8 +102,8 @@ class MaskedMSE(torch.nn.Module):
             mse_loss = mse_loss.mean(dim=-1)  # [B, 256]
             
             # SSIM
-            pred_img = unpatchify(pred)
-            target_img = unpatchify(target)
+            pred_img = unpatchify(pred, self.args.resize[0], self.args.resize[1])
+            target_img = unpatchify(target, self.args.resize[0], self.args.resize[1])
             ssim_value = ms_ssim(
                 pred_img, 
                 target_img, 

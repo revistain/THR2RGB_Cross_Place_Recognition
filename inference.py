@@ -112,6 +112,11 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
     * hard_size method for all database images
     * selected test_method for all query images
     '''
+    orig_W = args.resize[0]
+    orig_H = args.resize[1]
+    patch_W = int(orig_W / 14)
+    patch_H = int(orig_H / 14)
+    patch_count = patch_W * patch_H
     try:
         test_method = args.test_method
         model = model.eval()
@@ -123,14 +128,14 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                                             batch_size=args.infer_batch_size, pin_memory=(args.device=="cuda"))
         
             database_features = np.empty((eval_ds.database_num, args.features_dim), dtype="float32")
-            database_patch_features = np.empty((eval_ds.database_num, 16*16, args.features_dim), dtype="float32")
-            database_penultimate_patch_features = np.empty((eval_ds.database_num, 16*16, args.features_dim), dtype="float32")
-            database_attn_map = np.empty((eval_ds.database_num, 16*16), dtype="float32")
+            database_patch_features = np.empty((eval_ds.database_num, patch_count, args.features_dim), dtype="float32")
+            database_penultimate_patch_features = np.empty((eval_ds.database_num, patch_count, args.features_dim), dtype="float32")
+            database_attn_map = np.empty((eval_ds.database_num, patch_count), dtype="float32")
+            
             for inputs, indices, flags in tqdm(database_dataloader, ncols=100):
                 outputs = model(inputs.to(args.device), flags)
-                
                 features = outputs[0].view(-1, args.features_dim)
-                patch_features = outputs[1].view(-1, 16*16, args.features_dim)
+                patch_features = outputs[1].view(-1, patch_W*patch_H, args.features_dim)
                 database_features[indices.numpy(), :] = features.cpu().numpy()
                 database_patch_features[indices.numpy(), :, :] = patch_features.cpu().numpy()
                 database_attn_map[indices.numpy(),:] = outputs[4].cpu().numpy()
@@ -146,14 +151,14 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                                             batch_size=queries_infer_batch_size, pin_memory=(args.device=="cuda"))
 
             queries_features = np.empty((eval_ds.queries_num, args.features_dim), dtype="float32")
-            queries_patch_features = np.empty((eval_ds.queries_num, 16*16, args.features_dim), dtype="float32")
-            queries_attn_map = np.empty((eval_ds.queries_num, 16*16), dtype="float32")
-            queries_penultimate_patch_features = np.empty((eval_ds.queries_num, 16*16, args.features_dim), dtype="float32")
+            queries_patch_features = np.empty((eval_ds.queries_num, patch_count, args.features_dim), dtype="float32")
+            queries_attn_map = np.empty((eval_ds.queries_num, patch_count), dtype="float32")
+            queries_penultimate_patch_features = np.empty((eval_ds.queries_num, patch_count, args.features_dim), dtype="float32")
             for inputs, indices, flags in tqdm(queries_dataloader, ncols=100):
                 outputs = model(inputs.to(args.device), flags)
                 
                 features = outputs[0].view(-1, args.features_dim)
-                patch_features = outputs[1].view(-1, 16*16, args.features_dim)
+                patch_features = outputs[1].view(-1, patch_count, args.features_dim)
                 queries_features[indices.numpy()-eval_ds.database_num, :] = features.cpu().numpy()
                 queries_patch_features[indices.numpy()-eval_ds.database_num, :, :] = patch_features.cpu().numpy()
                 queries_attn_map[indices.numpy()-eval_ds.database_num,:] = outputs[4].cpu().numpy()
@@ -275,8 +280,8 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                     ).float().cuda()  # [B*K, 768]
                     
                     # Reshape: [B, K, 256, 768]
-                    encoded_dbs_features = encoded_dbs_features.reshape(batch_size, RERANKING_TOP_K, 256, -1)
-                    encoded_dbs_attn_map = encoded_dbs_attn_map.reshape(batch_size, RERANKING_TOP_K, 256)
+                    encoded_dbs_features = encoded_dbs_features.reshape(batch_size, RERANKING_TOP_K, patch_count, -1)
+                    encoded_dbs_attn_map = encoded_dbs_attn_map.reshape(batch_size, RERANKING_TOP_K, patch_count)
                     encoded_dbs_descriptor = encoded_dbs_descriptor.reshape(batch_size, RERANKING_TOP_K, -1)
                     
                     # ========== 3. Query Expansion for Cross-Attention ==========
@@ -286,8 +291,8 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                     )
                     
                     # Flatten for decoder: [B*K, 256, 768]
-                    encoded_query_flat = encoded_queries_features_exp.reshape(-1, 256, encoded_queries_features.size(-1))
-                    encoded_dbs_flat = encoded_dbs_features.reshape(-1, 256, encoded_dbs_features.size(-1))
+                    encoded_query_flat = encoded_queries_features_exp.reshape(-1, patch_count, encoded_queries_features.size(-1))
+                    encoded_dbs_flat = encoded_dbs_features.reshape(-1, patch_count, encoded_dbs_features.size(-1))
                     
                     # ========== 4. Decoder Forward (Cross-Attention 추출) ==========
                     # Thermal query가 RGB database를 참조하면서 cross-attention 생성
@@ -318,8 +323,8 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                     ], dim=1)
                     
                     # Flatten: [B*(K+1), 256, 768]
-                    concated_db_patches_flat = concated_db_patches.reshape(-1, 256, concated_db_patches.size(-1))
-                    concated_db_attn_map_flat = concated_db_attn_map.reshape(-1, 256)
+                    concated_db_patches_flat = concated_db_patches.reshape(-1, patch_count, concated_db_patches.size(-1))
+                    concated_db_attn_map_flat = concated_db_attn_map.reshape(-1, patch_count)
                     
                     # ========== 6. Indices 생성 ==========
                     # query_index: [B*K] - 각 query의 위치 (0, K+1, 2*(K+1), ...)

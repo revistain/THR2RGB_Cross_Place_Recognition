@@ -144,12 +144,13 @@ class RerankingModule(nn.Module):
     def __init__(self, args):
         super().__init__()
         self.args = args
+        self.features_dim = args.features_dim
         self.num_classes = 2
         self.decoder_embed_dim = 32
         self.r2_decoder_norm = nn.LayerNorm(self.decoder_embed_dim)
         
-        self.local_head_rgb = nn.Linear(768, 128, bias=True)
-        self.local_head_thermal = nn.Linear(768, 128, bias=True)
+        self.local_head_rgb = nn.Linear(self.features_dim, 128, bias=True)
+        self.local_head_thermal = nn.Linear(self.features_dim, 128, bias=True)
         self.local_head_rgb.weight.data.normal_(mean=0.0, std=0.01)
         self.local_head_thermal.weight.data.normal_(mean=0.0, std=0.01)
         self.local_head_rgb.bias.data.zero_()
@@ -190,12 +191,12 @@ class RerankingModule(nn.Module):
         thermal_order = thermal_order[:, :TOP_PATCH_COUNT]
         rgb_order = torch.argsort(current_target_cls_attn, dim=1, descending=True)
         rgb_order = rgb_order[:, :TOP_PATCH_COUNT]
-        rgb_idx = rgb_order.unsqueeze(2).expand(-1, -1, 768)
-        thermal_idx = thermal_order.unsqueeze(2).expand(-1, -1, 768)
+        rgb_idx = rgb_order.unsqueeze(2).expand(-1, -1, self.features_dim)
+        thermal_idx = thermal_order.unsqueeze(2).expand(-1, -1, self.features_dim)
         selected_rgb_patches = torch.gather(current_target_full, axis=1, index=rgb_idx)
         selected_thermal_patches = torch.gather(paired_thermal_full, axis=1, index=thermal_idx)
         
-        # 2. 선택된 patch를 각각 linear을 태워서 768 -> 128 dimension
+        # 2. 선택된 patch를 각각 linear을 태워서 368 -> 128 dimension
         local_rgb_features = self.local_head_rgb(selected_rgb_patches)
         local_thermal_features = self.local_head_thermal(selected_thermal_patches)
         
@@ -420,7 +421,7 @@ class CrossModalVPR_Net(nn.Module):
         self.args = args
         self.rgb_backbone = get_backbone(pretrained_foundation, foundation_model_path)
         self.thermal_backbone = get_backbone(pretrained_foundation, foundation_model_path)
-        self.output_dim = 768
+        self.output_dim = args.features_dim
         self.use_masked_inference = False
         self.use_only_cross_decdoer = args.use_only_cross_decoder
         self.recon_loss_type = args.recon_loss_type
@@ -439,13 +440,15 @@ class CrossModalVPR_Net(nn.Module):
         
         self.decoder_norm = nn.LayerNorm(self.output_dim)
         self.mask_token = None
+        self.patch_count = int(args.resize[0]/14)*int(args.resize[1]/14)
         self._set_mask_token(self.output_dim)
         self._set_decode_positional_embedding(self.output_dim)
-        self._set_mask_generator(16*16, args.croco_mask_ratio)
+        self._set_mask_generator(self.patch_count, args.croco_mask_ratio)
         self._set_prediction_head(self.output_dim, 14)
         self.reranker = RerankingModule(args)
         
         self.reconstruction_criterion = MaskedMSE(
+            args,
             norm_pix_loss=False,
             masked=True,
             loss_type=self.recon_loss_type
@@ -468,7 +471,7 @@ class CrossModalVPR_Net(nn.Module):
         nn.init.normal_(self.mask_token, std=.02)
         
     def _set_decode_positional_embedding(self, dec_embed_dim):
-        self.decoder_pos_embed = nn.Parameter(torch.zeros(1, 256, dec_embed_dim))
+        self.decoder_pos_embed = nn.Parameter(torch.zeros(1, self.patch_count, dec_embed_dim))
         nn.init.trunc_normal_(self.decoder_pos_embed, std=0.02)
     
     def _set_mask_generator(self, num_patches, mask_ratio):
@@ -490,14 +493,15 @@ class CrossModalVPR_Net(nn.Module):
         """
         try:
             p = 14
-            assert imgs.shape[2] == imgs.shape[3] and imgs.shape[2] % p == 0
+            assert imgs.shape[2] % p == 0 and imgs.shape[3] % p == 0
 
-            h = w = imgs.shape[2] // p
+            h = imgs.shape[2] // p
+            w = imgs.shape[3] // p
             x = imgs.reshape(shape=(imgs.shape[0], 3, h, p, w, p))
             x = torch.einsum('nchpwq->nhwpqc', x)
             x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 3))
         except Exception as e:
-            print(e)
+            print("Error: ", e)
             breakpoint()
         return x
 
@@ -529,8 +533,8 @@ class CrossModalVPR_Net(nn.Module):
         
         # Positional embedding
         pos_tokens = current_backbone.pos_embed[:, 1:, :]
-        pos_embed_grid = pos_tokens.reshape(1, 37, 37, 768).permute(0, 3, 1, 2)
-        pos_embed_resized = F.interpolate(pos_embed_grid, size=(16, 16), mode='bicubic', align_corners=False)
+        pos_embed_grid = pos_tokens.reshape(1, 37, 37, patch_D).permute(0, 3, 1, 2)
+        pos_embed_resized = F.interpolate(pos_embed_grid, size=(int(x.shape[2]/14), int(x.shape[3]/14)), mode='bicubic', align_corners=False)
         pos_embed_final = pos_embed_resized.permute(0, 2, 3, 1).flatten(1, 2)
         image_patch = image_patch + pos_embed_final  # [B, 256, 768]
 
@@ -680,10 +684,11 @@ class CrossModalVPR_Net(nn.Module):
         
         if not self.use_masked_inference:
             # attnetion_dict_keys(['x_norm_clstoken', 'x_norm_patchtokens', 'x_prenorm', 'masks'])
-            B, N, D = patch_tokens.shape
+            B, N, D = patch_tokens.shape # B, # N # D
             
             # 224,224 정방 이미지 입력 가정(patch 2D 복원)
-            H_feat = W_feat = int(math.sqrt(N)) 
+            H_feat = int(x.shape[2]/14)
+            W_feat = int(x.shape[3]/14)
             x_feat = patch_tokens.permute(0, 2, 1).view(B, D, H_feat, W_feat)
             
             # Aggregation -> Descriptor
@@ -695,12 +700,13 @@ class CrossModalVPR_Net(nn.Module):
         return global_desc, patch_tokens, recon_loss, mask_thermal, masked_patch_thermal, cls_attn_map, penultimate_patch
 
     def forward(self, x, flags, paired_rgb=None, return_mask=False, return_masked_patch=False):
+        image_patch_count = get_image_patch_count(x)
         is_rgb = torch.tensor([f == 'rgb' for f in flags], device=x.device)
         final_emb = torch.zeros((x.size(0), self.output_dim), device=x.device)
-        patch_emb = torch.zeros((x.size(0), 256, self.output_dim), device=x.device)
-        penultimate_patch_emb = torch.zeros((x.size(0), 256, self.output_dim), device=x.device)
-        masks = torch.zeros((x.size(0), 256), dtype=torch.bool, device=x.device)
-        cls_attn_map = torch.zeros((x.size(0), 256), device=x.device)
+        patch_emb = torch.zeros((x.size(0), image_patch_count, self.output_dim), device=x.device)
+        penultimate_patch_emb = torch.zeros((x.size(0), image_patch_count, self.output_dim), device=x.device)
+        masks = torch.zeros((x.size(0), image_patch_count), dtype=torch.bool, device=x.device)
+        cls_attn_map = torch.zeros((x.size(0), image_patch_count), device=x.device)
         recon_loss = None
         masked_patch_emb = None
         if is_rgb.any():
@@ -737,7 +743,7 @@ class CrossModalVPR_Net(nn.Module):
         return recon_loss
 
 def get_backbone(pretrained_foundation, foundation_model_path):
-    backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0)
+    backbone = vit_small(patch_size=14,img_size=518,init_values=1,block_chunks=0)
     if pretrained_foundation:
         assert foundation_model_path is not None, "Please specify foundation model path."
         model_dict = backbone.state_dict()
@@ -776,3 +782,11 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 
     emb = torch.cat([emb_sin, emb_cos], dim=2)  # (M, D)
     return emb
+
+cached_patch_count = None
+def get_image_patch_count(x):
+    assert type(x) is torch.Tensor
+    global cached_patch_count
+    if cached_patch_count is None:
+         cached_patch_count = int(x.shape[2] / 14) * int(x.shape[3] / 14)
+    return cached_patch_count
