@@ -346,16 +346,9 @@ class RerankingModule(nn.Module):
                 else:
                     global_query = self.global_query_cache
                 
-                raw_global_score = self.cos(global_query.detach(), current_global.detach())
-                norm_global_score = (raw_global_score + 1) / 2.0
+                global_score = self.cos(global_query.detach(), current_global.detach())
                 local_prob = self.sm(local_score).detach()[:, 1]
-                final_score = norm_global_score.detach() * 0.5 + local_prob * 0.5
-                
-                # [로그 출력 수정 팁]
-                # .item()은 스칼라(값 1개)일 때만 작동합니다. 배치가 1이 아니면 에러날 수 있습니다.
-                # 디버깅용으로 첫 번째 데이터만 보려면 아래처럼 하세요.
-                print(f"global score (norm): {norm_global_score[0].item():.4f}")
-                print(f"local  score (prob): {local_prob[0].item():.4f}")
+                final_score = global_score.detach() * 0.5 + local_prob * 0.5
             else:
                 final_score = local_score
         
@@ -585,6 +578,7 @@ class CrossModalVPR_Net(nn.Module):
         mask_thermal = None
         penultimate_patch = None
         masked_patch_thermal = None
+        thermal_cross_attn_map = None
         cls_attn_map = None
         if modality == 'rgb':
             if self.use_masked_inference:
@@ -642,6 +636,7 @@ class CrossModalVPR_Net(nn.Module):
                 for blk in self.decoder_thermal_blocks:
                     thermal_full_dec = blk(thermal_full_dec, paired_rgb_full)
                 thermal_full_dec = self.decoder_norm(thermal_full_dec)
+                thermal_cross_attn_map = self.decoder_thermal_blocks[-1].cross_attn_weights  # [B*K, 256, 256]
 
                 for blk in self.decoder_rgb_blocks:
                     rgb_full_dec = blk(rgb_full_dec, paired_thermal_full)
@@ -701,7 +696,7 @@ class CrossModalVPR_Net(nn.Module):
             else:
                 global_desc = agg_layer(x_feat) # [B, D]
         
-        return global_desc, patch_tokens, recon_loss, mask_thermal, masked_patch_thermal, cls_attn_map, penultimate_patch
+        return global_desc, patch_tokens, recon_loss, mask_thermal, masked_patch_thermal, cls_attn_map, penultimate_patch, thermal_cross_attn_map
 
     def forward(self, x, flags, paired_rgb=None, return_mask=False, return_masked_patch=False):
         is_rgb = torch.tensor([f == 'rgb' for f in flags], device=x.device)
@@ -710,10 +705,11 @@ class CrossModalVPR_Net(nn.Module):
         penultimate_patch_emb = torch.zeros((x.size(0), 256, self.output_dim), device=x.device)
         masks = torch.zeros((x.size(0), 256), dtype=torch.bool, device=x.device)
         cls_attn_map = torch.zeros((x.size(0), 256), device=x.device)
+        thermal_cross_attn_maps = torch.zeros((x.size(0), 256, 256), device=x.device)
         recon_loss = None
         masked_patch_emb = None
         if is_rgb.any():
-            global_emb, patch_rgb, _, _, _, cls_rgb_attn_map, penultimate_patch_rgb = self.forward_model(x[is_rgb], modality='rgb')
+            global_emb, patch_rgb, _, _, _, cls_rgb_attn_map, penultimate_patch_rgb, _ = self.forward_model(x[is_rgb], modality='rgb')
             if global_emb is not None: final_emb[is_rgb] = global_emb
             patch_emb[is_rgb] = patch_rgb
             if cls_rgb_attn_map is not None:
@@ -721,7 +717,11 @@ class CrossModalVPR_Net(nn.Module):
             if penultimate_patch_rgb is not None:
                 penultimate_patch_emb[is_rgb] = penultimate_patch_rgb
         if (~is_rgb).any():
-            global_emb, patch_thermal, recon_loss, mask, masked_patch_thermal, cls_thermal_attn_map, penultimate_patch_thermal = self.forward_model(x[~is_rgb], modality='thermal', paired_rgb=paired_rgb, return_masked_patch=return_masked_patch)
+            global_emb, patch_thermal, recon_loss, \
+                mask, masked_patch_thermal, \
+                cls_thermal_attn_map, \
+                penultimate_patch_thermal, \
+                thermal_cross_attn_map = self.forward_model(x[~is_rgb], modality='thermal', paired_rgb=paired_rgb, return_masked_patch=return_masked_patch)
             if global_emb is not None: final_emb[~is_rgb] = global_emb
             patch_emb[~is_rgb] = patch_thermal
             if return_mask: masks[~is_rgb] = mask
@@ -731,11 +731,13 @@ class CrossModalVPR_Net(nn.Module):
                 cls_attn_map[~is_rgb] = cls_thermal_attn_map
             if penultimate_patch_thermal is not None:
                 penultimate_patch_emb[~is_rgb] = penultimate_patch_thermal
+            if thermal_cross_attn_map is not None:
+                thermal_cross_attn_maps[~is_rgb] = thermal_cross_attn_map
 
         if return_masked_patch: # 무조건 masked_patch_emb가 제일 뒤에 오게
-            return final_emb, patch_emb, recon_loss, masks, cls_attn_map, penultimate_patch_emb, masked_patch_emb
+            return final_emb, patch_emb, recon_loss, masks, cls_attn_map, penultimate_patch_emb, thermal_cross_attn_maps, masked_patch_emb
         else:
-            return final_emb, patch_emb, recon_loss, masks, cls_attn_map, penultimate_patch_emb
+            return final_emb, patch_emb, recon_loss, masks, cls_attn_map, penultimate_patch_emb, thermal_cross_attn_maps
 
     def calculate_recon_loss(self, pred, mask, target, confidence_map=None):
         recon_loss = self.reconstruction_criterion(

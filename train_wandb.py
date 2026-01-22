@@ -211,7 +211,8 @@ if __name__ == "__main__":
 
                 global_features, patch_embedding, \
                 recon_loss, masks, cls_attn_map, \
-                penultimate_patch_embedding, masked_patch_embedding = model(
+                penultimate_patch_embedding, masked_patch_embedding, \
+                thermal_cross_attn_map = model(
                     images.to(args.device),
                     flags=flags,
                     paired_rgb=aligned_rgbs.to(args.device),
@@ -247,17 +248,30 @@ if __name__ == "__main__":
                         rerank_patch_embedding = patch_embedding
 
                     if args.r2loss_div < 0.001:
-                        rerank_loss = reranker(rerank_patch_embedding.detach(), cls_attn_map.detach(),
-                                               queries_indexes, positives_indexes, negatives_indexes,
-                                               query_features, positive_features, negative_features)
-                        overall_loss += (triplet_loss + rerank_loss)
+                        # Decoder까지 학습 (encoder는 차단)
+                        rerank_loss = reranker(
+                            rerank_patch_embedding.detach(),
+                            cls_attn_map.detach(),
+                            queries_indexes, positives_indexes, negatives_indexes,
+                            query_features.detach(),  # triplet loss와 분리
+                            positive_features.detach(),
+                            negative_features.detach(),
+                            cross_attn_matrix=thermal_cross_attn_map
+                        )
+                        overall_loss += (triplet_loss.detach() + rerank_loss)  # triplet loss는 별도 학습
                         rerank_loss_sum += rerank_loss
                     else:
-                        rerank_loss = reranker(rerank_patch_embedding.detach(), cls_attn_map.detach(),
-                                               queries_indexes, positives_indexes, negatives_indexes,
-                                               query_features, positive_features, negative_features)
-                        overall_loss += (triplet_loss + rerank_loss / args.r2loss_div)
-                        rerank_loss_sum += (rerank_loss / args.r2loss_div)
+                        # 동일하게 수정
+                        rerank_loss = reranker(
+                            rerank_patch_embedding.detach(),
+                            cls_attn_map.detach(),
+                            queries_indexes, positives_indexes, negatives_indexes,
+                            query_features.detach(),
+                            positive_features.detach(),
+                            negative_features.detach(),
+                            cross_attn_matrix=thermal_cross_attn_map
+                        )
+                        overall_loss += (triplet_loss.detach() + rerank_loss / args.r2loss_div)
                     
                     
                 # train_batch_size: 4, arg.negs_num_per_query: 10
