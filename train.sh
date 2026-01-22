@@ -1,6 +1,6 @@
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
-CUDA_VISIBLE_DEVICES=5 \
+CUDA_VISIBLE_DEVICES=4 \
 python3 train_wandb.py \
     --save_dir './logs' \
     --features_dim 768 \
@@ -9,7 +9,7 @@ python3 train_wandb.py \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 4 \
     --num_trainable_blocks_THERMAL 4 \
-    --comment "R2formerWithCroco-0.8-alpha10.0-decDepth12-detach-withCLS-reranking" \
+    --comment "R2formerWithCroco-0.8-alpha10.0-decDepth12-CLSVPR-reranking(ScoreNorm0.5)" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \

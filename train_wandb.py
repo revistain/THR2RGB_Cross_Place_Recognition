@@ -173,6 +173,7 @@ if __name__ == "__main__":
             triplets_ds.is_inference = True
             print("- Computing triplets...")
             triplets_ds.compute_triplets(args, model)
+            torch.cuda.empty_cache()
             triplets_ds.is_inference = False
 
             logging.debug("Finish computing triplets")
@@ -283,6 +284,7 @@ if __name__ == "__main__":
                 
                 global_step += 1
 
+                del patch_embedding, masks, cls_attn_map, penultimate_patch_embedding, masked_patch_embedding
                 del overall_loss, triplet_loss, recon_loss
                 if args.use_fast_track: break
             

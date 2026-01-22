@@ -345,8 +345,17 @@ class RerankingModule(nn.Module):
                     global_query = self.global_query_cache.expand(current_global.shape[0], -1)
                 else:
                     global_query = self.global_query_cache
-                global_score = self.cos(global_query.detach(), current_global.detach())
-                final_score = global_score.detach() * 0.5 + self.sm(local_score).detach()[:, 1] * 0.5
+                
+                raw_global_score = self.cos(global_query.detach(), current_global.detach())
+                norm_global_score = (raw_global_score + 1) / 2.0
+                local_prob = self.sm(local_score).detach()[:, 1]
+                final_score = norm_global_score.detach() * 0.5 + local_prob * 0.5
+                
+                # [로그 출력 수정 팁]
+                # .item()은 스칼라(값 1개)일 때만 작동합니다. 배치가 1이 아니면 에러날 수 있습니다.
+                # 디버깅용으로 첫 번째 데이터만 보려면 아래처럼 하세요.
+                print(f"global score (norm): {norm_global_score[0].item():.4f}")
+                print(f"local  score (prob): {local_prob[0].item():.4f}")
             else:
                 final_score = local_score
         
