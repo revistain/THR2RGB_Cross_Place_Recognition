@@ -14,9 +14,6 @@ import os
 from sklearn.cluster import KMeans
 import torchvision.models as models
 import wandb
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data.distributed import DistributedSampler
 
 from Parser import Parser
 import commons
@@ -157,8 +154,10 @@ if __name__ == "__main__":
     else:
         best_r1 = start_epoch_num = not_improved_num = 0
 
-    bundle_flags =  ['thermal'] + ['rgb'] * (1 + args.negs_num_per_query)
-    num_bundle_flags = len(bundle_flags)
+    thermal_flag = torch.zeros(1, dtype=torch.long)
+    rgb_flags = torch.ones(1 + args.negs_num_per_query, dtype=torch.long)
+    bundle_flags = torch.cat([thermal_flag, rgb_flags]) # [0, 1, 1, ..., 1]
+    flags = bundle_flags.repeat(args.train_batch_size)
 
     '''Training'''
     global_step = 0
@@ -199,9 +198,6 @@ if __name__ == "__main__":
 
             print("- Training...")
             for images, triplets_local_indexes, _, aligned_rgbs in tqdm(triplets_dl, ncols=100, desc=f"Epoch {epoch_num:02d}"):
-                curr_batch_len = len(images) // num_bundle_flags
-                flags = bundle_flags * curr_batch_len
-                
                 ### model을 통해, triplet의 descriptor와 patch embedding 추출
                 if args.use_pos_as_aligned_rgb:
                     assert images.size(0) % args.train_batch_size == 0
@@ -265,6 +261,10 @@ if __name__ == "__main__":
                     
                 # train_batch_size: 4, arg.negs_num_per_query: 10
                 recon_weight = args.recon_weight
+                if isinstance(recon_loss, torch.Tensor) and recon_loss.ndim > 0:
+                    recon_loss = recon_loss.mean()
+
+                overall_loss += (recon_loss * recon_weight)
                 overall_loss += (recon_loss * recon_weight)
                 overall_loss /= (args.train_batch_size * args.negs_num_per_query)
 

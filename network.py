@@ -700,13 +700,12 @@ class CrossModalVPR_Net(nn.Module):
         return global_desc, patch_tokens, recon_loss, mask_thermal, masked_patch_thermal, cls_attn_map, penultimate_patch
 
     def forward(self, x, flags, paired_rgb=None, return_mask=False, return_masked_patch=False):
-        image_patch_count = get_image_patch_count(x)
-        is_rgb = torch.tensor([f == 'rgb' for f in flags], device=x.device)
+        is_rgb = (flags == 1)
         final_emb = torch.zeros((x.size(0), self.output_dim), device=x.device)
-        patch_emb = torch.zeros((x.size(0), image_patch_count, self.output_dim), device=x.device)
-        penultimate_patch_emb = torch.zeros((x.size(0), image_patch_count, self.output_dim), device=x.device)
-        masks = torch.zeros((x.size(0), image_patch_count), dtype=torch.bool, device=x.device)
-        cls_attn_map = torch.zeros((x.size(0), image_patch_count), device=x.device)
+        patch_emb = torch.zeros((x.size(0), self.patch_count, self.output_dim), device=x.device)
+        penultimate_patch_emb = torch.zeros((x.size(0), self.patch_count, self.output_dim), device=x.device)
+        masks = torch.zeros((x.size(0), self.patch_count), dtype=torch.bool, device=x.device)
+        cls_attn_map = torch.zeros((x.size(0), self.patch_count), device=x.device)
         recon_loss = None
         masked_patch_emb = None
         if is_rgb.any():
