@@ -245,18 +245,19 @@ if __name__ == "__main__":
                     else:
                         rerank_patch_embedding = patch_embedding
 
-                    if args.r2loss_div < 0.001:
-                        rerank_loss = reranker(rerank_patch_embedding.detach(), cls_attn_map.detach(),
-                                               queries_indexes, positives_indexes, negatives_indexes,
-                                               query_features, positive_features, negative_features)
-                        overall_loss += (triplet_loss + rerank_loss)
-                        rerank_loss_sum += rerank_loss
-                    else:
-                        rerank_loss = reranker(rerank_patch_embedding.detach(), cls_attn_map.detach(),
-                                               queries_indexes, positives_indexes, negatives_indexes,
-                                               query_features, positive_features, negative_features)
-                        overall_loss += (triplet_loss + rerank_loss / args.r2loss_div)
-                        rerank_loss_sum += (rerank_loss / args.r2loss_div)
+                    if args.use_reranking:
+                        if args.r2loss_div < 0.001:
+                            rerank_loss = reranker(rerank_patch_embedding.detach(), cls_attn_map.detach(),
+                                                queries_indexes, positives_indexes, negatives_indexes,
+                                                query_features, positive_features, negative_features)
+                            overall_loss += (triplet_loss + rerank_loss)
+                            rerank_loss_sum += rerank_loss
+                        else:
+                            rerank_loss = reranker(rerank_patch_embedding.detach(), cls_attn_map.detach(),
+                                                queries_indexes, positives_indexes, negatives_indexes,
+                                                query_features, positive_features, negative_features)
+                            overall_loss += (triplet_loss + rerank_loss / args.r2loss_div)
+                            rerank_loss_sum += (rerank_loss / args.r2loss_div)
                     
                     
                 # train_batch_size: 4, arg.negs_num_per_query: 10
@@ -281,14 +282,14 @@ if __name__ == "__main__":
                 wandb.log({
                     "train/overall_loss": overall_loss,
                     "train/triplet_loss(scaled)": triplet_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query),
-                    "train/reranking_loss(scaled)": rerank_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query),
+                    "train/reranking_loss(scaled)": rerank_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query) if isinstance(rerank_loss_sum, torch.Tensor) else 0,
                     "train/recon_loss(scaled)": (recon_loss * recon_weight).item() / (args.train_batch_size * args.negs_num_per_query) if isinstance(recon_loss, torch.Tensor) else 0,
                 }, step=global_step)
                 
                 global_step += 1
                 
                 del patch_embedding, masks, cls_attn_map, penultimate_patch_embedding, masked_patch_embedding
-                del overall_loss, triplet_loss, recon_loss, rerank_loss
+                del overall_loss, triplet_loss, recon_loss
                 if args.use_fast_track: break
             
             logging.info(f"Epoch[{epoch_num:02d}]({loop_num + 1}/{loops_num}): " +

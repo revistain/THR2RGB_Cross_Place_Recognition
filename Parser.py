@@ -17,7 +17,7 @@ class Parser():
         self.parser.add_argument("--margin", type=float, default=0.1, help="_")
         self.parser.add_argument("--lr", type=float, default=0.00001, help="_")
         self.parser.add_argument("--epochs_num", type=int, default=50, help="number of epochs to train for")
-        self.parser.add_argument("--train_batch_size", type=int, default=4,
+        self.parser.add_argument("--train_batch_size", type=int, default=1,
                             help="Batch size for train")
         self.parser.add_argument("--patience", type=int, default=5)
         
@@ -47,7 +47,7 @@ class Parser():
         self.parser.add_argument('--fuse', type=str, default=None, choices=[None, 'cat', 'add'])
         
         ### Model settings
-        self.parser.add_argument('--resize', type=int, default=[644, 476], nargs=2, help="Resizing shape for images (HxW) to be fed into the network.")
+        self.parser.add_argument('--resize', type=int, default=[518, 518], nargs=2, help="Resizing shape for images (HxW) to be fed into the network.")
         self.parser.add_argument("--features_dim", type=int, default=None, help="_")
         self.parser.add_argument("--foundation_model_path", type=str, default=None, help="_")
 
