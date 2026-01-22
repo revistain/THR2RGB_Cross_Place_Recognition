@@ -252,7 +252,7 @@ if __name__ == "__main__":
                         overall_loss += (triplet_loss + rerank_loss)
                         rerank_loss_sum += rerank_loss
                     else:
-                        rerank_loss = reranker(rerank_patch_embedding, cls_attn_map,
+                        rerank_loss = reranker(rerank_patch_embedding.detach(), cls_attn_map.detach(),
                                                queries_indexes, positives_indexes, negatives_indexes,
                                                query_features, positive_features, negative_features)
                         overall_loss += (triplet_loss + rerank_loss / args.r2loss_div)
