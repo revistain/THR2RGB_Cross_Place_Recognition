@@ -179,8 +179,11 @@ class RerankingModule(nn.Module):
         self.cos = nn.CosineSimilarity(dim=1)
         self.sm = torch.nn.Softmax(dim=1)
     
+    # 1. decoder에 masking안하고 통과
+    # 2. attention map 기반 각각, token 100개 선택
+    # 3. cross attn matrix 기반 top 5 선택
     def _process_pair(self, paired_thermal_full, paired_thermal_cls_attn, 
-                    current_target_full, current_target_cls_attn, current_global=None):
+                    current_target_full, current_target_cls_attn, current_global=None, cross_attn_matrix=None):
         """공통 처리 로직"""
         TOP_PATCH_COUNT = 100
         thermal_order = torch.argsort(paired_thermal_cls_attn, dim=1, descending=True)
@@ -226,50 +229,80 @@ class RerankingModule(nn.Module):
         rgb_rerank_input = torch.cat([x_xy_rgb, rgb_att_norm, local_rgb_features], dim=2)
         thermal_rerank_input = torch.cat([x_xy_thermal, thermal_att_norm, local_thermal_features], dim=2)
         
-        # 4. correlation matrix 만들기 (100x100x7)
+        # 4. correlation matrix 만들기
         B = rgb_rerank_input.shape[0]
         N = rgb_rerank_input.shape[1]
         rgb_rerank_token = F.normalize(rgb_rerank_input[:, :, 3:], p=2, dim=2)
         thermal_rerank_token = F.normalize(thermal_rerank_input[:, :, 3:], p=2, dim=2)
         rgb_coordinate = rgb_rerank_input[:, :, :3].detach().clamp(min=0, max=1)
         thermal_coordinate = thermal_rerank_input[:, :, :3].detach().clamp(min=0, max=1)
-        correlation = torch.matmul(rgb_rerank_token, thermal_rerank_token.permute((0, 2, 1)))
+
+        # ========== Cross-Attention Matrix 활용 ==========
+        if cross_attn_matrix is not None:
+            # cross_attn_matrix: [B, 256, 256] - (thermal query, rgb database)
+            # Top-100 patches에 해당하는 부분만 추출
+            # thermal_order: [B, 100], rgb_order: [B, 100]
+            
+            # Advanced indexing으로 [B, 100, 100] 추출
+            batch_indices = torch.arange(B, device=cross_attn_matrix.device).view(B, 1, 1)
+            thermal_indices = thermal_order.unsqueeze(2)  # [B, 100, 1]
+            rgb_indices = rgb_order.unsqueeze(1)  # [B, 1, 100]
+            
+            # [B, 100, 100] - thermal top-100 x rgb top-100
+            correlation = cross_attn_matrix[
+                batch_indices.expand(-1, TOP_PATCH_COUNT, TOP_PATCH_COUNT),
+                thermal_indices.expand(-1, -1, TOP_PATCH_COUNT),
+                rgb_indices.expand(-1, TOP_PATCH_COUNT, -1)
+            ]
+        else:
+            # Fallback: 기존 cosine similarity 방식
+            correlation = torch.matmul(rgb_rerank_token, thermal_rerank_token.permute((0, 2, 1)))
+        
+        # ========== 이하 동일 ==========
         xy_matrix = torch.cat(
             [rgb_coordinate.unsqueeze(2).repeat(1, 1, thermal_rerank_token.shape[1], 1),
             thermal_coordinate.unsqueeze(1).repeat(1, rgb_rerank_token.shape[1], 1, 1),
             correlation.unsqueeze(3)],
             dim=3)
         
-        #################################
-        # correlation: [B, 100, 100, 7] #
+        # correlation: [B, 100, 100, 7]
         order_q = torch.argsort(correlation.unsqueeze(3), dim=2, descending=True).repeat(1, 1, 1, 7)
         order_k = torch.argsort(correlation.unsqueeze(3), dim=1, descending=True).repeat(1, 1, 1, 7)
-        select_q = torch.gather(input=xy_matrix, index=order_q[:, :, :self.num_corr, :], dim=2) # torch.Size([4, 100, 5, 7])
-        select_k = torch.gather(input=xy_matrix, index=order_k[:, :self.num_corr, :, :], dim=1) # torch.Size([4, 5, 100, 7])
+        select_q = torch.gather(input=xy_matrix, index=order_q[:, :, :self.num_corr, :], dim=2)
+        select_k = torch.gather(input=xy_matrix, index=order_k[:, :self.num_corr, :, :], dim=1)
         select_k_copy = select_k.clone()
-        select_k_copy[:,:,:,:6] = torch.flip(select_k[:,:,:,:6].reshape(select_k.shape[0], select_k.shape[1],select_k.shape[2],2,3),dims=(3,)).reshape(select_k.shape[0], select_k.shape[1],select_k.shape[2],6)
+        select_k_copy[:,:,:,:6] = torch.flip(
+            select_k[:,:,:,:6].reshape(select_k.shape[0], select_k.shape[1], select_k.shape[2], 2, 3),
+            dims=(3,)
+        ).reshape(select_k.shape[0], select_k.shape[1], select_k.shape[2], 6)
 
         # Random Sample Selection
+        RANDOM_SAMPLE = 0
         if self.args.r2_add_random_patch:
             RANDOM_SAMPLE = 5
             select_q_random_index = random.sample(range(self.num_corr, correlation.shape[2]), RANDOM_SAMPLE)
             select_k_random_index = random.sample(range(self.num_corr, correlation.shape[1]), RANDOM_SAMPLE)
             
-            select_q_random = torch.gather(input=xy_matrix, index=order_q[:, :, select_q_random_index, :], dim=2) # torch.Size([4, 100, 5, 7])
-            select_k_random = torch.gather(input=xy_matrix, index=order_k[:, select_k_random_index, :, :], dim=1) # torch.Size([4, 5, 100, 7])
+            select_q_random = torch.gather(input=xy_matrix, index=order_q[:, :, select_q_random_index, :], dim=2)
+            select_k_random = torch.gather(input=xy_matrix, index=order_k[:, select_k_random_index, :, :], dim=1)
             
-            select_q = torch.cat([select_q, select_q_random], axis=2) # torch.Size([4, 100, 10, 7])
-            select_k = torch.cat([select_k, select_k_random], axis=1) # torch.Size([4, 10, 100, 7])
+            select_q = torch.cat([select_q, select_q_random], axis=2)
+            select_k = torch.cat([select_k, select_k_random], axis=1)
         
-        select = torch.cat([select_q, select_k.permute((0, 2, 1, 3))], dim=1) # torch.Size([4, 200, 10, 7])
-        select_copy = torch.cat([select_q, select_k.permute((0, 2, 1, 3))], dim=1) # torch.Size([4, 200, 10, 7])
-        N_select = select.shape[1] # 200
+        select = torch.cat([select_q, select_k.permute((0, 2, 1, 3))], dim=1)
+        select_copy = torch.cat([select_q, select_k.permute((0, 2, 1, 3))], dim=1)
+        N_select = select.shape[1]
         
-        ###########
         # Linear1
-        pair_matrix = self.pair_head(select.reshape(B * N_select * (self.num_corr+RANDOM_SAMPLE), 7)).reshape(B * N_select, (self.num_corr+RANDOM_SAMPLE), self.decoder_embed_dim)
-        pair_matrix += get_2d_sincos_pos_embed_from_grid(self.decoder_embed_dim, select_copy.reshape(B * N_select, (self.num_corr+RANDOM_SAMPLE), 7)[:,:,3:5])
-        concatedTop5Pairs = torch.cat([self.cls_token_2.repeat(B*N_select, 1, 1), pair_matrix], dim=1)
+        pair_matrix = self.pair_head(
+            select.reshape(B * N_select * (self.num_corr + RANDOM_SAMPLE), 7)
+        ).reshape(B * N_select, (self.num_corr + RANDOM_SAMPLE), self.decoder_embed_dim)
+        
+        pair_matrix += get_2d_sincos_pos_embed_from_grid(
+            self.decoder_embed_dim,
+            select_copy.reshape(B * N_select, (self.num_corr + RANDOM_SAMPLE), 7)[:, :, 3:5]
+        )
+        concatedTop5Pairs = torch.cat([self.cls_token_2.repeat(B * N_select, 1, 1), pair_matrix], dim=1)
         
         # Transformer1
         for blk in self.blocks_2:
@@ -277,8 +310,14 @@ class RerankingModule(nn.Module):
         concatedTop5Pairs = self.r2_decoder_norm(concatedTop5Pairs)
 
         # Linear2
-        concatedTop5Pairs = self.pair_head_2(concatedTop5Pairs[:,0,:].reshape(B * N_select, self.decoder_embed_dim)).reshape(B, N_select, self.decoder_embed_dim)
-        concatedTop5Pairs = concatedTop5Pairs.reshape(B, N_select, self.decoder_embed_dim) + get_2d_sincos_pos_embed_from_grid(self.decoder_embed_dim, select_copy[:,:,0,0:2])
+        concatedTop5Pairs = self.pair_head_2(
+            concatedTop5Pairs[:, 0, :].reshape(B * N_select, self.decoder_embed_dim)
+        ).reshape(B, N_select, self.decoder_embed_dim)
+        
+        concatedTop5Pairs = concatedTop5Pairs + get_2d_sincos_pos_embed_from_grid(
+            self.decoder_embed_dim,
+            select_copy[:, :, 0, 0:2]
+        )
         concatedTop5Pairs = torch.cat([self.cls_token.repeat(B, 1, 1), concatedTop5Pairs], dim=1)
 
         # Transformer2
@@ -291,7 +330,6 @@ class RerankingModule(nn.Module):
             local_score = self.decoder_pred(concatedTop5Pairs[:, 0]).reshape(-1)
             local_score = torch.sigmoid(local_score)
             if not self.training:
-                # global_query_cache를 current_global shape에 맞게 broadcast
                 if self.global_query_cache.shape[0] == 1:
                     global_query = self.global_query_cache.expand(current_global.shape[0], -1)
                 else:
@@ -303,13 +341,12 @@ class RerankingModule(nn.Module):
         elif self.num_classes == 2:
             local_score = self.decoder_pred(concatedTop5Pairs[:, 0])
             if not self.training:
-                # global_query_cache를 current_global shape에 맞게 broadcast
                 if self.global_query_cache.shape[0] == 1:
                     global_query = self.global_query_cache.expand(current_global.shape[0], -1)
                 else:
                     global_query = self.global_query_cache
                 global_score = self.cos(global_query.detach(), current_global.detach())
-                final_score = global_score.detach() * 0.5 + self.sm(local_score).detach()[:,1] * 0.5
+                final_score = global_score.detach() * 0.5 + self.sm(local_score).detach()[:, 1] * 0.5
             else:
                 final_score = local_score
         
@@ -317,7 +354,8 @@ class RerankingModule(nn.Module):
     
     def forward(self, patch_embeddings, cls_attn_map,
                 query_index, pos_index, neg_index,
-                global_query=None, global_pos=None, global_neg=None):
+                global_query=None, global_pos=None, global_neg=None,
+                cross_attn_matrix=None):
         '''
         patch_embeddings: [48, 256, 768]
         cls_attn_map: [48, 256]
@@ -377,7 +415,8 @@ class RerankingModule(nn.Module):
 
             local_score = self._process_pair(
                 paired_thermal_full, paired_thermal_cls_attn,
-                target_pos_full, target_pos_cls_attn, global_pos
+                target_pos_full, target_pos_cls_attn, global_pos,
+                cross_attn_matrix=cross_attn_matrix
             )
                 
             return local_score
@@ -500,6 +539,8 @@ class CrossModalVPR_Net(nn.Module):
         
         image_patch = current_backbone.patch_embed(x)
         patch_B, patch_N, patch_D = image_patch.shape  # N=256, D=768
+
+        cls_token = current_backbone.cls_token.expand(patch_B, -1, -1)
         
         # 2. positional embedding도 구해서 더해준다.
         pos_tokens = current_backbone.pos_embed[:, 1:, :]
@@ -507,17 +548,21 @@ class CrossModalVPR_Net(nn.Module):
         pos_embed_resized = F.interpolate(pos_embed_grid, size=(16, 16), mode='bicubic', align_corners=False)
         pos_embed_final = pos_embed_resized.permute(0, 2, 3, 1).flatten(1, 2) # (BCHW) => (BNC)
         image_patch = image_patch + pos_embed_final  # [B, 256, 768]
+
+        image_with_cls = torch.cat([cls_token, image_patch], dim=1)
         
         # 3. patch embedding을 masking 해준다.
-        mask = self.mask_generator(image_patch)
-        patch_visible = image_patch[~mask].reshape(patch_B, -1, patch_D)
+        mask = self.mask_generator(image_patch)  # [B, N]
+        cls_mask = torch.zeros(patch_B, 1, dtype=torch.bool, device=mask.device)
+        full_mask = torch.cat([cls_mask, mask], dim=1)  # [B, N+1]
         
-        # 4. unmasked된 patch들만 DINOv2 통과시키기
+        patch_visible = image_with_cls[~full_mask].reshape(patch_B, -1, patch_D)
+        
+        # 6. Encoder 통과
         for blk in current_backbone.blocks:
             patch_visible = blk(patch_visible)
         patch_visible = current_backbone.norm(patch_visible)
-        # attn_map.shape -> [4, 12, 52, 52]
-
+        
         return patch_visible, mask, patch_B, patch_N, patch_D
 
     def croco_encoded_mask_expension(self, thermal_visible, mask, patch_B, patch_N, patch_D):

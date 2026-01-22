@@ -19,9 +19,6 @@ import logging
 # ===== 저장 =====
 from PIL import Image
 
-save_dir = './debug_alignment'
-os.makedirs(save_dir, exist_ok=True)
-
 # Denormalize 함수
 def denormalize(tensor):
     """
