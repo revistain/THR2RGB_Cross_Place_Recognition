@@ -250,6 +250,7 @@ class RerankingModule(nn.Module):
         select_k_copy[:,:,:,:6] = torch.flip(select_k[:,:,:,:6].reshape(select_k.shape[0], select_k.shape[1],select_k.shape[2],2,3),dims=(3,)).reshape(select_k.shape[0], select_k.shape[1],select_k.shape[2],6)
 
         # Random Sample Selection
+        RANDOM_SAMPLE = 0
         if self.args.r2_add_random_patch:
             RANDOM_SAMPLE = 5
             select_q_random_index = random.sample(range(self.num_corr, correlation.shape[2]), RANDOM_SAMPLE)
@@ -487,38 +488,48 @@ class CrossModalVPR_Net(nn.Module):
         return imgs
     
     def croco_like_encoder(self, x, modality='thermal'):
-        # thermal       : torch.Size([4, 3, 224, 224])
-        # paired_rgb   : torch.Size([4, 3, 224, 224])
-        
-        # 1. 먼저 thermal의 patch_embedding한 걸 가져온다
         if modality == 'thermal':
             current_backbone = self.thermal_backbone
         elif modality == 'rgb':
             current_backbone = self.rgb_backbone
         else:
-            raise ValueError(f"Wrong Modality: {modality} in function::croco_like_encoder")
+            raise ValueError(f"Wrong Modality: {modality}")
         
         image_patch = current_backbone.patch_embed(x)
         patch_B, patch_N, patch_D = image_patch.shape  # N=256, D=768
+
+        cls_token = current_backbone.cls_token.expand(patch_B, -1, -1)  # [B, 1, 768]
         
-        # 2. positional embedding도 구해서 더해준다.
+        # Positional embedding
         pos_tokens = current_backbone.pos_embed[:, 1:, :]
-        pos_embed_grid = pos_tokens.reshape(1, 37, 37, 768).permute(0, 3, 1, 2) # (BHWC) => (BCHW)
+        pos_embed_grid = pos_tokens.reshape(1, 37, 37, 768).permute(0, 3, 1, 2)
         pos_embed_resized = F.interpolate(pos_embed_grid, size=(16, 16), mode='bicubic', align_corners=False)
-        pos_embed_final = pos_embed_resized.permute(0, 2, 3, 1).flatten(1, 2) # (BCHW) => (BNC)
+        pos_embed_final = pos_embed_resized.permute(0, 2, 3, 1).flatten(1, 2)
         image_patch = image_patch + pos_embed_final  # [B, 256, 768]
+
+        # CLS positional embedding 추가
+        cls_pos_embed = current_backbone.pos_embed[:, :1, :]  # [1, 1, 768]
+        cls_token = cls_token + cls_pos_embed  # [B, 1, 768]
+
+        image_with_cls = torch.cat([cls_token, image_patch], dim=1)  # [B, 257, 768]
         
-        # 3. patch embedding을 masking 해준다.
-        mask = self.mask_generator(image_patch)
-        patch_visible = image_patch[~mask].reshape(patch_B, -1, patch_D)
+        # Masking (CLS는 항상 visible)
+        mask = self.mask_generator(image_patch)  # [B, 256]
+        cls_mask = torch.zeros(patch_B, 1, dtype=torch.bool, device=mask.device)
+        full_mask = torch.cat([cls_mask, mask], dim=1)  # [B, 257]
         
-        # 4. unmasked된 patch들만 DINOv2 통과시키기
+        patch_visible = image_with_cls[~full_mask].reshape(patch_B, -1, patch_D)  # [B, ~101, 768]
+        
+        # Encoder 통과
         for blk in current_backbone.blocks:
             patch_visible = blk(patch_visible)
         patch_visible = current_backbone.norm(patch_visible)
-        # attn_map.shape -> [4, 12, 52, 52]
-
-        return patch_visible, mask, patch_B, patch_N, patch_D
+        
+        # ========== CLS 분리 ==========
+        cls_visible = patch_visible[:, 0:1, :]  # [B, 1, 768]
+        patch_only_visible = patch_visible[:, 1:, :]  # [B, ~100, 768]
+        
+        return patch_only_visible, mask, patch_B, patch_N, patch_D, cls_visible
 
     def croco_encoded_mask_expension(self, thermal_visible, mask, patch_B, patch_N, patch_D):
         # CROCO로 masking된 부분 mask token으로 채워넣기
@@ -544,10 +555,14 @@ class CrossModalVPR_Net(nn.Module):
                 # rgb_full = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
                 # out = {"x_norm_patchtokens": rgb_full}
 
-                rgb_visible, mask_rgb, patch_B, patch_N, patch_D = self.croco_like_encoder(x, modality='rgb')
+                rgb_visible, mask_rgb, patch_B, patch_N, patch_D, rgb_cls = self.croco_like_encoder(x, modality='rgb')
                 rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B, patch_N, patch_D)
                 rgb_full_dec = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
-                out = {"x_norm_patchtokens": rgb_full_dec}
+                out = {
+                    "x_norm_patchtokens": rgb_full_dec,
+                    "x_norm_clstoken": rgb_cls,
+                }
+                
             else:
                 out = self.rgb_backbone(x, return_attention=True)
                 cls_attn_map = out["cls_attention"][:, :, 1:].sum(dim=1)
@@ -558,8 +573,8 @@ class CrossModalVPR_Net(nn.Module):
             if self.training:
                 # 1-4. masked thermal encoder
                 # FIXME: 같은 곳을 masking해야하나? 일단 성능 잘 나오니...
-                thermal_visible, mask_thermal, patch_B, patch_N, patch_D = self.croco_like_encoder(x, modality='thermal')
-                rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb = self.croco_like_encoder(paired_rgb, modality='rgb')
+                thermal_visible, mask_thermal, patch_B, patch_N, patch_D, thermal_cls = self.croco_like_encoder(x, modality='thermal')
+                rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb, rgb_cls = self.croco_like_encoder(paired_rgb, modality='rgb')
 
                 # 5. paired RGB도 feature tokens 추출하기
                 paired_thermal = self.thermal_backbone(x, return_attention=True)
@@ -613,14 +628,17 @@ class CrossModalVPR_Net(nn.Module):
                 # NOTE: 부르는 곳에 no_grad 호출하기
                 if self.use_masked_inference:
                     # 1-4. masked thermal encoder
-                    thermal_visible, mask_thermal, patch_B, patch_N, patch_D = self.croco_like_encoder(x, modality='thermal')
+                    thermal_visible, mask_thermal, patch_B, patch_N, patch_D, thermal_cls = self.croco_like_encoder(x, modality='thermal')
                     
                     # 5. Mask token expansion
                     thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
                     
                     # 6. Decoder Positional Encoding
                     thermal_full_dec = thermal_full + self.decoder_pos_embed  # [B, 256, 768]
-                    out = {"x_norm_patchtokens": thermal_full_dec}
+                    out = {
+                        "x_norm_patchtokens": thermal_full_dec,
+                        "x_norm_clstoken": thermal_cls,
+                    }
                 else:
                     out = self.thermal_backbone(x,return_attention=True)
                     cls_attn_map = out["cls_attention"][:, :, 1:].sum(dim=1)
@@ -642,7 +660,10 @@ class CrossModalVPR_Net(nn.Module):
             x_feat = patch_tokens.permute(0, 2, 1).view(B, D, H_feat, W_feat)
             
             # Aggregation -> Descriptor
-            global_desc = agg_layer(x_feat) # [B, D]
+            if self.args.use_cls_for_vpr:
+                global_desc = out["x_norm_clstoken"]
+            else:
+                global_desc = agg_layer(x_feat) # [B, D]
         
         return global_desc, patch_tokens, recon_loss, mask_thermal, masked_patch_thermal, cls_attn_map, penultimate_patch
 

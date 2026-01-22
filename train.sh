@@ -9,7 +9,7 @@ python3 train_wandb.py \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 4 \
     --num_trainable_blocks_THERMAL 4 \
-    --comment "TEST-BiRecon-croco-0.8-alpha10.0-decDepth12-mse+ssi-penultimateLayer-global+local-num_corr10-reranking" \
+    --comment "TEST-BiRecon-croco-0.8-alpha10.0-decDepth12-mse+ssi-penultimateLayer-global+local-CLSVPR-reranking" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
