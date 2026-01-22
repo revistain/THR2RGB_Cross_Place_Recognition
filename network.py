@@ -732,7 +732,7 @@ class CrossModalVPR_Net(nn.Module):
             if penultimate_patch_thermal is not None:
                 penultimate_patch_emb[~is_rgb] = penultimate_patch_thermal
             if thermal_cross_attn_map is not None:
-                thermal_cross_attn_maps[~is_rgb] = thermal_cross_attn_map
+                thermal_cross_attn_maps[is_rgb] = thermal_cross_attn_map
 
         if return_masked_patch: # 무조건 masked_patch_emb가 제일 뒤에 오게
             return final_emb, patch_emb, recon_loss, masks, cls_attn_map, penultimate_patch_emb, thermal_cross_attn_maps, masked_patch_emb

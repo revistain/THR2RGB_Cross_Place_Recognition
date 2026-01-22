@@ -1,6 +1,6 @@
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
-CUDA_VISIBLE_DEVICES=1 \
+CUDA_VISIBLE_DEVICES=3 \
 python3 train_wandb.py \
     --save_dir './logs' \
     --features_dim 768 \
@@ -9,7 +9,7 @@ python3 train_wandb.py \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 4 \
     --num_trainable_blocks_THERMAL 4 \
-    --comment "R2formerWithCroco-0.8-alpha10.0-decDepth12-CLSVPR-reranking-TrainWithCrossAttn-detach(onlyNotCrossAttnMap)" \
+    --comment "R2formerWithCroco-0.8-alpha10.0-decDepth12-CLSVPR-reranking-TrainWithCrossAttn-detach(all)" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
@@ -20,9 +20,9 @@ python3 train_wandb.py \
     --r2_penultimate_layer \
     --r2_global_local_score \
     --use_cls_for_vpr \
+    --use_fast_track \
     --use_reranking
     # --r2_add_random_patch \
-    # --use_fast_track \
     # --use_fast_track
     # --r2loss_div 20 \
     # --use_fast_track \

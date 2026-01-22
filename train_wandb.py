@@ -256,7 +256,6 @@ if __name__ == "__main__":
                             query_features.detach(),  # triplet loss와 분리
                             positive_features.detach(),
                             negative_features.detach(),
-                            cross_attn_matrix=thermal_cross_attn_map
                         )
                         overall_loss += (triplet_loss.detach() + rerank_loss)  # triplet loss는 별도 학습
                         rerank_loss_sum += rerank_loss
@@ -269,7 +268,6 @@ if __name__ == "__main__":
                             query_features.detach(),
                             positive_features.detach(),
                             negative_features.detach(),
-                            cross_attn_matrix=thermal_cross_attn_map
                         )
                         overall_loss += (triplet_loss.detach() + rerank_loss / args.r2loss_div)
                     
