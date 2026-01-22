@@ -23,6 +23,7 @@ python3 train_wandb.py \
     --use_reranking
 
     # --use_fast_track \
+    # --use_fast_track \
     # --r2_add_random_patch \
     # --r2loss_div 20 \
     # --use_fast_track \

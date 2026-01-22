@@ -133,6 +133,8 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
             database_attn_map = np.empty((eval_ds.database_num, patch_count), dtype="float32")
             
             for inputs, indices, flags in tqdm(database_dataloader, ncols=100):
+                flags_int = [1 if f == 'rgb' else 0 for f in flags]
+                flags = torch.tensor(flags_int, dtype=torch.long, device=args.device)
                 outputs = model(inputs.to(args.device), flags)
                 features = outputs[0].view(-1, args.features_dim)
                 patch_features = outputs[1].view(-1, patch_W*patch_H, args.features_dim)
@@ -155,6 +157,9 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
             queries_attn_map = np.empty((eval_ds.queries_num, patch_count), dtype="float32")
             queries_penultimate_patch_features = np.empty((eval_ds.queries_num, patch_count, args.features_dim), dtype="float32")
             for inputs, indices, flags in tqdm(queries_dataloader, ncols=100):
+                flags_int = [1 if f == 'rgb' else 0 for f in flags]
+                flags = torch.tensor(flags_int, dtype=torch.long, device=args.device)
+
                 outputs = model(inputs.to(args.device), flags)
                 
                 features = outputs[0].view(-1, args.features_dim)
@@ -403,7 +408,9 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
             prev_recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, prev_recalls)])
             logging.info(f"Recalls before RERANKING {seq_name}: {prev_recalls_str}")
             logging.info(f"=================================================")
-        
+            
+        gc.collect()
+        torch.cuda.empty_cache()
         return recalls, recalls_str
     except Exception as e:
         import traceback

@@ -347,7 +347,13 @@ if __name__ == "__main__":
                 # break # 굳이 멈출 필요까지야
         
         print(f"Comment: {args.comment} :: Epoch {epoch_num:02d}")
-
+        import gc
+        del recalls, recalls_str # 필요 없다면 삭제
+        if 'current_epoch_r1_list' in locals(): del current_epoch_r1_list
+        
+        gc.collect()            # Python 가비지 컬렉션 (참조 잃은 변수 제거)
+        torch.cuda.empty_cache() # PyTorch VRAM 캐시 비우기 (OS로 반환)
+        
     logging.info(f"Best R@1: {best_r1:.2f}")
     logging.info(f"Trained for {epoch_num + 1:02d} epochs, in total in {str(datetime.now() - start_time)[:-7]}")
 

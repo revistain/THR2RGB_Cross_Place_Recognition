@@ -700,6 +700,12 @@ class CrossModalVPR_Net(nn.Module):
         return global_desc, patch_tokens, recon_loss, mask_thermal, masked_patch_thermal, cls_attn_map, penultimate_patch
 
     def forward(self, x, flags, paired_rgb=None, return_mask=False, return_masked_patch=False):
+        if not isinstance(flags, torch.Tensor):
+            flags = torch.tensor(flags, device=x.device)
+        
+        # [수정] flags가 다른 디바이스에 있을 경우를 대비해 device 맞춤
+        if flags.device != x.device:
+            flags = flags.to(x.device)
         is_rgb = (flags == 1)
         final_emb = torch.zeros((x.size(0), self.output_dim), device=x.device)
         patch_emb = torch.zeros((x.size(0), self.patch_count, self.output_dim), device=x.device)
