@@ -300,6 +300,9 @@ class TripletsSTheReODual(BaseSTheReODual):
             torch.manual_seed(seed)
             aligned_rgb = self.query_transform(self.get_rgb_img(self.rgb_queries_paths[query_index]))
         else:
+            import lovely_tensors as lt
+            lt.monkey_patch()
+            breakpoint()
             query = self.query_transform(self.get_thermal_img(self.t_queries_paths[query_index]))
             aligned_rgb = None
         
