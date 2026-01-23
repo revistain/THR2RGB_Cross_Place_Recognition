@@ -7,6 +7,7 @@ logs/
 STheReO/
 wandb/
 *_cache/
+npys/
 
 *.pth
 *.png
