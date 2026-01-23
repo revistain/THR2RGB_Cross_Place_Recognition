@@ -255,19 +255,12 @@ if __name__ == "__main__":
                         rerank_patch_embedding = patch_embedding
 
                     if args.use_reranking:
-                        if args.r2loss_div < 0.001:
-                            rerank_loss = reranker(rerank_patch_embedding.detach(), cls_attn_map.detach(),
-                                                queries_indexes, positives_indexes, negatives_indexes,
-                                                query_features.detach(), positive_features.detach(), negative_features.detach())
-                            overall_loss += rerank_loss
-                            rerank_loss_sum += rerank_loss
-                        else:
-                            rerank_loss = reranker(rerank_patch_embedding.detach(), cls_attn_map.detach(),
-                                                queries_indexes, positives_indexes, negatives_indexes,
-                                                query_features.detach(), positive_features.detach(), negative_features.detach())
-                            overall_loss += rerank_loss / args.r2loss_div
-                            rerank_loss_sum += (rerank_loss / args.r2loss_div)
-                    
+                        rerank_loss = reranker(rerank_patch_embedding.detach(), cls_attn_map.detach(),
+                                            queries_indexes, positives_indexes, negatives_indexes,
+                                            query_features.detach(), positive_features.detach(), negative_features.detach())
+                        overall_loss += rerank_loss
+                        rerank_loss_sum += rerank_loss
+
                     
                 # train_batch_size: 4, arg.negs_num_per_query: 10
                 recon_weight = args.recon_weight

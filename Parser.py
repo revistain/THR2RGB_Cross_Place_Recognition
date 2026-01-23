@@ -47,7 +47,7 @@ class Parser():
         self.parser.add_argument('--fuse', type=str, default=None, choices=[None, 'cat', 'add'])
         
         ### Model settings
-        self.parser.add_argument('--resize', type=int, default=[518, 518], nargs=2, help="Resizing shape for images (HxW) to be fed into the network.")
+        self.parser.add_argument('--resize', type=int, default=[644, 476], nargs=2, help="Resizing shape for images (HxW) to be fed into the network.")
         self.parser.add_argument("--features_dim", type=int, default=None, help="_")
         self.parser.add_argument("--foundation_model_path", type=str, default=None, help="_")
 
@@ -98,7 +98,6 @@ class Parser():
         self.parser.add_argument("--recon_loss_type", type=str, default="none", choices=['mse', 'l1', 'ssim', 'mse+ssim'])
         self.parser.add_argument("--use_fast_track", action='store_true', default=False)
         self.parser.add_argument("--rerank_with_RGB", action='store_true', default=False)
-        self.parser.add_argument("--r2loss_div", type=float, default=0.0, help="_")
         self.parser.add_argument("--r2_penultimate_layer", action='store_true', default=False)
         self.parser.add_argument("--r2_global_local_score", action='store_true', default=False)
         self.parser.add_argument("--r2_add_random_patch", action='store_true', default=False)
