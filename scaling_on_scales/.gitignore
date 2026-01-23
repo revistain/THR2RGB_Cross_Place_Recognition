@@ -1,0 +1,6 @@
+.idea/
+dist/
+s2wrapper.egg-info/
+build/
+*pycache*
+example.py
