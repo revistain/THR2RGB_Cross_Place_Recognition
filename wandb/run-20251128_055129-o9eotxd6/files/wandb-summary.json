@@ -1,1 +1,0 @@
-{"train/alignment_loss(scaled)":0.0013077263720333576,"train/overall_loss":0.013530823402106762,"epoch":0,"train/epoch_avg_loss":0.03668402046104893,"train/triplet_loss(scaled)":0.012223096936941147,"_timestamp":1.764309356813486e+09,"_step":500,"_wandb":{"runtime":454},"_runtime":454.853333648}
