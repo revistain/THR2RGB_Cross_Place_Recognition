@@ -19,8 +19,8 @@ python3 train_wandb.py \
     --recon_loss_type 'mse+ssim' \
     --r2_penultimate_layer \
     --r2_global_local_score \
+    --use_recon_loss \
     --use_cls_for_vpr
-    # --use_recon_loss \
     # --use_reranking
 
     # --use_fast_track \
