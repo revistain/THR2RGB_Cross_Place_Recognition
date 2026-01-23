@@ -206,25 +206,11 @@ if __name__ == "__main__":
 
             print("- Training...")
             for images, triplets_local_indexes, _, aligned_rgbs in tqdm(triplets_dl, ncols=100, desc=f"Epoch {epoch_num:02d}"):
-                ### model을 통해, triplet의 descriptor와 patch embedding 추출
-                if args.use_pos_as_aligned_rgb:
-                    assert images.size(0) % args.train_batch_size == 0
-                    size_of_batch = int(images.size(0) / args.train_batch_size)
-                    train_batch_size = args.train_batch_size
-                    
-                    pos_rgbs = [images[idx] for idx in range(1, images.size(0), size_of_batch)]
-                    pos_rgbs = torch.stack(pos_rgbs)
-                    aligned_rgbs = pos_rgbs
-
-                global_features, patch_embedding, \
-                recon_loss, masks, cls_attn_map, \
-                penultimate_patch_embedding, masked_patch_embedding = model(
+                output= model(
                     images.to(args.device),
                     flags=flags,
-                    paired_rgb=aligned_rgbs.to(args.device),
-                    return_mask=True,
-                    return_masked_patch=True
                 )
+                global_features = output[0]
 
                 # triplets_local_indexes = (batch, 3, neg_num) => [[[0, 1, 2], [0, 1, 3] ... [0, 1, neg_num+2]] * batch]
                 triplets_local_indexes = torch.transpose(
@@ -232,7 +218,6 @@ if __name__ == "__main__":
                 
                 overall_loss = 0
                 triplet_loss_sum = 0
-                rerank_loss_sum = 0
                 # 각 triplet에 대해 triplet loss 계산
                 for triplets in triplets_local_indexes:
                     queries_indexes, positives_indexes, negatives_indexes = triplets.T
@@ -247,34 +232,7 @@ if __name__ == "__main__":
                     triplet_loss_sum += triplet_loss
                     overall_loss += triplet_loss
                     
-                    # Reranking loss
-                    reranker = model.module.reranker
-                    if args.r2_penultimate_layer:
-                        rerank_patch_embedding = penultimate_patch_embedding
-                    else:
-                        rerank_patch_embedding = patch_embedding
-
-                    if args.use_reranking:
-                        if args.r2loss_div < 0.001:
-                            rerank_loss = reranker(rerank_patch_embedding.detach(), cls_attn_map.detach(),
-                                                queries_indexes, positives_indexes, negatives_indexes,
-                                                query_features.detach(), positive_features.detach(), negative_features.detach())
-                            overall_loss += rerank_loss
-                            rerank_loss_sum += rerank_loss
-                        else:
-                            rerank_loss = reranker(rerank_patch_embedding.detach(), cls_attn_map.detach(),
-                                                queries_indexes, positives_indexes, negatives_indexes,
-                                                query_features.detach(), positive_features.detach(), negative_features.detach())
-                            overall_loss += rerank_loss / args.r2loss_div
-                            rerank_loss_sum += (rerank_loss / args.r2loss_div)
-                    
-                    
                 # train_batch_size: 4, arg.negs_num_per_query: 10
-                recon_weight = args.recon_weight
-                if isinstance(recon_loss, torch.Tensor) and recon_loss.ndim > 0:
-                    recon_loss = recon_loss.mean()
-
-                overall_loss += (recon_loss * recon_weight)
                 overall_loss /= (args.train_batch_size * args.negs_num_per_query)
 
                 del global_features, query_features, positive_features, negative_features
@@ -290,14 +248,11 @@ if __name__ == "__main__":
                 wandb.log({
                     "train/overall_loss": overall_loss,
                     "train/triplet_loss(scaled)": triplet_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query),
-                    "train/reranking_loss(scaled)": rerank_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query) if isinstance(rerank_loss_sum, torch.Tensor) else 0,
-                    "train/recon_loss(scaled)": (recon_loss * recon_weight).item() / (args.train_batch_size * args.negs_num_per_query) if isinstance(recon_loss, torch.Tensor) else 0,
                 }, step=global_step)
                 
                 global_step += 1
                 
-                del patch_embedding, masks, cls_attn_map, penultimate_patch_embedding, masked_patch_embedding
-                del overall_loss, triplet_loss, recon_loss
+                del overall_loss, triplet_loss
                 if args.use_fast_track: break
             
             logging.info(f"Epoch[{epoch_num:02d}]({loop_num + 1}/{loops_num}): " +

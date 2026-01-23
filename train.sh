@@ -1,6 +1,6 @@
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
-CUDA_VISIBLE_DEVICES=2,5,6,7 \
+CUDA_VISIBLE_DEVICES=0,1,3,4 \
 python3 train_wandb.py \
     --save_dir './logs' \
     --features_dim 384 \
@@ -14,17 +14,12 @@ python3 train_wandb.py \
     --epochs_num 100 \
     --negs_num_per_query 10 \
     --croco_mask_ratio 0.8 \
-    --num_decoder_depth 8 \
-    --recon_weight 0 \
-    --recon_loss_type 'mse+ssim' \
-    --r2_penultimate_layer \
-    --r2_global_local_score \
-    --use_cls_for_vpr
+    --num_decoder_depth 8 
+    
+    # --use_fast_track \
     # --use_recon_loss \
     # --use_reranking
 
-    # --use_fast_track \
-    # --use_fast_track \
     # --r2_add_random_patch \
     # --r2loss_div 20 \
     # --use_fast_track \
