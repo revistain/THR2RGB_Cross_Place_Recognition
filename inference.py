@@ -34,6 +34,14 @@ def patchify(imgs):
     
     return x
 
+NPY_ROOTPATH = "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/npys"
+def save_npy(data, path):
+    np.save(os.path.join(NPY_ROOTPATH, path), data)
+    
+def load_npy(path):
+    return np.load(os.path.join(NPY_ROOTPATH, path))
+    
+
 def visualize_top5_predictions(args, eval_ds, predictions, distances, positives_per_query, num_samples=10):
     """
     Query와 top-5 retrieved 이미지를 시각화
@@ -138,10 +146,16 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 outputs = model(inputs.to(args.device), flags)
                 features = outputs[0].view(-1, args.features_dim)
                 patch_features = outputs[1].view(-1, patch_W*patch_H, args.features_dim)
-                database_features[indices.numpy(), :] = features.cpu().numpy()
-                database_patch_features[indices.numpy(), :, :] = patch_features.cpu().numpy()
-                database_attn_map[indices.numpy(),:] = outputs[4].cpu().numpy()
-                database_penultimate_patch_features[indices.numpy(),:] = outputs[5].cpu().numpy()
+                
+                indices_npy = indices.numpy()
+                database_features[indices_npy, :] = features.cpu().numpy() # [B, C] # 이건 저장 x
+                database_attn_map[indices_npy,:] = outputs[4].cpu().numpy() # [B, N] # 이것도 저장 x
+                
+                database_patch_features[indices_npy, :, :] = patch_features.cpu().numpy() # [B, N, C]
+                database_penultimate_patch_features[indices_npy,:] = outputs[5].cpu().numpy() # [B, N, C]
+                for idx in indices_npy:
+                    breakpoint()
+                    save_npy(database_patch_features[idx, :, :], f"Db_{seq_name}_{idx}")
                 
             logging.info(f"Finished extracting {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
 
@@ -164,10 +178,15 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 
                 features = outputs[0].view(-1, args.features_dim)
                 patch_features = outputs[1].view(-1, patch_count, args.features_dim)
+                
+                indices_npy = indices.numpy()-eval_ds.database_num
                 queries_features[indices.numpy()-eval_ds.database_num, :] = features.cpu().numpy()
-                queries_patch_features[indices.numpy()-eval_ds.database_num, :, :] = patch_features.cpu().numpy()
                 queries_attn_map[indices.numpy()-eval_ds.database_num,:] = outputs[4].cpu().numpy()
+                
+                queries_patch_features[indices.numpy()-eval_ds.database_num, :, :] = patch_features.cpu().numpy()
                 queries_penultimate_patch_features[indices.numpy()-eval_ds.database_num,:] = outputs[5].cpu().numpy()
+                for idx in indices_npy:
+                    save_npy(queries_patch_features[idx, :, :], f"query_{seq_name}_{indices_npy[0]+idx}")
                 if args.use_fast_track: break
                 
             logging.info(f"Finished extracting {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
@@ -246,32 +265,6 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                     encoded_dbs_attn_map = encoded_dbs_attn_map.reshape(batch_size, RERANKING_TOP_K, patch_count)
                     encoded_dbs_descriptor = encoded_dbs_descriptor.reshape(batch_size, RERANKING_TOP_K, -1)
                     
-                    # ========== 3. Query Expansion for Cross-Attention ==========
-                    # [B, K, 256, 768]
-                    encoded_queries_features_exp = encoded_queries_features.unsqueeze(1).expand(
-                        -1, RERANKING_TOP_K, -1, -1
-                    )
-                    
-                    # Flatten for decoder: [B*K, 256, 768]
-                    encoded_query_flat = encoded_queries_features_exp.reshape(-1, patch_count, encoded_queries_features.size(-1))
-                    encoded_dbs_flat = encoded_dbs_features.reshape(-1, patch_count, encoded_dbs_features.size(-1))
-                    
-                    # ========== 4. Decoder Forward (Cross-Attention 추출) ==========
-                    # Thermal query가 RGB database를 참조하면서 cross-attention 생성
-                    decoded_result = encoded_query_flat.clone()
-                    
-                    for blk in model.module.decoder_thermal_blocks:
-                        decoded_result = blk(
-                            decoded_result,  # query: thermal [B*K, 256, 768]
-                            encoded_dbs_flat,  # key/value: rgb [B*K, 256, 768]
-                            return_attention=True
-                        )
-                    
-                    decoded_result = model.module.decoder_norm(decoded_result)
-                    
-                    # 마지막 decoder layer의 cross-attention 추출
-                    thermal_cross_attn_map = model.module.decoder_thermal_blocks[-1].cross_attn_weights  # [B*K, 256, 256]
-                    
                     # ========== 5. Reranker용 데이터 준비 ==========
                     # Concatenate [query, db1, db2, ...] → [B, K+1, 256, 768]
                     concated_db_patches = torch.cat([
@@ -305,10 +298,6 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                     
                     global_pos_flat = encoded_dbs_descriptor.reshape(-1, encoded_dbs_descriptor.size(-1))  # [B*K, 768]
                     
-                    # ========== 8. Cross-Attention Matrix Reshape ==========
-                    # thermal_cross_attn_map: [B*K, 256, 256]
-                    # 이미 (query, database) pair별로 계산되어 있으므로 그대로 사용
-                    
                     # ========== 9. Reranking ==========
                     reranker = model.module.reranker
                     reranker.global_query_cache = encoded_queries_descriptor[0].unsqueeze(0)  # [1, 768]
@@ -322,7 +311,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                         global_query=global_query_exp,  # [B*K, 768]
                         global_pos=global_pos_flat,  # [B*K, 768]
                         global_neg=None,
-                        cross_attn_matrix=thermal_cross_attn_map  # [B*K, 256, 256]
+                        cross_attn_matrix=None  # [B*K, 256, 256]
                     )  # [B*K]
                     
                     # ========== 10. Reshape & Reorder ==========

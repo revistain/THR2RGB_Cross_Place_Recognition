@@ -1,6 +1,6 @@
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
-CUDA_VISIBLE_DEVICES=2,5,6,7 \
+CUDA_VISIBLE_DEVICES=0,1,3,4 \
 python3 train_wandb.py \
     --save_dir './logs' \
     --features_dim 384 \
