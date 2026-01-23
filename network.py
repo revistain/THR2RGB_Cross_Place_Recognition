@@ -15,7 +15,6 @@ from timm.models.layers import trunc_normal_
 from croco.models.masking import RandomMask
 from croco.models.criterion import MaskedMSE
 
-  
 class CroCoDecoderBlock(nn.Module):
     def __init__(self, dim=768, num_heads=12, mlp_ratio=4.0, drop_path=0.0):
         super().__init__()
@@ -699,6 +698,31 @@ class CrossModalVPR_Net(nn.Module):
         
         return global_desc, patch_tokens, recon_loss, mask_thermal, masked_patch_thermal, cls_attn_map, penultimate_patch
 
+    def forward_model_basic(self, x, modality='rgb'):
+        """단일 모달리티에 대한 Forward"""
+        if modality == 'rgb':
+            out = self.rgb_backbone(x)
+            agg_layer = self.rgb_aggregation
+        elif modality == 'thermal':
+            out = self.thermal_backbone(x)
+            agg_layer = self.thermal_aggregation
+        else:
+            raise ValueError("Modality must be 'rgb' or 'thermal'")
+            
+        # Backbone 출력 처리 (ViT 기준)
+        # x['x_norm_patchtokens']: (B, num_patchs, D)
+        patch_tokens = out["x_norm_patchtokens"]
+        B, N, D = patch_tokens.shape
+        
+        # 224,224 정방 이미지 입력 가정
+        H_feat = W_feat = int(math.sqrt(N)) 
+        x_feat = patch_tokens.permute(0, 2, 1).view(B, D, H_feat, W_feat)
+        
+        # Aggregation -> Descriptor
+        global_desc = agg_layer(x_feat) # [B, D]
+        
+        return global_desc
+    
     def forward(self, x, flags, paired_rgb=None, return_mask=False, return_masked_patch=False):
         if not isinstance(flags, torch.Tensor):
             flags = torch.tensor(flags, device=x.device)
@@ -706,6 +730,7 @@ class CrossModalVPR_Net(nn.Module):
         # [수정] flags가 다른 디바이스에 있을 경우를 대비해 device 맞춤
         if flags.device != x.device:
             flags = flags.to(x.device)
+
         is_rgb = (flags == 1)
         final_emb = torch.zeros((x.size(0), self.output_dim), device=x.device)
         patch_emb = torch.zeros((x.size(0), self.patch_count, self.output_dim), device=x.device)
@@ -716,17 +741,22 @@ class CrossModalVPR_Net(nn.Module):
         masked_patch_emb = None
         if is_rgb.any():
             global_emb, patch_rgb, _, _, _, cls_rgb_attn_map, penultimate_patch_rgb = self.forward_model(x[is_rgb], modality='rgb')
-            if global_emb is not None: final_emb[is_rgb] = global_emb
-            patch_emb[is_rgb] = patch_rgb
+            if global_emb is not None:
+                final_emb[is_rgb] = global_emb
+            if patch_rgb is not None:
+                patch_emb[is_rgb] = patch_rgb
             if cls_rgb_attn_map is not None:
                 cls_attn_map[is_rgb] = cls_rgb_attn_map
             if penultimate_patch_rgb is not None:
                 penultimate_patch_emb[is_rgb] = penultimate_patch_rgb
         if (~is_rgb).any():
             global_emb, patch_thermal, recon_loss, mask, masked_patch_thermal, cls_thermal_attn_map, penultimate_patch_thermal = self.forward_model(x[~is_rgb], modality='thermal', paired_rgb=paired_rgb, return_masked_patch=return_masked_patch)
-            if global_emb is not None: final_emb[~is_rgb] = global_emb
-            patch_emb[~is_rgb] = patch_thermal
-            if return_mask: masks[~is_rgb] = mask
+            if global_emb is not None:
+                final_emb[~is_rgb] = global_emb
+            if patch_thermal is not None:
+                patch_emb[~is_rgb] = patch_thermal
+            if return_mask:
+                masks[~is_rgb] = mask
             if return_masked_patch:
                 masked_patch_emb = masked_patch_thermal # torch.Size([4, 256, 768])
             if cls_attn_map is not None:

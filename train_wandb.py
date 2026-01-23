@@ -20,12 +20,13 @@ import commons
 import utils
 import datasets_T2R
 import inference
-import network
 import random
 from croco.models.criterion import MaskedMSE
 from recon_vis import visualize_during_training
 from info_nce import InfoNCE, info_nce
 
+import network
+import network_only_GeM
 def set_seed(seed=42):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -70,11 +71,18 @@ if __name__ == "__main__":
         test_ds_list.append(test_ds)
 
     '''Model'''
-    model = network.CrossModalVPR_Net(
-        args,
-        pretrained_foundation = True,
-        foundation_model_path = args.foundation_model_path,
-    )
+    if args.use_recon_loss:
+        model = network.CrossModalVPR_Net(
+            args,
+            pretrained_foundation = True,
+            foundation_model_path = args.foundation_model_path,
+        )
+    else:
+        model = network_only_GeM.CrossModalVPR_Net(
+            args,
+            pretrained_foundation = True,
+            foundation_model_path = args.foundation_model_path,
+        )
     model = model.to(args.device)
     model = torch.nn.DataParallel(model)
 
@@ -237,6 +245,7 @@ if __name__ == "__main__":
                     # Triplet Loss
                     triplet_loss = GlobalTriplet(query_features, positive_features, negative_features)
                     triplet_loss_sum += triplet_loss
+                    overall_loss += triplet_loss
                     
                     # Reranking loss
                     reranker = model.module.reranker
@@ -249,14 +258,14 @@ if __name__ == "__main__":
                         if args.r2loss_div < 0.001:
                             rerank_loss = reranker(rerank_patch_embedding.detach(), cls_attn_map.detach(),
                                                 queries_indexes, positives_indexes, negatives_indexes,
-                                                query_features, positive_features, negative_features)
-                            overall_loss += (triplet_loss + rerank_loss)
+                                                query_features.detach(), positive_features.detach(), negative_features.detach())
+                            overall_loss += rerank_loss
                             rerank_loss_sum += rerank_loss
                         else:
                             rerank_loss = reranker(rerank_patch_embedding.detach(), cls_attn_map.detach(),
                                                 queries_indexes, positives_indexes, negatives_indexes,
-                                                query_features, positive_features, negative_features)
-                            overall_loss += (triplet_loss + rerank_loss / args.r2loss_div)
+                                                query_features.detach(), positive_features.detach(), negative_features.detach())
+                            overall_loss += rerank_loss / args.r2loss_div
                             rerank_loss_sum += (rerank_loss / args.r2loss_div)
                     
                     
@@ -265,7 +274,6 @@ if __name__ == "__main__":
                 if isinstance(recon_loss, torch.Tensor) and recon_loss.ndim > 0:
                     recon_loss = recon_loss.mean()
 
-                overall_loss += (recon_loss * recon_weight)
                 overall_loss += (recon_loss * recon_weight)
                 overall_loss /= (args.train_batch_size * args.negs_num_per_query)
 

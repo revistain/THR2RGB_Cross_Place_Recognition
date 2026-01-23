@@ -15,11 +15,12 @@ python3 train_wandb.py \
     --negs_num_per_query 10 \
     --croco_mask_ratio 0.8 \
     --num_decoder_depth 8 \
-    --recon_weight 10 \
+    --recon_weight 0 \
     --recon_loss_type 'mse+ssim' \
     --r2_penultimate_layer \
     --r2_global_local_score \
     --use_cls_for_vpr
+    # --use_recon_loss \
     # --use_reranking
 
     # --use_fast_track \

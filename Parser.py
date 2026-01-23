@@ -17,7 +17,7 @@ class Parser():
         self.parser.add_argument("--margin", type=float, default=0.1, help="_")
         self.parser.add_argument("--lr", type=float, default=0.00001, help="_")
         self.parser.add_argument("--epochs_num", type=int, default=50, help="number of epochs to train for")
-        self.parser.add_argument("--train_batch_size", type=int, default=1,
+        self.parser.add_argument("--train_batch_size", type=int, default=4,
                             help="Batch size for train")
         self.parser.add_argument("--patience", type=int, default=5)
         
@@ -103,6 +103,7 @@ class Parser():
         self.parser.add_argument("--r2_global_local_score", action='store_true', default=False)
         self.parser.add_argument("--r2_add_random_patch", action='store_true', default=False)
         self.parser.add_argument("--use_cls_for_vpr", action='store_true', default=False)
+        self.parser.add_argument("--use_recon_loss", action='store_true', default=False)
     
     def parse_arguments(self):
         args = self.parser.parse_args()
