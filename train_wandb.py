@@ -248,20 +248,20 @@ if __name__ == "__main__":
                     overall_loss += triplet_loss
                     
                     # Reranking loss
-                    reranker = model.module.reranker
-                    if args.r2_penultimate_layer:
-                        rerank_patch_embedding = penultimate_patch_embedding
-                    else:
-                        rerank_patch_embedding = patch_embedding
+                    if args.use_r2former:
+                        reranker = model.module.reranker
+                        if args.r2_penultimate_layer:
+                            rerank_patch_embedding = penultimate_patch_embedding
+                        else:
+                            rerank_patch_embedding = patch_embedding
 
-                    if args.use_reranking:
-                        rerank_loss = reranker(rerank_patch_embedding.detach(), cls_attn_map.detach(),
-                                            queries_indexes, positives_indexes, negatives_indexes,
-                                            query_features.detach(), positive_features.detach(), negative_features.detach())
-                        overall_loss += rerank_loss
-                        rerank_loss_sum += rerank_loss
+                        if args.use_reranking:
+                            rerank_loss = reranker(rerank_patch_embedding.detach(), cls_attn_map.detach(),
+                                                queries_indexes, positives_indexes, negatives_indexes,
+                                                query_features.detach(), positive_features.detach(), negative_features.detach())
+                            overall_loss += rerank_loss
+                            rerank_loss_sum += rerank_loss
 
-                    
                 # train_batch_size: 4, arg.negs_num_per_query: 10
                 recon_weight = args.recon_weight
                 if isinstance(recon_loss, torch.Tensor) and recon_loss.ndim > 0:

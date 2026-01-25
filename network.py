@@ -145,12 +145,13 @@ class RerankingModule(nn.Module):
         super().__init__()
         self.args = args
         self.features_dim = args.features_dim
+        self.compression_dim = args.compression_dim
         self.num_classes = 2
         self.decoder_embed_dim = 32
         self.r2_decoder_norm = nn.LayerNorm(self.decoder_embed_dim)
         
-        self.local_head_rgb = nn.Linear(self.features_dim, 128, bias=True)
-        self.local_head_thermal = nn.Linear(self.features_dim, 128, bias=True)
+        self.local_head_rgb = nn.Linear(self.compression_dim, 128, bias=True)
+        self.local_head_thermal = nn.Linear(self.compression_dim, 128, bias=True)
         self.local_head_rgb.weight.data.normal_(mean=0.0, std=0.01)
         self.local_head_thermal.weight.data.normal_(mean=0.0, std=0.01)
         self.local_head_rgb.bias.data.zero_()
@@ -191,8 +192,8 @@ class RerankingModule(nn.Module):
         thermal_order = thermal_order[:, :TOP_PATCH_COUNT]
         rgb_order = torch.argsort(current_target_cls_attn, dim=1, descending=True)
         rgb_order = rgb_order[:, :TOP_PATCH_COUNT]
-        rgb_idx = rgb_order.unsqueeze(2).expand(-1, -1, self.features_dim)
-        thermal_idx = thermal_order.unsqueeze(2).expand(-1, -1, self.features_dim)
+        rgb_idx = rgb_order.unsqueeze(2).expand(-1, -1, self.compression_dim)
+        thermal_idx = thermal_order.unsqueeze(2).expand(-1, -1, self.compression_dim)
         selected_rgb_patches = torch.gather(current_target_full, axis=1, index=rgb_idx)
         selected_thermal_patches = torch.gather(paired_thermal_full, axis=1, index=thermal_idx)
         
@@ -433,22 +434,25 @@ class CrossModalVPR_Net(nn.Module):
         dec_depth = args.num_decoder_depth
         dec_num_heads = 16
         self.decoder_thermal_blocks = nn.ModuleList([
-            CroCoDecoderBlock(self.output_dim*2, dec_num_heads) 
+            CroCoDecoderBlock(args.compression_dim, dec_num_heads) 
             for _ in range(dec_depth)
         ])
         self.decoder_rgb_blocks = nn.ModuleList([
-            CroCoDecoderBlock(self.output_dim*2, dec_num_heads) 
+            CroCoDecoderBlock(args.compression_dim, dec_num_heads) 
             for _ in range(dec_depth)
         ])
         
-        self.decoder_norm = nn.LayerNorm(self.output_dim*2)
+        self.decoder_norm = nn.LayerNorm(args.compression_dim)
         self.mask_token = None
         self.patch_count = int(args.resize[0]/14)*int(args.resize[1]/14)
         self._set_mask_token(self.output_dim)
-        self._set_decode_positional_embedding(self.output_dim*2)
+        self._set_decode_positional_embedding(args.compression_dim)
         self._set_mask_generator(self.patch_count, args.croco_mask_ratio)
-        self._set_prediction_head(self.output_dim*2, args.resize[0], args.resize[1])
-        self.reranker = RerankingModule(args)
+        self._set_prediction_head(args.compression_dim, 14)
+        self._set_compression_rgb_head(self.output_dim*2, args.compression_dim)
+        self._set_compression_thermal_head(self.output_dim*2, args.compression_dim)
+        if args.use_r2former:
+            self.reranker = RerankingModule(args)
         
         self.reconstruction_criterion = MaskedMSE(
             args,
@@ -481,14 +485,28 @@ class CrossModalVPR_Net(nn.Module):
         """Random masking generator 초기화"""
         self.mask_generator = RandomMask(num_patches, mask_ratio)
 
-    def _set_prediction_head(self, dec_embed_dim, image_H, image_W):
+    def _set_compression_rgb_head(self, enc_dim, dec_dim):
+        self.compression_rgb_head = nn.Sequential(
+            nn.Linear(enc_dim, dec_dim),
+        )
+        nn.init.normal_(self.compression_rgb_head[0].weight, std=0.02)
+        nn.init.zeros_(self.compression_rgb_head[0].bias)
+
+    def _set_compression_thermal_head(self, enc_dim, dec_dim):
+        self.compression_thermal_head = nn.Sequential(
+            nn.Linear(enc_dim, dec_dim),
+        )
+        nn.init.normal_(self.compression_thermal_head[0].weight, std=0.02)
+        nn.init.zeros_(self.compression_thermal_head[0].bias)
+        
+    def _set_prediction_head(self, dec_embed_dim, patch_size):
         # FIXME: 이것도 같은거 써도됨...?
         self.prediction_head = nn.Sequential(
-            nn.Linear(dec_embed_dim, 14 * 14 * 3), # 768 → 588
+            nn.Linear(dec_embed_dim, patch_size**2 * 3), # 768 → 588
         )
         nn.init.normal_(self.prediction_head[0].weight, std=0.02)
         nn.init.zeros_(self.prediction_head[0].bias)
-
+        
     def patchify(self, imgs):
         """
         imgs: (B, 3, H, W)
@@ -521,201 +539,160 @@ class CrossModalVPR_Net(nn.Module):
         return imgs
     
     def croco_like_encoder(self, x, modality='thermal'):
-            """
-            Two-Track CroCo Encoder
-            Track 1: Downsampled Input (Global) -> Interpolate Up
-            Track 2: 4-Quadrant Crops (Local) -> Stitch
-            Output: Concatenation (Channel x 2)
-            """
-            if modality == 'thermal':
-                current_backbone = self.thermal_backbone
-                target_h, target_w = self.args.resize[0], self.args.resize[1]
-            elif modality == 'rgb':
-                current_backbone = self.rgb_backbone
-                target_h, target_w = self.args.resize[0], self.args.resize[1]
-            else:
-                raise ValueError(f"Wrong Modality: {modality}")
+        """
+        [Optimized] Two-Track CroCo Encoder
+        - Optimization 1: Batch Track 1 & 2 together (5x Batch)
+        - Optimization 2: Pre-calculated Pos Embed (if possible, here dynamic but batched)
+        """
+        if modality == 'thermal':
+            current_backbone = self.thermal_backbone
+            target_h, target_w = self.args.resize[0], self.args.resize[1]
+        elif modality == 'rgb':
+            current_backbone = self.rgb_backbone
+            target_h, target_w = self.args.resize[0], self.args.resize[1]
+        else:
+            raise ValueError(f"Wrong Modality: {modality}")
 
-            # 0. S2Wrapper 스타일 강제 Resize (안전장치)
-            if x.shape[2] != target_h or x.shape[3] != target_w:
-                x = F.interpolate(x, size=(target_h, target_w), mode='bicubic', align_corners=False)
-            
-            B, C, H, W = x.shape
-            half_H, half_W = H // 2, W // 2
-            
-            # Grid 계산 (반쪽 크기 기준)
-            # 예: 476x644 -> 반쪽 238x322 -> patch grid 17x23
-            h_grid_half = half_H // 14
-            w_grid_half = half_W // 14
-            N_half = h_grid_half * w_grid_half 
-
-            # ============================================================
-            # [Step 1] Input Preparation (Track 1 & Track 2)
-            # ============================================================
-            
-            # Track 1: Downsample (Global Context)
-            # [B, 3, 238, 322]
-            x_track1 = F.interpolate(x, size=(half_H, half_W), mode='bicubic', align_corners=False)
-            
-            # Track 2: 4-Quadrant Split (Local Details)
-            # 각각 [B, 3, 238, 322]
-            x_tl = x[:, :, :half_H, :half_W]
-            x_tr = x[:, :, :half_H, half_W:]
-            x_bl = x[:, :, half_H:, :half_W]
-            x_br = x[:, :, half_H:, half_W:]
-            
-            # Batch로 묶어서 처리 (속도 최적화) -> [4B, 3, 238, 322]
-            x_track2_batch = torch.cat([x_tl, x_tr, x_bl, x_br], dim=0)
-
-            # ============================================================
-            # [Step 2] Mask Generation (Synchronized)
-            # ============================================================
-            
-            # 1. Base Mask 생성 (Track 1 기준, 17x23 Grid)
-            mask_ratio = self.mask_generator.mask_ratio
-            len_keep = int(N_half * (1 - mask_ratio))
-            
-            noise = torch.rand(B, N_half, device=x.device)
-            ids_shuffle = torch.argsort(noise, dim=1)
-            
-            mask_track1 = torch.ones(B, N_half, dtype=torch.bool, device=x.device)
-            mask_track1 = mask_track1.scatter(1, ids_shuffle[:, :len_keep], False) # False=Visible
-            
-            # 2. Mask Expansion for Track 2 (1 pixel in Track1 -> 2x2 pixels in Track2)
-            # 하지만 Track 2는 4개의 이미지로 쪼개지므로, 
-            # Track 1의 (i, j) 마스크 값은 -> TL의 (i,j), TR의 (i,j), BL의 (i,j), BR의 (i,j)가 아님!
-            # [논리 수정] Track 1의 1개 패치 공간 = Track 2의 4개 패치 공간 (2x2)
-            # 즉, Track 1 마스크를 2배 확대해서 -> 4등분해야 함.
-            
-            mask_map_track1 = mask_track1.reshape(B, h_grid_half, w_grid_half)
-            # 2배 확대 (Nearest Neighbor)
-            mask_map_full = mask_map_track1.repeat_interleave(2, dim=1).repeat_interleave(2, dim=2) # [B, 34, 46]
-            
-            # 4등분 (Track 2용) -> 각각 [B, 17, 23]
-            m_tl = mask_map_full[:, :h_grid_half, :w_grid_half].flatten(1)
-            m_tr = mask_map_full[:, :h_grid_half, w_grid_half:].flatten(1)
-            m_bl = mask_map_full[:, h_grid_half:, :w_grid_half].flatten(1)
-            m_br = mask_map_full[:, h_grid_half:, w_grid_half:].flatten(1)
-            
-            mask_track2_batch = torch.cat([m_tl, m_tr, m_bl, m_br], dim=0) # [4B, N_half]
-
-            # ============================================================
-            # [Step 3] Encoder Forward Helper (Common Logic)
-            # ============================================================
-            def _run_encoder_block(images, masks):
-                """
-                images: [Batch, 3, 238, 322]
-                masks: [Batch, 17*23]
-                """
-                # Patch Embed
-                # Pos Embed는 backbone이 238x322 크기에 맞춰서 interpolation해서 더해줌
-                # (여기서는 backbone 코드가 내부적으로 처리한다고 가정하거나, 위에서 짠 pos embed 로직 재사용)
-                
-                patches = current_backbone.patch_embed(images) # [Batch, 391, 768]
-                _B, _N, _D = patches.shape
-                
-                # --- Positional Embedding (Dynamic) ---
-                pos_tokens = current_backbone.pos_embed[:, 1:, :]
-                pos_embed_grid = pos_tokens.reshape(1, 37, 37, _D).permute(0, 3, 1, 2)
-                # 현재 입력 크기(Grid 17x23)에 맞게 보간
-                pos_embed_resized = F.interpolate(
-                    pos_embed_grid, size=(h_grid_half, w_grid_half), 
-                    mode='bicubic', align_corners=False
-                )
-                pos_embed_final = pos_embed_resized.permute(0, 2, 3, 1).flatten(1, 2)
-                patches = patches + pos_embed_final
-
-                # CLS Token
-                cls_token = current_backbone.cls_token.expand(_B, -1, -1)
-                cls_pos_embed = current_backbone.pos_embed[:, :1, :]
-                cls_token = cls_token + cls_pos_embed
-                
-                # Concat & Masking
-                patches_with_cls = torch.cat([cls_token, patches], dim=1)
-                cls_mask = torch.zeros(_B, 1, dtype=torch.bool, device=masks.device)
-                full_mask = torch.cat([cls_mask, masks], dim=1)
-                
-                # Visible Only
-                patches_visible = patches_with_cls[~full_mask].reshape(_B, -1, _D)
-                
-                # Transformer Layers
-                for blk in current_backbone.blocks:
-                    patches_visible = blk(patches_visible)
-                patches_visible = current_backbone.norm(patches_visible)
-                
-                # --- Fill Masked Tokens (Reconstruction for Merging) ---
-                # 나중에 합쳐야 하므로, Mask Token을 채워서 원래 Grid 형태로 복원해야 함
-                full_features = self.mask_token.expand(_B, _N, -1).clone()
-                
-                # cls 제외한 feature만 복원
-                visible_patches_only = patches_visible[:, 1:, :]
-                # masks: torch.Size([1, 391])
-                # visible_patches_only: torch.Size([1, 78, 384])
-                # full_features: torch.Size([1, 391, 768])
-                full_features[~masks] = visible_patches_only.flatten(0, 1)
-                
-                return full_features, patches_visible[:, 0:1, :] # (Grid Feat, CLS)
-
-            # ============================================================
-            # [Step 4] Execution & Merging
-            # ============================================================
-            
-            # 1. Track 1 Execution
-            feat_track1, cls_track1 = _run_encoder_block(x_track1, mask_track1) # [B, 391, 768]
-            
-            # 2. Track 2 Execution (Batch Processing)
-            feat_track2_batch, cls_track2_batch = _run_encoder_block(x_track2_batch, mask_track2_batch)
-            
-            # ============================================================
-            # [Step 5] Post-Processing (Interpolate & Stitch)
-            # ============================================================
-            
-            # --- Process Track 1: Interpolate (Upsample 2x) ---
-            # [B, 391, D] -> [B, D, 17, 23] -> [B, D, 34, 46] -> [B, 1564, D]
-            feat_track1 = feat_track1.permute(0, 2, 1).reshape(B, -1, h_grid_half, w_grid_half)
-            feat_track1_up = F.interpolate(
-                feat_track1, scale_factor=2, mode='nearest' # 혹은 bilinear
-            )
-            feat_track1_final = feat_track1_up.flatten(2).transpose(1, 2) # [B, 1564, 768]
-            
-            # --- Process Track 2: Stitch (4 Quadrants to Full) ---
-            # [4B, 391, D] -> B로 분리
-            f_tl, f_tr, f_bl, f_br = torch.chunk(feat_track2_batch, 4, dim=0)
-            
-            # 각각 Grid로 변환 [B, 391, D] -> [B, 17, 23, D]
-            f_tl = f_tl.reshape(B, h_grid_half, w_grid_half, -1)
-            f_tr = f_tr.reshape(B, h_grid_half, w_grid_half, -1)
-            f_bl = f_bl.reshape(B, h_grid_half, w_grid_half, -1)
-            f_br = f_br.reshape(B, h_grid_half, w_grid_half, -1)
-            
-            # 가로로 붙이기 (Top & Bottom)
-            top_row = torch.cat([f_tl, f_tr], dim=2)    # [B, 17, 46, D]
-            bot_row = torch.cat([f_bl, f_br], dim=2)    # [B, 17, 46, D]
-            
-            # 세로로 붙이기 (Full)
-            feat_track2_final = torch.cat([top_row, bot_row], dim=1) # [B, 34, 46, D]
-            feat_track2_final = feat_track2_final.flatten(1, 2)      # [B, 1564, 768]
-            
-            # ============================================================
-            # [Step 6] Final Concatenation
-            # ============================================================
-            
-            # Patch Token Concat: [B, 1564, 1536] (768*2)
-            final_patches = torch.cat([feat_track1_final, feat_track2_final], dim=2)
-            
-            # CLS Token Handling
-            # CLS도 두 트랙 정보를 합치는 것이 좋음
-            # Track 2 CLS는 4개 조각의 평균을 쓰거나 max를 쓰거나 concat할 수 있음. 
-            # 여기서는 단순히 Track 1 CLS와 Track 2의 평균 CLS를 Concat
-            cls_track2_avg = torch.mean(cls_track2_batch.reshape(4, B, 1, -1), dim=0)
-            final_cls = torch.cat([cls_track1, cls_track2_avg], dim=2) # [B, 1, 1536]
-
-            # Return mask는 Track 1 기반 확장된 Full Mask를 반환 (Decoder Loss 계산용)
-            # mask_map_full: [B, 34, 46] -> flatten
-            final_mask = mask_map_full.reshape(B, -1)
-            
-            return final_patches, final_mask, B, (h_grid_half*2)*(w_grid_half*2), final_patches.shape[2], final_cls
+        # 0. Resize
+        if x.shape[2] != target_h or x.shape[3] != target_w:
+            x = F.interpolate(x, size=(target_h, target_w), mode='bicubic', align_corners=False)
         
+        B, C, H, W = x.shape
+        half_H, half_W = H // 2, W // 2
+        
+        # Grid Info
+        h_grid_half = half_H // 14
+        w_grid_half = half_W // 14
+        N_half = h_grid_half * w_grid_half 
+
+        # ============================================================
+        # [Fast Step 1] Prepare All Inputs (Batch Size * 5)
+        # ============================================================
+        
+        # Track 1: Resize [B, 3, H/2, W/2]
+        x_track1 = F.interpolate(x, size=(half_H, half_W), mode='bicubic', align_corners=False)
+        
+        # Track 2: Crops [B, 3, H/2, W/2] x 4
+        x_tl = x[:, :, :half_H, :half_W]
+        x_tr = x[:, :, :half_H, half_W:]
+        x_bl = x[:, :, half_H:, :half_W]
+        x_br = x[:, :, half_H:, half_W:]
+        
+        # [Optimization] 5개 텐서를 한번에 Concat -> [5B, 3, H/2, W/2]
+        # 순서: [Track1, TL, TR, BL, BR]
+        x_all = torch.cat([x_track1, x_tl, x_tr, x_bl, x_br], dim=0)
+
+        # ============================================================
+        # [Fast Step 2] Prepare All Masks (Batch Size * 5)
+        # ============================================================
+        
+        # 1. Base Mask Generation
+        mask_ratio = self.mask_generator.mask_ratio
+        len_keep = int(N_half * (1 - mask_ratio))
+        
+        noise = torch.rand(B, N_half, device=x.device)
+        ids_shuffle = torch.argsort(noise, dim=1)
+        
+        mask_base = torch.ones(B, N_half, dtype=torch.bool, device=x.device)
+        mask_base = mask_base.scatter(1, ids_shuffle[:, :len_keep], False)
+        
+        # 2. Expand for Track 2 (Stitching Logic)
+        mask_map = mask_base.reshape(B, h_grid_half, w_grid_half)
+        mask_map_full = mask_map.repeat_interleave(2, dim=1).repeat_interleave(2, dim=2) # [B, 34, 46]
+        
+        m_tl = mask_map_full[:, :h_grid_half, :w_grid_half].flatten(1)
+        m_tr = mask_map_full[:, :h_grid_half, w_grid_half:].flatten(1)
+        m_bl = mask_map_full[:, h_grid_half:, :w_grid_half].flatten(1)
+        m_br = mask_map_full[:, h_grid_half:, w_grid_half:].flatten(1)
+        
+        # [Optimization] Mask도 5B로 합치기
+        # Track 1은 Base Mask 그대로 사용
+        mask_all = torch.cat([mask_base, m_tl, m_tr, m_bl, m_br], dim=0) # [5B, N_half]
+
+        # ============================================================
+        # [Fast Step 3] Single Pass Forward (GPU Saturation)
+        # ============================================================
+        
+        # 3-1. Patch Embed
+        patches = current_backbone.patch_embed(x_all) # [5B, N_half, D]
+        _5B, _N, _D = patches.shape
+        
+        # 3-2. Pos Embed Interpolation (한번만 계산해서 Broadcasting)
+        # (매번 interpolate하는게 느리다면, init에서 self.pos_embed_cache로 저장해두는게 좋음)
+        pos_tokens = current_backbone.pos_embed[:, 1:, :]
+        pos_embed_grid = pos_tokens.reshape(1, 37, 37, _D).permute(0, 3, 1, 2)
+        pos_embed_resized = F.interpolate(
+            pos_embed_grid, size=(h_grid_half, w_grid_half), 
+            mode='bicubic', align_corners=False
+        )
+        pos_embed_final = pos_embed_resized.permute(0, 2, 3, 1).flatten(1, 2)
+        
+        patches = patches + pos_embed_final # Broadcasting [1, N, D] + [5B, N, D]
+
+        # 3-3. CLS Token & Masking
+        cls_token = current_backbone.cls_token.expand(_5B, -1, -1) + current_backbone.pos_embed[:, :1, :]
+        patches_with_cls = torch.cat([cls_token, patches], dim=1)
+        
+        cls_mask = torch.zeros(_5B, 1, dtype=torch.bool, device=x.device)
+        full_mask = torch.cat([cls_mask, mask_all], dim=1)
+        
+        # Visible Only Processing
+        patches_visible = patches_with_cls[~full_mask].reshape(_5B, -1, _D)
+        
+        # 3-4. Transformer Layers (The Heavy Part)
+        for blk in current_backbone.blocks:
+            patches_visible = blk(patches_visible)
+        patches_visible = current_backbone.norm(patches_visible)
+        
+        # ============================================================
+        # [Fast Step 4] Reconstruct & Split
+        # ============================================================
+        
+        # Expand Mask Tokens (Filling gaps)
+        full_features = self.mask_token.expand(_5B, _N, -1).clone()
+        full_features[~mask_all] = patches_visible[:, 1:, :].flatten(0, 1)
+        
+        all_cls = patches_visible[:, 0:1, :]
+        
+        # Split back into Track 1 and Track 2
+        # [5B] -> [B] (Track1) + [4B] (Track2)
+        feat_track1 = full_features[:B]
+        cls_track1 = all_cls[:B]
+        
+        feat_track2_batch = full_features[B:]
+        cls_track2_batch = all_cls[B:]
+
+        # ============================================================
+        # [Fast Step 5] Stitching & Merging
+        # ============================================================
+        
+        # Track 1 Upsample
+        feat_track1 = feat_track1.permute(0, 2, 1).reshape(B, -1, h_grid_half, w_grid_half)
+        feat_track1_up = F.interpolate(feat_track1, scale_factor=2, mode='nearest')
+        feat_track1_final = feat_track1_up.flatten(2).transpose(1, 2)
+        
+        # Track 2 Stitch
+        f_tl, f_tr, f_bl, f_br = torch.chunk(feat_track2_batch, 4, dim=0)
+        f_tl = f_tl.reshape(B, h_grid_half, w_grid_half, -1)
+        f_tr = f_tr.reshape(B, h_grid_half, w_grid_half, -1)
+        f_bl = f_bl.reshape(B, h_grid_half, w_grid_half, -1)
+        f_br = f_br.reshape(B, h_grid_half, w_grid_half, -1)
+        
+        top_row = torch.cat([f_tl, f_tr], dim=2)
+        bot_row = torch.cat([f_bl, f_br], dim=2)
+        feat_track2_final = torch.cat([top_row, bot_row], dim=1).flatten(1, 2)
+        
+        # Final Concat
+        final_patches = torch.cat([feat_track1_final, feat_track2_final], dim=2)
+        
+        # CLS Averaging
+        cls_track2_avg = torch.mean(cls_track2_batch.reshape(4, B, 1, -1), dim=0)
+        final_cls = torch.cat([cls_track1, cls_track2_avg], dim=2)
+        
+        final_mask = mask_map_full.reshape(B, -1)
+
+        return final_patches, final_mask, B, (h_grid_half*2)*(w_grid_half*2), final_patches.shape[2], final_cls
+            
     def croco_encoded_mask_expension(self, thermal_visible, mask, patch_B, patch_N, patch_D):
         # CROCO로 masking된 부분 mask token으로 채워넣기
         thermal_full = self.mask_token.expand(patch_B, patch_N, -1).clone()  # [B, 256, 768]
@@ -727,42 +704,32 @@ class CrossModalVPR_Net(nn.Module):
     def forward_model(self, x, paired_rgb=None, modality='rgb', return_masked_patch=False):
         """단일 모달리티에 대한 Forward"""
         # self.use_masked_inference: rerank를 위해, decoder에 들어가기 바로 전 단계를 뱉는다
-        
         recon_loss = None
         global_desc = None
+        cls_attn_map = None
         mask_thermal = None
         penultimate_patch = None
         masked_patch_thermal = None
-        cls_attn_map = None
+        patch_token_full = None
         if modality == 'rgb':
-            if self.use_masked_inference:
-                # rgb_full = self.rgb_s2wrapper(x)
-                # rgb_full = rgb_full["x_norm_patchtokens"] 
-                # rgb_full = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
-                # out = {"x_norm_patchtokens": rgb_full}
-
-                rgb_visible, mask_rgb, patch_B, patch_N, patch_D, rgb_cls = self.croco_like_encoder(x, modality='rgb')
-                rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B, patch_N, patch_D)
-                rgb_full_dec = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
-                out = {
-                    "x_norm_patchtokens": rgb_full_dec,
-                    "x_norm_clstoken": rgb_cls,
-                }
-            else:
-                out = self.rgb_s2wrapper(x, return_attention=True)
-                cls_attn_map = out["cls_attention"].sum(dim=0)
-                penultimate_patch = out["penultimate_norm_patchtokens"]
-                
+            out = self.rgb_s2wrapper(x, return_attention=True)
+            cls_attn_map = out["cls_attention"].sum(dim=0)
+            penultimate_patch = self.compression_rgb_head(out["penultimate_norm_patchtokens"])
+            patch_token_full = out["x_norm_patchtokens"].clone()
+            out["x_norm_patchtokens"] = self.compression_rgb_head(out["x_norm_patchtokens"])
+            out["penultimate_norm_patchtokens"] = penultimate_patch
             agg_layer = self.rgb_aggregation
         elif modality == 'thermal':
             if self.training:
                 # 1-4. masked thermal encoder
                 thermal_full, mask_thermal, patch_B, patch_N, patch_D, thermal_cls = self.croco_like_encoder(x, modality='thermal')
                 rgb_full, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb, rgb_cls = self.croco_like_encoder(paired_rgb, modality='rgb')
+                
                 # 5. paired RGB도 feature tokens 추출하기
                 paired_thermal = self.thermal_s2wrapper(x, return_attention=True)
                 paired_thermal_cls_attn_single_head = paired_thermal["cls_attention"].squeeze(0) # [B, MHA, 256]
-                penultimate_patch = paired_thermal["penultimate_norm_patchtokens"]
+                penultimate_patch = self.compression_thermal_head(paired_thermal["penultimate_norm_patchtokens"])
+                paired_thermal["penultimate_norm_patchtokens"] = penultimate_patch
                 paired_thermal_full = paired_thermal["x_norm_patchtokens"]
                 cls_attn_map = paired_thermal_cls_attn_single_head
                 
@@ -776,15 +743,24 @@ class CrossModalVPR_Net(nn.Module):
                 # thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
                 # rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb)
                 
+                # compression layer
+                patch_token_full = paired_thermal_full.clone()
+                thermal_compressed = self.compression_thermal_head(thermal_full)
+                paired_thermal_compressed = self.compression_thermal_head(paired_thermal_full)
+                rgb_compressed = self.compression_rgb_head(rgb_full)
+                paired_rgb_compressed = self.compression_rgb_head(paired_rgb_full)
+                
                 # out을 미리 저장
                 out = paired_thermal
-                if return_masked_patch: masked_patch_thermal = thermal_full # 이후로 안건들여서 clone안해도 됨
+                out["x_norm_patchtokens"] = self.compression_thermal_head(paired_thermal_full)
+                if return_masked_patch:
+                    masked_patch_thermal = thermal_compressed # 이후로 안건들여서 clone안해도 됨
                 
                 # 7. Decoder Positional Encoding
-                thermal_full_dec = thermal_full + self.decoder_pos_embed  # [B, 256, 768]
-                rgb_full_dec = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
-                paired_thermal_dec = paired_thermal_full + self.decoder_pos_embed  # [B, 256, 768]
-                paired_rgb_dec = paired_rgb_full + self.decoder_pos_embed  # [B, 256, 768]
+                thermal_full_dec = thermal_compressed + self.decoder_pos_embed  # [B, 256, 768]
+                rgb_full_dec = rgb_compressed + self.decoder_pos_embed  # [B, 256, 768]
+                paired_thermal_dec = paired_thermal_compressed + self.decoder_pos_embed  # [B, 256, 768]
+                paired_rgb_dec = paired_rgb_compressed + self.decoder_pos_embed  # [B, 256, 768]
                 
                 # 8. decoder 통과시키기
                 for blk in self.decoder_thermal_blocks:
@@ -810,24 +786,12 @@ class CrossModalVPR_Net(nn.Module):
 
             else:
                 # when inference
-                # NOTE: 부르는 곳에 no_grad 호출하기
-                if self.use_masked_inference:
-                    # 1-4. masked thermal encoder
-                    thermal_visible, mask_thermal, patch_B, patch_N, patch_D, thermal_cls = self.croco_like_encoder(x, modality='thermal')
-                    
-                    # 5. Mask token expansion
-                    thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
-                    
-                    # 6. Decoder Positional Encoding
-                    thermal_full_dec = thermal_full + self.decoder_pos_embed  # [B, 256, 768]
-                    out = {
-                        "x_norm_patchtokens": thermal_full_dec,
-                        "x_norm_clstoken": thermal_cls,
-                    }
-                else:
-                    out = self.thermal_s2wrapper(x,return_attention=True)
-                    cls_attn_map = out["cls_attention"].squeeze(1)
-                    penultimate_patch = out["penultimate_norm_patchtokens"]
+                out = self.thermal_s2wrapper(x,return_attention=True)
+                cls_attn_map = out["cls_attention"].squeeze(1)
+                penultimate_patch = self.compression_thermal_head(out["penultimate_norm_patchtokens"])
+                out["penultimate_norm_patchtokens"] = penultimate_patch
+                patch_token_full = out["x_norm_patchtokens"].clone()
+                out["x_norm_patchtokens"] = self.compression_thermal_head(out["x_norm_patchtokens"])
             agg_layer = self.thermal_aggregation
         else:
             raise ValueError("Modality must be 'rgb' or 'thermal'")
@@ -835,23 +799,23 @@ class CrossModalVPR_Net(nn.Module):
         # Backbone 출력 처리 (ViT 기준)
         # x['x_norm_patchtokens']: (B, num_patchs, D)
         patch_tokens = out["x_norm_patchtokens"]
+    
+        # attnetion_dict_keys(['x_norm_clstoken', 'x_norm_patchtokens', 'x_prenorm', 'masks'])
+        B, N, D = patch_token_full.shape # B, # N # D
         
-        if not self.use_masked_inference:
-            # attnetion_dict_keys(['x_norm_clstoken', 'x_norm_patchtokens', 'x_prenorm', 'masks'])
-            B, N, D = patch_tokens.shape # B, # N # D
-            
-            # 224,224 정방 이미지 입력 가정(patch 2D 복원)
-            H_feat = int(x.shape[2]/14)
-            W_feat = int(x.shape[3]/14)
-            x_feat = patch_tokens.permute(0, 2, 1).view(B, D, H_feat, W_feat)
-            # Aggregation -> Descriptor
-            if self.args.use_cls_for_vpr:
-                global_desc = out["x_norm_clstoken"]
-            else:
-                global_desc = agg_layer(x_feat) # [B, D]
-                # (Pdb) torch.Size([11, 768, 34, 46])
+        # 224,224 정방 이미지 입력 가정(patch 2D 복원)
+        H_feat = int(x.shape[2]/14)
+        W_feat = int(x.shape[3]/14)
+        x_feat = patch_token_full.permute(0, 2, 1).view(B, D, H_feat, W_feat)
+        # Aggregation -> Descriptor
+        if self.args.use_cls_for_vpr:
+            global_desc = out["x_norm_clstoken"]
+        else:
+            global_desc = agg_layer(x_feat) # [B, D]
+            # (Pdb) torch.Size([11, 768, 34, 46])
         
-        return global_desc, patch_tokens, recon_loss, mask_thermal, masked_patch_thermal, cls_attn_map, penultimate_patch
+        return global_desc, patch_tokens, recon_loss, mask_thermal, \
+            masked_patch_thermal, cls_attn_map, penultimate_patch
 
     def forward(self, x, flags, paired_rgb=None, return_mask=False, return_masked_patch=False):
         if not isinstance(flags, torch.Tensor):
@@ -863,8 +827,8 @@ class CrossModalVPR_Net(nn.Module):
 
         is_rgb = (flags == 1)
         final_emb = torch.zeros((x.size(0), self.output_dim*2), device=x.device)
-        patch_emb = torch.zeros((x.size(0), self.patch_count, self.output_dim*2), device=x.device)
-        penultimate_patch_emb = torch.zeros((x.size(0), self.patch_count, self.output_dim*2), device=x.device)
+        patch_emb = torch.zeros((x.size(0), self.patch_count, self.args.compression_dim), device=x.device)
+        penultimate_patch_emb = torch.zeros((x.size(0), self.patch_count, self.args.compression_dim), device=x.device)
         masks = torch.zeros((x.size(0), self.patch_count), dtype=torch.bool, device=x.device)
         cls_attn_map = torch.zeros((x.size(0), self.patch_count), device=x.device)
         recon_loss = None

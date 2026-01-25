@@ -103,7 +103,9 @@ class Parser():
         self.parser.add_argument("--r2_add_random_patch", action='store_true', default=False)
         self.parser.add_argument("--use_cls_for_vpr", action='store_true', default=False)
         self.parser.add_argument("--use_recon_loss", action='store_true', default=False)
-    
+        self.parser.add_argument("--compression_dim", type=int, default=768, help="_")
+        self.parser.add_argument("--use_r2former", action='store_true', default=False)
+        
     def parse_arguments(self):
         args = self.parser.parse_args()
 
