@@ -149,7 +149,6 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 flags = torch.tensor(flags_int, dtype=torch.long, device=args.device)
                 outputs = model(inputs.to(args.device), flags)
                 features = outputs[0].view(-1, args.features_dim*2)
-                breakpoint()
                 patch_features = outputs[1].view(-1, patch_W*patch_H, args.features_dim*2)
                 
                 indices_npy = indices.numpy()

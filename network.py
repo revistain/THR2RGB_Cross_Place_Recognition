@@ -145,13 +145,12 @@ class RerankingModule(nn.Module):
         super().__init__()
         self.args = args
         self.features_dim = args.features_dim
-        self.compression_dim = args.compression_dim
         self.num_classes = 2
         self.decoder_embed_dim = 32
         self.r2_decoder_norm = nn.LayerNorm(self.decoder_embed_dim)
         
-        self.local_head_rgb = nn.Linear(self.compression_dim, 128, bias=True)
-        self.local_head_thermal = nn.Linear(self.compression_dim, 128, bias=True)
+        self.local_head_rgb = nn.Linear(self.args.features_dim*2, 128, bias=True)
+        self.local_head_thermal = nn.Linear(self.args.features_dim*2, 128, bias=True)
         self.local_head_rgb.weight.data.normal_(mean=0.0, std=0.01)
         self.local_head_thermal.weight.data.normal_(mean=0.0, std=0.01)
         self.local_head_rgb.bias.data.zero_()
@@ -192,8 +191,8 @@ class RerankingModule(nn.Module):
         thermal_order = thermal_order[:, :TOP_PATCH_COUNT]
         rgb_order = torch.argsort(current_target_cls_attn, dim=1, descending=True)
         rgb_order = rgb_order[:, :TOP_PATCH_COUNT]
-        rgb_idx = rgb_order.unsqueeze(2).expand(-1, -1, self.compression_dim)
-        thermal_idx = thermal_order.unsqueeze(2).expand(-1, -1, self.compression_dim)
+        rgb_idx = rgb_order.unsqueeze(2).expand(-1, -1, self.args.features_dim*2)
+        thermal_idx = thermal_order.unsqueeze(2).expand(-1, -1, self.args.features_dim*2)
         selected_rgb_patches = torch.gather(current_target_full, axis=1, index=rgb_idx)
         selected_thermal_patches = torch.gather(paired_thermal_full, axis=1, index=thermal_idx)
         
@@ -434,23 +433,21 @@ class CrossModalVPR_Net(nn.Module):
         dec_depth = args.num_decoder_depth
         dec_num_heads = 16
         self.decoder_thermal_blocks = nn.ModuleList([
-            CroCoDecoderBlock(args.compression_dim, dec_num_heads) 
+            CroCoDecoderBlock(self.args.features_dim*2, dec_num_heads) 
             for _ in range(dec_depth)
         ])
         self.decoder_rgb_blocks = nn.ModuleList([
-            CroCoDecoderBlock(args.compression_dim, dec_num_heads) 
+            CroCoDecoderBlock(self.args.features_dim*2, dec_num_heads) 
             for _ in range(dec_depth)
         ])
         
-        self.decoder_norm = nn.LayerNorm(args.compression_dim)
+        self.decoder_norm = nn.LayerNorm(self.args.features_dim*2)
         self.mask_token = None
         self.patch_count = int(args.resize[0]/14)*int(args.resize[1]/14)
         self._set_mask_token(self.output_dim)
-        self._set_decode_positional_embedding(args.compression_dim)
+        self._set_decode_positional_embedding(self.args.features_dim*2)
         self._set_mask_generator(self.patch_count, args.croco_mask_ratio)
-        self._set_prediction_head(args.compression_dim, 14)
-        self._set_compression_rgb_head(self.output_dim*2, args.compression_dim)
-        self._set_compression_thermal_head(self.output_dim*2, args.compression_dim)
+        self._set_prediction_head(self.args.features_dim*2, 14)
         if args.use_r2former:
             self.reranker = RerankingModule(args)
         
@@ -485,20 +482,6 @@ class CrossModalVPR_Net(nn.Module):
         """Random masking generator 초기화"""
         self.mask_generator = RandomMask(num_patches, mask_ratio)
 
-    def _set_compression_rgb_head(self, enc_dim, dec_dim):
-        self.compression_rgb_head = nn.Sequential(
-            nn.Linear(enc_dim, dec_dim),
-        )
-        nn.init.normal_(self.compression_rgb_head[0].weight, std=0.02)
-        nn.init.zeros_(self.compression_rgb_head[0].bias)
-
-    def _set_compression_thermal_head(self, enc_dim, dec_dim):
-        self.compression_thermal_head = nn.Sequential(
-            nn.Linear(enc_dim, dec_dim),
-        )
-        nn.init.normal_(self.compression_thermal_head[0].weight, std=0.02)
-        nn.init.zeros_(self.compression_thermal_head[0].bias)
-        
     def _set_prediction_head(self, dec_embed_dim, patch_size):
         # FIXME: 이것도 같은거 써도됨...?
         self.prediction_head = nn.Sequential(
@@ -710,14 +693,9 @@ class CrossModalVPR_Net(nn.Module):
         mask_thermal = None
         penultimate_patch = None
         masked_patch_thermal = None
-        patch_token_full = None
         if modality == 'rgb':
             out = self.rgb_s2wrapper(x, return_attention=True)
             cls_attn_map = out["cls_attention"].sum(dim=0)
-            penultimate_patch = self.compression_rgb_head(out["penultimate_norm_patchtokens"])
-            patch_token_full = out["x_norm_patchtokens"].clone()
-            out["x_norm_patchtokens"] = self.compression_rgb_head(out["x_norm_patchtokens"])
-            out["penultimate_norm_patchtokens"] = penultimate_patch
             agg_layer = self.rgb_aggregation
         elif modality == 'thermal':
             if self.training:
@@ -728,8 +706,6 @@ class CrossModalVPR_Net(nn.Module):
                 # 5. paired RGB도 feature tokens 추출하기
                 paired_thermal = self.thermal_s2wrapper(x, return_attention=True)
                 paired_thermal_cls_attn_single_head = paired_thermal["cls_attention"].squeeze(0) # [B, MHA, 256]
-                penultimate_patch = self.compression_thermal_head(paired_thermal["penultimate_norm_patchtokens"])
-                paired_thermal["penultimate_norm_patchtokens"] = penultimate_patch
                 paired_thermal_full = paired_thermal["x_norm_patchtokens"]
                 cls_attn_map = paired_thermal_cls_attn_single_head
                 
@@ -743,24 +719,16 @@ class CrossModalVPR_Net(nn.Module):
                 # thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
                 # rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb)
                 
-                # compression layer
-                patch_token_full = paired_thermal_full.clone()
-                thermal_compressed = self.compression_thermal_head(thermal_full)
-                paired_thermal_compressed = self.compression_thermal_head(paired_thermal_full)
-                rgb_compressed = self.compression_rgb_head(rgb_full)
-                paired_rgb_compressed = self.compression_rgb_head(paired_rgb_full)
-                
                 # out을 미리 저장
                 out = paired_thermal
-                out["x_norm_patchtokens"] = self.compression_thermal_head(paired_thermal_full)
                 if return_masked_patch:
-                    masked_patch_thermal = thermal_compressed # 이후로 안건들여서 clone안해도 됨
+                    masked_patch_thermal = thermal_full # 이후로 안건들여서 clone안해도 됨
                 
                 # 7. Decoder Positional Encoding
-                thermal_full_dec = thermal_compressed + self.decoder_pos_embed  # [B, 256, 768]
-                rgb_full_dec = rgb_compressed + self.decoder_pos_embed  # [B, 256, 768]
-                paired_thermal_dec = paired_thermal_compressed + self.decoder_pos_embed  # [B, 256, 768]
-                paired_rgb_dec = paired_rgb_compressed + self.decoder_pos_embed  # [B, 256, 768]
+                thermal_full_dec = thermal_full + self.decoder_pos_embed  # [B, 256, 768]
+                rgb_full_dec = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
+                paired_thermal_dec = paired_thermal_full + self.decoder_pos_embed  # [B, 256, 768]
+                paired_rgb_dec = paired_rgb_full + self.decoder_pos_embed  # [B, 256, 768]
                 
                 # 8. decoder 통과시키기
                 for blk in self.decoder_thermal_blocks:
@@ -788,10 +756,6 @@ class CrossModalVPR_Net(nn.Module):
                 # when inference
                 out = self.thermal_s2wrapper(x,return_attention=True)
                 cls_attn_map = out["cls_attention"].squeeze(1)
-                penultimate_patch = self.compression_thermal_head(out["penultimate_norm_patchtokens"])
-                out["penultimate_norm_patchtokens"] = penultimate_patch
-                patch_token_full = out["x_norm_patchtokens"].clone()
-                out["x_norm_patchtokens"] = self.compression_thermal_head(out["x_norm_patchtokens"])
             agg_layer = self.thermal_aggregation
         else:
             raise ValueError("Modality must be 'rgb' or 'thermal'")
@@ -801,12 +765,12 @@ class CrossModalVPR_Net(nn.Module):
         patch_tokens = out["x_norm_patchtokens"]
     
         # attnetion_dict_keys(['x_norm_clstoken', 'x_norm_patchtokens', 'x_prenorm', 'masks'])
-        B, N, D = patch_token_full.shape # B, # N # D
+        B, N, D = patch_tokens.shape # B, # N # D
         
         # 224,224 정방 이미지 입력 가정(patch 2D 복원)
         H_feat = int(x.shape[2]/14)
         W_feat = int(x.shape[3]/14)
-        x_feat = patch_token_full.permute(0, 2, 1).view(B, D, H_feat, W_feat)
+        x_feat = patch_tokens.permute(0, 2, 1).view(B, D, H_feat, W_feat)
         # Aggregation -> Descriptor
         if self.args.use_cls_for_vpr:
             global_desc = out["x_norm_clstoken"]
@@ -827,8 +791,8 @@ class CrossModalVPR_Net(nn.Module):
 
         is_rgb = (flags == 1)
         final_emb = torch.zeros((x.size(0), self.output_dim*2), device=x.device)
-        patch_emb = torch.zeros((x.size(0), self.patch_count, self.args.compression_dim), device=x.device)
-        penultimate_patch_emb = torch.zeros((x.size(0), self.patch_count, self.args.compression_dim), device=x.device)
+        patch_emb = torch.zeros((x.size(0), self.patch_count, self.output_dim*2), device=x.device)
+        penultimate_patch_emb = torch.zeros((x.size(0), self.patch_count, self.output_dim*2), device=x.device)
         masks = torch.zeros((x.size(0), self.patch_count), dtype=torch.bool, device=x.device)
         cls_attn_map = torch.zeros((x.size(0), self.patch_count), device=x.device)
         recon_loss = None
