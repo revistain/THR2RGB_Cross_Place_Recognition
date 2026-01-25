@@ -443,7 +443,7 @@ class CrossModalVPR_Net(nn.Module):
         self._set_mask_token(self.output_dim)
         self._set_decode_positional_embedding(self.output_dim)
         self._set_mask_generator(self.patch_count, args.croco_mask_ratio)
-        self._set_prediction_head(self.output_dim, 14)
+        self._set_prediction_head(self.output_dim, args.resize[0], args.resize[1])
         self.reranker = RerankingModule(args)
         
         self.reconstruction_criterion = MaskedMSE(
@@ -477,10 +477,10 @@ class CrossModalVPR_Net(nn.Module):
         """Random masking generator 초기화"""
         self.mask_generator = RandomMask(num_patches, mask_ratio)
 
-    def _set_prediction_head(self, dec_embed_dim, patch_size):
+    def _set_prediction_head(self, dec_embed_dim, image_H, image_W):
         # FIXME: 이것도 같은거 써도됨...?
         self.prediction_head = nn.Sequential(
-            nn.Linear(dec_embed_dim, patch_size**2 * 3), # 768 → 588
+            nn.Linear(dec_embed_dim, 14 * 14 * 3), # 768 → 588
         )
         nn.init.normal_(self.prediction_head[0].weight, std=0.02)
         nn.init.zeros_(self.prediction_head[0].bias)
@@ -504,18 +504,18 @@ class CrossModalVPR_Net(nn.Module):
             breakpoint()
         return x
 
-    def unpatchify(self, x, channels=3):
+    def unpatchify(x, orig_h, orig_w, patch_size=14, channels=3):
         """
         x: (N, L, patch_size**2 *channels)
         imgs: (N, 3, H, W)
         """
-        patch_size = self.patch_embed.patch_size[0]
-        h = w = int(x.shape[1]**.5)
-        assert h * w == x.shape[1]
+        h = int(orig_h / 14)
+        w = int(orig_w / 14)
         x = x.reshape(shape=(x.shape[0], h, w, patch_size, patch_size, channels))
         x = torch.einsum('nhwpqc->nchpwq', x)
-        imgs = x.reshape(shape=(x.shape[0], channels, h * patch_size, h * patch_size))
+        imgs = x.reshape(shape=(x.shape[0], channels, h * patch_size, w * patch_size))
         return imgs
+    
     
     def croco_like_encoder(self, x, modality='thermal'):
         if modality == 'thermal':
@@ -629,16 +629,16 @@ class CrossModalVPR_Net(nn.Module):
                 # 7. Decoder Positional Encoding
                 thermal_full_dec = thermal_full + self.decoder_pos_embed  # [B, 256, 768]
                 rgb_full_dec = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
-                paired_thermal_full = paired_thermal_full + self.decoder_pos_embed  # [B, 256, 768]
-                paired_rgb_full = paired_rgb_full + self.decoder_pos_embed  # [B, 256, 768]
+                paired_thermal_dec = paired_thermal_full + self.decoder_pos_embed  # [B, 256, 768]
+                paired_rgb_dec = paired_rgb_full + self.decoder_pos_embed  # [B, 256, 768]
                 
                 # 8. decoder 통과시키기
                 for blk in self.decoder_thermal_blocks:
-                    thermal_full_dec = blk(thermal_full_dec, paired_rgb_full)
+                    thermal_full_dec = blk(thermal_full_dec, paired_rgb_dec)
                 thermal_full_dec = self.decoder_norm(thermal_full_dec)
 
                 for blk in self.decoder_rgb_blocks:
-                    rgb_full_dec = blk(rgb_full_dec, paired_thermal_full)
+                    rgb_full_dec = blk(rgb_full_dec, paired_thermal_dec)
                 rgb_full_dec = self.decoder_norm(rgb_full_dec)
 
                 recon_loss_fn = self.calculate_recon_loss
@@ -648,11 +648,12 @@ class CrossModalVPR_Net(nn.Module):
                 reconstructed_rgb_patches = self.prediction_head(rgb_full_dec)
                 target_thermal_patches = self.patchify(x)
                 target_rgb_patches = self.patchify(paired_rgb)
-                
+
                 # 10. Reconstruction loss 계산
                 recon_loss_thermal = recon_loss_fn(reconstructed_thermal_patches, mask_thermal, target_thermal_patches)
                 recon_loss_rgb = recon_loss_fn(reconstructed_rgb_patches, mask_rgb, target_rgb_patches)
                 recon_loss = (recon_loss_thermal + recon_loss_rgb) / 2
+
             else:
                 # when inference
                 # NOTE: 부르는 곳에 no_grad 호출하기
@@ -776,6 +777,7 @@ class CrossModalVPR_Net(nn.Module):
             target=target,    # [B, 3, 256, 768]
         )
         return recon_loss
+
 
 def get_backbone(pretrained_foundation, foundation_model_path):
     backbone = vit_small(patch_size=14,img_size=518,init_values=1,block_chunks=0)

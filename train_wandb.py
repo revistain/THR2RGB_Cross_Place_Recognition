@@ -248,13 +248,13 @@ if __name__ == "__main__":
                     overall_loss += triplet_loss
                     
                     # Reranking loss
-                    reranker = model.module.reranker
                     if args.r2_penultimate_layer:
                         rerank_patch_embedding = penultimate_patch_embedding
                     else:
                         rerank_patch_embedding = patch_embedding
 
                     if args.use_reranking:
+                        reranker = model.module.reranker
                         rerank_loss = reranker(rerank_patch_embedding.detach(), cls_attn_map.detach(),
                                             queries_indexes, positives_indexes, negatives_indexes,
                                             query_features.detach(), positive_features.detach(), negative_features.detach())
@@ -366,31 +366,3 @@ if __name__ == "__main__":
         logging.info(f"================================================")
 
     wandb.finish()
-    
-    
-                    # 3. decoder 통과시키기
-                    # 3-1. Thermal decoder 통과
-                    # negs_num = args.negs_num_per_query
-                    # decoded_embeddings = torch.zeros(
-                    #     (args.train_batch_size * (negs_num+1), 256, args.features_dim), device=args.device)   
-                    
-                    # for query_idx in range(query_embedding.size(0)):
-                    #     # positive-query decoder 통과
-                    #     thermal_dec = query_embedding[query_idx,:,:]
-                    #     positive_dec = positive_embedding[query_idx]
-                    #     print(f"query: {query_idx} / positive: {query_idx*(negs_num+1)}")
-                        
-                    #     for blk in model.module.decoder_blocks:
-                    #         decoded_embeddings[query_idx*(negs_num+1)] = blk(thermal_dec, positive_dec)
-                    #     decoded_embeddings[query_idx*(negs_num+1)] = model.module.decoder_norm(decoded_embeddings[query_idx*negs_num])                        
-                        
-                    #     # negatives-query decoder 통과
-                    #     for negative_idx in range(negs_num):
-                    #         negative_dec = negative_embedding[query_idx*(negs_num+1)+negative_idx]
-                        
-                    #         print(f"query: {query_idx} / negative: {query_idx*(negs_num+1)+negative_idx}")
-                    #         for blk in model.module.decoder_blocks:
-                    #             decoded_embeddings[query_idx*(negs_num+1)+negative_idx+1] = blk(thermal_dec, negative_dec)
-                    #         decoded_embeddings[query_idx*(negs_num+1)+negative_idx+1] = model.module.decoder_norm(decoded_embeddings[query_idx*(negs_num+1)+negative_idx+1]) 
-
-                    
