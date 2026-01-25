@@ -293,36 +293,19 @@ class S2Wrapper(nn.Module):
     def forward(self, x, return_attention=False):
         """
         Main forward
-        
-        Args:
-            x: [B, 3, H, W]
-            return_attention: bool
-        
-        Returns:
-            dict {
-                'x_norm_patchtokens': [B, N_full, 2D],
-                'x_norm_clstoken': None,
-                'cls_attention': [B, 1, 1, N_full] or None,
-                'penultimate_norm_patchtokens': [B, N_full, 2D] or None
-            }
         """
         B = x.shape[0]
         
-        # Track 1: 1/4 downsample → encoder
+        # Track 1, 2 처리
         feat_t1, attn_t1, penult_t1 = self.forward_track1(x, return_attention)
-        
-        # Track 2: 4-split → encoder each
         crop_results = self.forward_track2(x, return_attention)
         
-        # Unpack Track 2
         crop_feats = [cr[0] for cr in crop_results]
         crop_attns = [cr[1] for cr in crop_results]
         crop_penults = [cr[2] for cr in crop_results]
         
-        # Spatial reassemble Track 2
-        feat_t2 = self.spatial_reassemble_crops(crop_feats)  # [B, D, h, w]
+        feat_t2 = self.spatial_reassemble_crops(crop_feats)
         
-        # Upsample Track 1
         feat_t1_spatial = feat_t1.reshape(
             B, self.h_patches_quarter, self.w_patches_quarter, -1
         ).permute(0, 3, 1, 2)
@@ -334,21 +317,23 @@ class S2Wrapper(nn.Module):
             align_corners=False
         )
         
-        # Channel concat
-        features_concat = torch.cat([feat_t1_up, feat_t2], dim=1)  # [B, 2D, h, w]
-        features_tokens = features_concat.flatten(2).permute(0, 2, 1)  # [B, N, 2D]
+        features_concat = torch.cat([feat_t1_up, feat_t2], dim=1)
+        features_tokens = features_concat.flatten(2).permute(0, 2, 1)
         
-        # Output dict
         output = {
             'x_norm_patchtokens': features_tokens,
             'x_norm_clstoken': None,
         }
         
-        # Attention
+        # ========== [수정] Attention 반환 형식 변경 ==========
         if return_attention:
             cls_attn = self.merge_attention_maps(attn_t1, crop_attns)
             if cls_attn is not None:
-                output['cls_attention'] = cls_attn.unsqueeze(1).unsqueeze(1)
+                # 기존: [B, 1, 1, N_full]
+                # 수정: [B, num_heads, 1, N_full] - 기존 ViT 형식과 유사하게
+                # 하지만 실제로는 이미 head-averaged되어 있으므로
+                # [B, 1, N_full]로 반환하고 network.py에서 처리
+                output['cls_attention'] = cls_attn.unsqueeze(1)  # [B, 1, N_full]
             
             # Penultimate
             if penult_t1 is not None and crop_penults[0] is not None:
@@ -368,5 +353,7 @@ class S2Wrapper(nn.Module):
                 penult_concat = torch.cat([penult_t1_up, penult_t2], dim=1)
                 penult_tokens = penult_concat.flatten(2).permute(0, 2, 1)
                 output['penultimate_norm_patchtokens'] = penult_tokens
+        # ====================================================
         
         return output
+    

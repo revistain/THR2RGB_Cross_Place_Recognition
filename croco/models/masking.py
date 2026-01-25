@@ -17,6 +17,7 @@ class RandomMask(nn.Module):
     def __init__(self, num_patches, mask_ratio):
         super().__init__()
         self.num_patches = num_patches
+        self.mask_ratio = mask_ratio
         self.num_mask = int(mask_ratio * self.num_patches)
     
     def __call__(self, x):
