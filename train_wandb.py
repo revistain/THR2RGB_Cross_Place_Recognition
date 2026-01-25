@@ -92,19 +92,19 @@ if __name__ == "__main__":
     print("- Tuning RGB backbone layers: ", args.num_trainable_blocks_RGB)
     print("- Tuning THERMAL backbone layers: ", args.num_trainable_blocks_THERMAL)
     print("="*30)
-    for name, param in model.module.rgb_backbone.named_parameters():
+    for name, param in model.module.rgb_backbone.vit.named_parameters():
         if "adapter" not in name:
             param.requires_grad = False
         for i in range(args.num_trainable_blocks_RGB):
-            num_blocks = len(model.module.rgb_backbone.blocks)
-            model.module.rgb_backbone.blocks[num_blocks - i - 1].requires_grad_(True)
+            num_blocks = len(model.module.rgb_backbone.vit.blocks)
+            model.module.rgb_backbone.vit.blocks[num_blocks - i - 1].requires_grad_(True)
 
-    for name, param in model.module.thermal_backbone.named_parameters():
+    for name, param in model.module.thermal_backbone.vit.named_parameters():
         if "adapter" not in name:
             param.requires_grad = False
         for i in range(args.num_trainable_blocks_THERMAL):
-            num_blocks = len(model.module.thermal_backbone.blocks)
-            model.module.thermal_backbone.blocks[num_blocks - i - 1].requires_grad_(True)
+            num_blocks = len(model.module.thermal_backbone.vit.blocks)
+            model.module.thermal_backbone.vit.blocks[num_blocks - i - 1].requires_grad_(True)
 
     for n, m in model.named_modules():
         if 'adapter' in n:

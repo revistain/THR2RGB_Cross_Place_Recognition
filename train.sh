@@ -1,6 +1,6 @@
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
-CUDA_VISIBLE_DEVICES=0,1 \
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
 python3 train_wandb.py \
     --save_dir './logs' \
     --features_dim 384 \
@@ -21,9 +21,9 @@ python3 train_wandb.py \
     --r2_global_local_score \
     --use_recon_loss \
     --use_cls_for_vpr \
-    --use_fast_track \
     --use_reranking
 
+    # --use_fast_track \
     # --r2_add_random_patch \
     # --use_fast_track \
     # --rerank_with_RGB \
