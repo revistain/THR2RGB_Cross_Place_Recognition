@@ -278,12 +278,19 @@ if __name__ == "__main__":
                 # train_batch_size: 4, arg.negs_num_per_query: 10
                 recon_weight = args.recon_weight
                 if recon_loss is not None:
-                    recon_loss = (recon_loss[0] + recon_loss[1]) / 2
+                    thermal_recon_loss = recon_loss[0]
+                    rgb_recon_loss = recon_loss[1]
+                    recon_loss = (thermal_recon_loss + rgb_recon_loss) / 2
                     recon_loss = recon_loss.mean()
-                else:
-                    recon_loss = torch.zeros(())
+                    overall_loss += (recon_loss * recon_weight)
+                
+                    wandb.log({
+                        "train/recon_loss(Thermal)": thermal_recon_loss.mean().item()
+                            * recon_weight / (args.train_batch_size * args.negs_num_per_query),
+                        "train/recon_loss(Rgb)": rgb_recon_loss.mean().item()
+                            * recon_weight / (args.train_batch_size * args.negs_num_per_query),
+                    }, step=global_step)
 
-                overall_loss += (recon_loss * recon_weight)
                 overall_loss /= (args.train_batch_size * args.negs_num_per_query)
 
                 del global_features, query_features, positive_features, negative_features
@@ -299,9 +306,8 @@ if __name__ == "__main__":
                 wandb.log({
                     "train/overall_loss": overall_loss.item(),
                     "train/triplet_loss(scaled)": triplet_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query),
-                    "train/reranking_loss(scaled)": rerank_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query) if isinstance(rerank_loss_sum, torch.Tensor) else 0,
-                    "train/recon_loss(Thermal)": thermal_recon.mean().item() * recon_weight / (args.train_batch_size * args.negs_num_per_query),
-                    "train/recon_loss(Rgb)": rgb_recon.mean().item() * recon_weight / (args.train_batch_size * args.negs_num_per_query),
+                    "train/reranking_loss(scaled)": rerank_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query)
+                        if isinstance(rerank_loss_sum, torch.Tensor) else 0,
                 }, step=global_step)
                 
                 global_step += 1
