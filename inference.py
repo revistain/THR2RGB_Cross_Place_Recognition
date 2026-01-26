@@ -124,7 +124,8 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
         
             database_features = np.empty((eval_ds.database_num, args.features_dim), dtype="float32")
             database_patch_features = np.empty((eval_ds.database_num, 16*16, args.features_dim), dtype="float32")
-            database_penultimate_patch_features = np.empty((eval_ds.database_num, 16*16, args.features_dim), dtype="float32")
+            if args.r2_penultimate_layer:
+                database_penultimate_patch_features = np.empty((eval_ds.database_num, 16*16, args.features_dim), dtype="float32")
             database_attn_map = np.empty((eval_ds.database_num, 16*16), dtype="float32")
             for inputs, indices, flags in tqdm(database_dataloader, ncols=100):
                 flags_int = [1 if f == 'rgb' else 0 for f in flags]
@@ -136,7 +137,8 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 database_features[indices.numpy(), :] = features.cpu().numpy()
                 database_patch_features[indices.numpy(), :, :] = patch_features.cpu().numpy()
                 database_attn_map[indices.numpy(),:] = outputs[4].cpu().numpy()
-                database_penultimate_patch_features[indices.numpy(),:] = outputs[5].cpu().numpy()
+                if args.r2_penultimate_layer:
+                    database_penultimate_patch_features[indices.numpy(),:] = outputs[5].cpu().numpy()
                 
             logging.info(f"Finished extracting {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
 
@@ -150,7 +152,8 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
             queries_features = np.empty((eval_ds.queries_num, args.features_dim), dtype="float32")
             queries_patch_features = np.empty((eval_ds.queries_num, 16*16, args.features_dim), dtype="float32")
             queries_attn_map = np.empty((eval_ds.queries_num, 16*16), dtype="float32")
-            queries_penultimate_patch_features = np.empty((eval_ds.queries_num, 16*16, args.features_dim), dtype="float32")
+            if args.r2_penultimate_layer:
+                queries_penultimate_patch_features = np.empty((eval_ds.queries_num, 16*16, args.features_dim), dtype="float32")
             for inputs, indices, flags in tqdm(queries_dataloader, ncols=100):
                 flags_int = [1 if f == 'rgb' else 0 for f in flags]
                 flags = torch.tensor(flags_int, dtype=torch.long, device=args.device)
@@ -161,8 +164,8 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 queries_features[indices.numpy()-eval_ds.database_num, :] = features.cpu().numpy()
                 queries_patch_features[indices.numpy()-eval_ds.database_num, :, :] = patch_features.cpu().numpy()
                 queries_attn_map[indices.numpy()-eval_ds.database_num,:] = outputs[4].cpu().numpy()
-                queries_penultimate_patch_features[indices.numpy()-eval_ds.database_num,:] = outputs[5].cpu().numpy()
-                if args.use_fast_track: break
+                if args.r2_penultimate_layer:
+                    queries_penultimate_patch_features[indices.numpy()-eval_ds.database_num,:] = outputs[5].cpu().numpy()
                 
             logging.info(f"Finished extracting {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
 
@@ -179,50 +182,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
         
         #####################################
         ############# RERANKING #############
-        if args.use_reranking:
-            # torch.cuda.empty_cache()
-            # with torch.no_grad():
-            #     # NOTE: decoder에 들어가기 완전 직전 상태를 저장해놔야함
-            #     # rerank1. RGB database 전부 추출 (before decoder)
-            #     # FIXME: 이거 위에꺼 이용해서 합칠 수 있는데, 일단 그렇게 느리지 않으니 일단 두기
-            #     start_time = time.time()
-
-            #     database_subset_ds = Subset(eval_ds, list(range(eval_ds.database_num)))
-            #     database_dataloader = DataLoader(dataset=database_subset_ds, num_workers=args.num_workers,
-            #                                     batch_size=args.infer_batch_size, pin_memory=(args.device=="cuda"))
-            
-            #     masked_database_features = np.empty((eval_ds.database_num, 256, args.features_dim), dtype="float32")
-            #     model.module.use_masked_inference = True
-            #     for inputs, indices, flags in tqdm(database_dataloader, ncols=100):
-            #         features = model(inputs.to(args.device), flags)
-            #         encoded_features = features[1].reshape(inputs.size(0), 256, -1).cpu().numpy()
-            #         masked_database_features[indices.numpy(), :, :] = encoded_features
-            #         if args.use_fast_track: break
-            #     model.module.use_masked_inference = False
-
-            #     logging.info(f"Finished extracting (FOR RERANK) {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
-
-            #     # rerank2. masked된 query 전부 추출 (before decoder)
-            #     start_time = time.time()
-            #     queries_infer_batch_size = args.infer_batch_size
-            #     queries_subset_ds = Subset(eval_ds, list(range(eval_ds.database_num, len(eval_ds))))
-            #     queries_dataloader = DataLoader(dataset=queries_subset_ds, num_workers=args.num_workers,
-            #                                     batch_size=queries_infer_batch_size, pin_memory=(args.device=="cuda"))
-
-            #     queries_features_mask = np.empty((eval_ds.queries_num, 256), dtype="bool")
-            #     masked_queries_features = np.empty((eval_ds.queries_num, 256, args.features_dim), dtype="float32")
-            #     model.module.use_masked_inference = True
-            #     for inputs, indices, flags in tqdm(queries_dataloader, ncols=100):
-            #         features = model(inputs.to(args.device), flags, return_mask=True)
-            #         encoded_features = features[1].reshape(inputs.size(0), 256, -1).cpu().numpy()
-            #         masked_queries_features[indices.numpy()-eval_ds.database_num,:,:] = encoded_features
-            #         queries_features_mask[indices.numpy()-eval_ds.database_num,:] = features[3].detach().cpu().numpy()
-            #         if args.use_fast_track: break
-            #     model.module.use_masked_inference = False
-
-            #     logging.info(f"Finished extracting (FOR RERANK) {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
-            # ######################
-                
+        if args.use_reranking and args.rerank_type == 'r2former':
             RERANKING_TOP_K = 5
             RERANK_BATCH_SIZE = 32
             prev_predictions = predictions.copy()  # 원본 보존
@@ -371,6 +331,9 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                     
                     if args.use_fast_track:
                         break
+        elif args.use_reranking and args.rerank_type == 'recon':
+            # FIXME
+            ...
         del queries_features
         del database_features
     

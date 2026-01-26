@@ -240,38 +240,25 @@ if __name__ == "__main__":
                     triplet_loss_sum += triplet_loss
                     
                     # pass decoder
-                    thermal_query_full = patch_embedding[queries_indexes]
-                    thermal_query_dec = thermal_query_full + model.module.decoder_pos_embed
-                    rgb_full = patch_embedding[positives_indexes]
-                    rgb_full_dec = rgb_full + model.module.decoder_pos_embed
-                    
-                    for blk in model.module.decoder_thermal_blocks:
-                        thermal_query_dec = blk(thermal_query_dec, rgb_full_dec)
-                    thermal_query_dec = model.module.decoder_norm(thermal_query_dec)
-                    thermal_cross_attn_map = model.module.decoder_thermal_blocks[-1].cross_attn_weights  # [B*K, 256, 256]
-                    
-                    breakpoint()
-                    # Reranking loss
-                    reranker = model.module.reranker
-                    if args.r2_penultimate_layer:
-                        rerank_patch_embedding = penultimate_patch_embedding
-                    else:
-                        rerank_patch_embedding = patch_embedding
+                    print("args.rerank_type:", args.rerank_type)
+                    if args.rerank_type == 'r2former':
+                        thermal_query_full = patch_embedding[queries_indexes]
+                        thermal_query_dec = thermal_query_full + model.module.decoder_pos_embed
+                        rgb_full = patch_embedding[positives_indexes]
+                        rgb_full_dec = rgb_full + model.module.decoder_pos_embed
+                        
+                        for blk in model.module.decoder_thermal_blocks:
+                            thermal_query_dec = blk(thermal_query_dec, rgb_full_dec)
+                        thermal_query_dec = model.module.decoder_norm(thermal_query_dec)
+                        thermal_cross_attn_map = model.module.decoder_thermal_blocks[-1].cross_attn_weights  # [B*K, 256, 256]
+                        
+                        # Reranking loss
+                        reranker = model.module.reranker
+                        if args.r2_penultimate_layer:
+                            rerank_patch_embedding = penultimate_patch_embedding
+                        else:
+                            rerank_patch_embedding = patch_embedding
 
-                    if args.r2loss_div < 0.001:
-                        # Decoder까지 학습 (encoder는 차단)
-                        rerank_loss = reranker(
-                            rerank_patch_embedding.detach(),
-                            cls_attn_map.detach(),
-                            queries_indexes, positives_indexes, negatives_indexes,
-                            query_features.detach(),  # triplet loss와 분리
-                            positive_features.detach(),
-                            negative_features.detach(),
-                            cross_attn_matrix=thermal_cross_attn_map.detach()
-                        )
-                        overall_loss += (triplet_loss.detach() + rerank_loss)  # triplet loss는 별도 학습
-                        rerank_loss_sum += rerank_loss
-                    else:
                         # 동일하게 수정
                         rerank_loss = reranker(
                             rerank_patch_embedding.detach(),
@@ -280,10 +267,14 @@ if __name__ == "__main__":
                             query_features.detach(),
                             positive_features.detach(),
                             negative_features.detach(),
-                            cross_attn_matrix=thermal_cross_attn_map.detach()
+                            cross_attn_matrix=None
                         )
-                        overall_loss += (triplet_loss.detach() + rerank_loss / args.r2loss_div)
-                        rerank_loss_sum += rerank_loss / args.r2loss_div
+                        overall_loss += rerank_loss
+                        rerank_loss_sum += rerank_loss
+                    
+                    overall_loss += triplet_loss
+                    triplet_loss_sum += triplet_loss
+                    
                 # train_batch_size: 4, arg.negs_num_per_query: 10
                 recon_weight = args.recon_weight
                 if isinstance(recon_loss, torch.Tensor) and recon_loss.ndim > 0:

@@ -98,11 +98,11 @@ class Parser():
         self.parser.add_argument("--recon_loss_type", type=str, default="none", choices=['mse', 'l1', 'ssim', 'mse+ssim'])
         self.parser.add_argument("--use_fast_track", action='store_true', default=False)
         self.parser.add_argument("--rerank_with_RGB", action='store_true', default=False)
-        self.parser.add_argument("--r2loss_div", type=float, default=0.0, help="_")
         self.parser.add_argument("--r2_penultimate_layer", action='store_true', default=False)
         self.parser.add_argument("--r2_global_local_score", action='store_true', default=False)
         self.parser.add_argument("--r2_add_random_patch", action='store_true', default=False)
         self.parser.add_argument("--use_cls_for_vpr", action='store_true', default=False)
+        self.parser.add_argument("--rerank_type", type=str, default="none", choices=['recon', 'r2former'])
     
     def parse_arguments(self):
         args = self.parser.parse_args()
