@@ -127,6 +127,8 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
             database_penultimate_patch_features = np.empty((eval_ds.database_num, 16*16, args.features_dim), dtype="float32")
             database_attn_map = np.empty((eval_ds.database_num, 16*16), dtype="float32")
             for inputs, indices, flags in tqdm(database_dataloader, ncols=100):
+                flags_int = [1 if f == 'rgb' else 0 for f in flags]
+                flags = torch.tensor(flags_int, dtype=torch.long, device=args.device)
                 outputs = model(inputs.to(args.device), flags)
                 
                 features = outputs[0].view(-1, args.features_dim)
@@ -150,6 +152,8 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
             queries_attn_map = np.empty((eval_ds.queries_num, 16*16), dtype="float32")
             queries_penultimate_patch_features = np.empty((eval_ds.queries_num, 16*16, args.features_dim), dtype="float32")
             for inputs, indices, flags in tqdm(queries_dataloader, ncols=100):
+                flags_int = [1 if f == 'rgb' else 0 for f in flags]
+                flags = torch.tensor(flags_int, dtype=torch.long, device=args.device)
                 outputs = model(inputs.to(args.device), flags)
                 
                 features = outputs[0].view(-1, args.features_dim)
@@ -405,166 +409,3 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
         print(f"ERROR caught: {e}")
         traceback.print_exc()  # 전체 stack trace 출력
         breakpoint()
-    
-### TODO
-def top_n_voting(topn, predictions, distances, maj_weight):
-    if topn == 'top1':
-        n = 1
-        selected = 0
-    elif topn == 'top5':
-        n = 5
-        selected = slice(0, 5)
-    elif topn == 'top10':
-        n = 10
-        selected = slice(0, 10)
-    # find predictions that repeat in the first, first five,
-    # or fist ten columns for each crop
-    vals, counts = np.unique(predictions[:, selected], return_counts=True)
-    # for each prediction that repeats more than once,
-    # subtract from its score
-    for val, count in zip(vals[counts > 1], counts[counts > 1]):
-        mask = (predictions[:, selected] == val)
-        distances[:, selected][mask] -= maj_weight * count/n
-        
-def fuse_inference(args, eval_ds, models):
-    model_rgb, model_t = models
-    ds_rgb, ds_t = eval_ds
-    model_rgb.eval()
-    model_t.eval()
-    
-    with torch.no_grad():
-        ### Extract database features
-        start_time = time.time()
-
-        database_subset_ds_rgb = Subset(ds_rgb, list(range(ds_rgb.database_num)))
-        database_dataloader_rgb = DataLoader(dataset=database_subset_ds_rgb, num_workers=args.num_workers,
-                                        batch_size=1, pin_memory=(args.device=="cuda"))
-        
-        database_subset_ds_t = Subset(ds_t, list(range(ds_t.database_num)))
-        database_dataloader_t = DataLoader(dataset=database_subset_ds_t, num_workers=args.num_workers,
-                                        batch_size=1, pin_memory=(args.device=="cuda"))
-
-        assert ds_rgb.database_num == ds_t.database_num
-        
-        database_features_rgb = np.empty((ds_rgb.database_num, args.features_dim), dtype="float32")
-        database_features_t = np.empty((ds_t.database_num, args.features_dim), dtype="float32")
-        database_features_cat = np.empty((ds_rgb.database_num, 2*args.features_dim), dtype="float32")
-        database_features_add = np.empty((ds_rgb.database_num, args.features_dim), dtype="float32")
-
-        for inputs, indices in tqdm(database_dataloader_rgb, ncols=100):
-            features = model_rgb(inputs.to(args.device)).view(-1, args.features_dim)
-            features = features.cpu().numpy()
-            database_features_rgb[indices.numpy(), :] = features
-            database_features_cat[indices.numpy(), :args.features_dim] = features
-            database_features_add[indices.numpy(), :] = features
-        
-        for inputs, indices in tqdm(database_dataloader_t, ncols=100):
-            features = model_t(inputs.to(args.device)).view(-1, args.features_dim)
-            features = features.cpu().numpy()
-            database_features_t[indices.numpy(), :] = features
-            database_features_cat[indices.numpy(), args.features_dim:] = features
-            database_features_add[indices.numpy(), :] += features
-
-        logging.info(f"Finished extracting {ds_rgb.database_num}*2 database features in {time.time() - start_time:.2f} s")
-
-        ### Extract query features
-        start_time = time.time()
-
-        queries_infer_batch_size = 1
-        queries_subset_ds_rgb = Subset(ds_rgb, list(range(ds_rgb.database_num, len(ds_rgb))))
-        queries_dataloader_rgb = DataLoader(dataset=queries_subset_ds_rgb, num_workers=args.num_workers,
-                                        batch_size=queries_infer_batch_size, pin_memory=(args.device=="cuda"))
-        queries_subset_ds_t = Subset(ds_t, list(range(ds_t.database_num, len(ds_t))))
-        queries_dataloader_t = DataLoader(dataset=queries_subset_ds_t, num_workers=args.num_workers,
-                                        batch_size=queries_infer_batch_size, pin_memory=(args.device=="cuda"))
-        
-        assert ds_rgb.queries_num == ds_t.queries_num
-        
-        queries_features_rgb = np.empty((ds_rgb.queries_num, args.features_dim), dtype="float32")
-        queries_features_t = np.empty((ds_t.queries_num, args.features_dim), dtype="float32")
-        queries_features_cat = np.empty((ds_rgb.queries_num, 2*args.features_dim), dtype="float32")
-        queries_features_add = np.empty((ds_rgb.queries_num, args.features_dim), dtype="float32")
-        
-        for inputs, indices in tqdm(queries_dataloader_rgb, ncols=100):
-            features = model_rgb(inputs.to(args.device)).view(-1, args.features_dim)
-            features = features.cpu().numpy()
-            queries_features_rgb[indices.numpy()-ds_rgb.database_num, :] = features
-            queries_features_cat[indices.numpy()-ds_rgb.database_num, :args.features_dim] = features
-            queries_features_add[indices.numpy()-ds_rgb.database_num, :] = features
-        
-        for inputs, indices in tqdm(queries_dataloader_t, ncols=100):
-            features = model_t(inputs.to(args.device)).view(-1, args.features_dim)
-            features = features.cpu().numpy()
-            queries_features_t[indices.numpy()-ds_rgb.database_num, :] = features
-            queries_features_cat[indices.numpy()-ds_rgb.database_num, args.features_dim:] = features
-            queries_features_add[indices.numpy()-ds_rgb.database_num, :] += features
-                 
-        logging.info(f"Finished extracting {ds_rgb.queries_num}*2 query features in {time.time() - start_time:.2f} s")
-    
-    faiss_index_rgb = faiss.IndexFlatL2(args.features_dim)
-    faiss_index_t = faiss.IndexFlatL2(args.features_dim)
-    faiss_index_cat = faiss.IndexFlatL2(2*args.features_dim)
-    faiss_index_add = faiss.IndexFlatL2(args.features_dim)
-    
-    faiss_index_rgb.add(database_features_rgb)
-    del database_features_rgb
-    faiss_index_t.add(database_features_t)
-    del database_features_t
-    faiss_index_cat.add(database_features_cat)
-    del database_features_cat
-    faiss_index_add.add(database_features_add)
-    del database_features_add
-
-    ### Calculating recalls
-    start_time = time.time()
-    
-    predictions_all = []
-    distances_all = []
-    
-    distances, predictions = faiss_index_rgb.search(queries_features_rgb, max(args.recall_values))
-    predictions_all.append(predictions)
-    distances_all.append(distances)
-    del queries_features_rgb
-    
-    distances, predictions = faiss_index_t.search(queries_features_t, max(args.recall_values))
-    predictions_all.append(predictions)
-    distances_all.append(distances)
-    del queries_features_t
-    
-    distances, predictions = faiss_index_cat.search(queries_features_cat, max(args.recall_values))
-    predictions_all.append(predictions)
-    distances_all.append(distances)
-    del queries_features_cat
-    
-    distances, predictions = faiss_index_add.search(queries_features_add, max(args.recall_values))
-    predictions_all.append(predictions)
-    distances_all.append(distances)
-    del queries_features_add
-
-    split = {
-        'morning':list(range(0,365))+list(range(1371,1770))+list(range(2754,2869)),
-        'afternoon':list(range(365,892))+list(range(1770,2231))+list(range(2869,2994)),
-        'evening':list(range(892,1371))+list(range(2231,2754))+list(range(2994,3130)),
-        'allday':list(range(0,3130))
-    }
-    
-    positives_per_query = ds_rgb.get_positives()
-    recalls = {'morning':np.zeros((4, len(args.recall_values))), 'afternoon':np.zeros((4, len(args.recall_values))),\
-        'evening':np.zeros((4, len(args.recall_values))), 'allday':np.zeros((4, len(args.recall_values)))}
-    recalls_str = {'morning':[""]*4, 'afternoon':[""]*4, 'evening':[""]*4, 'allday':[""]*4}
-    
-    method = ['rgb', 't', 'cat', 'add']
-    
-    for k, (predictions, distances) in enumerate(zip(predictions_all, distances_all)):
-        for key, indices in split.items():
-            for query_index in indices:
-                pred = predictions[query_index]
-                for i, n in enumerate(args.recall_values):
-                    if np.any(np.in1d(pred[:n], positives_per_query[query_index])):
-                        recalls[key][k, i:] += 1
-                        break
-            
-            recalls[key][k] = recalls[key][k] / len(indices) * 100
-            recalls_str[key][k] = ", ".join([f"{method[k]}/{key}  R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, recalls[key][k])])
-
-    return recalls, recalls_str

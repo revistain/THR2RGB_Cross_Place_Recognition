@@ -154,8 +154,10 @@ if __name__ == "__main__":
     else:
         best_r1 = start_epoch_num = not_improved_num = 0
 
-    bundle_flags =  ['thermal'] + ['rgb'] * (1 + args.negs_num_per_query)
-    num_bundle_flags = len(bundle_flags)
+    thermal_flag = torch.zeros(1, dtype=torch.long)
+    rgb_flags = torch.ones(1 + args.negs_num_per_query, dtype=torch.long)
+    bundle_flags = torch.cat([thermal_flag, rgb_flags]) # [0, 1, 1, ..., 1]
+    flags = bundle_flags.repeat(args.train_batch_size)
 
     '''Training'''
     global_step = 0
@@ -196,9 +198,6 @@ if __name__ == "__main__":
 
             print("- Training...")
             for images, triplets_local_indexes, _, aligned_rgbs in tqdm(triplets_dl, ncols=100, desc=f"Epoch {epoch_num:02d}"):
-                curr_batch_len = len(images) // num_bundle_flags
-                flags = bundle_flags * curr_batch_len
-                
                 ### model을 통해, triplet의 descriptor와 patch embedding 추출
                 if args.use_pos_as_aligned_rgb:
                     assert images.size(0) % args.train_batch_size == 0
@@ -211,8 +210,8 @@ if __name__ == "__main__":
 
                 global_features, patch_embedding, \
                 recon_loss, masks, cls_attn_map, \
-                penultimate_patch_embedding, masked_patch_embedding, \
-                thermal_cross_attn_map = model(
+                penultimate_patch_embedding, thermal_cross_attn_map, \
+                masked_patch_embedding = model(
                     images.to(args.device),
                     flags=flags,
                     paired_rgb=aligned_rgbs.to(args.device),
@@ -240,6 +239,18 @@ if __name__ == "__main__":
                     triplet_loss = GlobalTriplet(query_features, positive_features, negative_features)
                     triplet_loss_sum += triplet_loss
                     
+                    # pass decoder
+                    thermal_query_full = patch_embedding[queries_indexes]
+                    thermal_query_dec = thermal_query_full + model.module.decoder_pos_embed
+                    rgb_full = patch_embedding[positives_indexes]
+                    rgb_full_dec = rgb_full + model.module.decoder_pos_embed
+                    
+                    for blk in model.module.decoder_thermal_blocks:
+                        thermal_query_dec = blk(thermal_query_dec, rgb_full_dec)
+                    thermal_query_dec = model.module.decoder_norm(thermal_query_dec)
+                    thermal_cross_attn_map = model.module.decoder_thermal_blocks[-1].cross_attn_weights  # [B*K, 256, 256]
+                    
+                    breakpoint()
                     # Reranking loss
                     reranker = model.module.reranker
                     if args.r2_penultimate_layer:
@@ -256,6 +267,7 @@ if __name__ == "__main__":
                             query_features.detach(),  # triplet loss와 분리
                             positive_features.detach(),
                             negative_features.detach(),
+                            cross_attn_matrix=thermal_cross_attn_map.detach()
                         )
                         overall_loss += (triplet_loss.detach() + rerank_loss)  # triplet loss는 별도 학습
                         rerank_loss_sum += rerank_loss
@@ -268,12 +280,15 @@ if __name__ == "__main__":
                             query_features.detach(),
                             positive_features.detach(),
                             negative_features.detach(),
+                            cross_attn_matrix=thermal_cross_attn_map.detach()
                         )
                         overall_loss += (triplet_loss.detach() + rerank_loss / args.r2loss_div)
-                    
-                    
+                        rerank_loss_sum += rerank_loss / args.r2loss_div
                 # train_batch_size: 4, arg.negs_num_per_query: 10
                 recon_weight = args.recon_weight
+                if isinstance(recon_loss, torch.Tensor) and recon_loss.ndim > 0:
+                    recon_loss = recon_loss.mean()
+
                 overall_loss += (recon_loss * recon_weight)
                 overall_loss /= (args.train_batch_size * args.negs_num_per_query)
 

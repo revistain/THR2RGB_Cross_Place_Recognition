@@ -369,13 +369,14 @@ class TripletsSTheReODual(BaseSTheReODual):
         # cache_local_shape = [cache_shape[0], W, H, C]
         # cache_local = RAMEfficient4DMatrix(cache_local_shape, dtype=np.float32)
         with torch.no_grad():
-            # logging.debug(f"Caching {len(subset_ds)} features")
             for images, indexes, flags in tqdm(subset_dl, ncols=100):
                 images = images.to(args.device)
-                global_features = model(images, flags)
+                flags_int = [1 if f == 'rgb' else 0 for f in flags]
+                flags_tensor = torch.tensor(flags_int, dtype=torch.long, device=args.device)
+                
+                global_features = model(images, flags_tensor)
                 global_features = global_features[0]
                 cache[indexes.numpy()] = global_features.cpu().numpy()
-                # cache_local[indexes.numpy] = local_features.cpu().numpy()
         return cache
 
     def get_query_features(self, query_index, cache):

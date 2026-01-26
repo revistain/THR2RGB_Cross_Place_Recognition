@@ -560,14 +560,12 @@ class CrossModalVPR_Net(nn.Module):
         
         return patch_only_visible, mask, patch_B, patch_N, patch_D, cls_visible
 
-
     def croco_encoded_mask_expension(self, thermal_visible, mask, patch_B, patch_N, patch_D):
         # CROCO로 masking된 부분 mask token으로 채워넣기
         thermal_full = self.mask_token.expand(patch_B, patch_N, -1).clone()  # [B, 256, 768]
         thermal_full[~mask] = thermal_visible.flatten(0, 1)  # 이제 shape 맞음
         thermal_full = thermal_full.view(patch_B, patch_N, patch_D)
         return thermal_full
-
     
     def forward_model(self, x, paired_rgb=None, modality='rgb', return_masked_patch=False):
         """단일 모달리티에 대한 Forward"""
@@ -582,11 +580,6 @@ class CrossModalVPR_Net(nn.Module):
         cls_attn_map = None
         if modality == 'rgb':
             if self.use_masked_inference:
-                # rgb_full = self.rgb_backbone(x)
-                # rgb_full = rgb_full["x_norm_patchtokens"] 
-                # rgb_full = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
-                # out = {"x_norm_patchtokens": rgb_full}
-
                 rgb_visible, mask_rgb, patch_B, patch_N, patch_D, rgb_cls = self.croco_like_encoder(x, modality='rgb')
                 rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B, patch_N, patch_D)
                 rgb_full_dec = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
@@ -601,6 +594,7 @@ class CrossModalVPR_Net(nn.Module):
                 
             agg_layer = self.rgb_aggregation
         elif modality == 'thermal':
+            # paired_neg: [11, 3, 224, 224]
             if self.training:
                 # 1-4. masked thermal encoder
                 thermal_visible, mask_thermal, patch_B, patch_N, patch_D, thermal_cls = self.croco_like_encoder(x, modality='thermal')
@@ -615,8 +609,6 @@ class CrossModalVPR_Net(nn.Module):
                 
                 paired_rgb_emb = self.rgb_backbone(paired_rgb, return_attention=True)
                 paired_rgb_full = paired_rgb_emb["x_norm_patchtokens"]
-                # paired_rgb_cls_attn = paired_rgb_emb["cls_attention"][:, :, 1:]
-                # paired_rgb_cls_attn_single_head = paired_rgb_cls_attn.sum(dim=1)
             
                 # 6. Mask token expansion
                 thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
@@ -634,7 +626,7 @@ class CrossModalVPR_Net(nn.Module):
                 
                 # 8. decoder 통과시키기
                 for blk in self.decoder_thermal_blocks:
-                    thermal_full_dec = blk(thermal_full_dec, paired_rgb_full)
+                    thermal_full_dec = blk(thermal_full_dec, paired_rgb_full, return_attention=True)
                 thermal_full_dec = self.decoder_norm(thermal_full_dec)
                 thermal_cross_attn_map = self.decoder_thermal_blocks[-1].cross_attn_weights  # [B*K, 256, 256]
 
@@ -699,7 +691,12 @@ class CrossModalVPR_Net(nn.Module):
         return global_desc, patch_tokens, recon_loss, mask_thermal, masked_patch_thermal, cls_attn_map, penultimate_patch, thermal_cross_attn_map
 
     def forward(self, x, flags, paired_rgb=None, return_mask=False, return_masked_patch=False):
-        is_rgb = torch.tensor([f == 'rgb' for f in flags], device=x.device)
+        if not isinstance(flags, torch.Tensor):
+            flags = torch.tensor(flags, device=x.device)
+        if flags.device != x.device:
+            flags = flags.to(x.device)
+        is_rgb = (flags == 1)
+        
         final_emb = torch.zeros((x.size(0), self.output_dim), device=x.device)
         patch_emb = torch.zeros((x.size(0), 256, self.output_dim), device=x.device)
         penultimate_patch_emb = torch.zeros((x.size(0), 256, self.output_dim), device=x.device)
@@ -722,7 +719,6 @@ class CrossModalVPR_Net(nn.Module):
                 cls_thermal_attn_map, \
                 penultimate_patch_thermal, \
                 thermal_cross_attn_map = self.forward_model(x[~is_rgb], modality='thermal', paired_rgb=paired_rgb, return_masked_patch=return_masked_patch)
-            if global_emb is not None: final_emb[~is_rgb] = global_emb
             patch_emb[~is_rgb] = patch_thermal
             if return_mask: masks[~is_rgb] = mask
             if return_masked_patch:
@@ -732,7 +728,7 @@ class CrossModalVPR_Net(nn.Module):
             if penultimate_patch_thermal is not None:
                 penultimate_patch_emb[~is_rgb] = penultimate_patch_thermal
             if thermal_cross_attn_map is not None:
-                thermal_cross_attn_maps[is_rgb] = thermal_cross_attn_map
+                thermal_cross_attn_maps[~is_rgb] = thermal_cross_attn_map
 
         if return_masked_patch: # 무조건 masked_patch_emb가 제일 뒤에 오게
             return final_emb, patch_emb, recon_loss, masks, cls_attn_map, penultimate_patch_emb, thermal_cross_attn_maps, masked_patch_emb
