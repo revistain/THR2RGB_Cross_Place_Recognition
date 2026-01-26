@@ -216,15 +216,28 @@ if __name__ == "__main__":
                     pos_rgbs = torch.stack(pos_rgbs)
                     aligned_rgbs = pos_rgbs
 
-                global_features, patch_embedding, \
-                recon_loss, masks, cls_attn_map, \
-                penultimate_patch_embedding, masked_patch_embedding = model(
-                    images.to(args.device),
-                    flags=flags,
-                    paired_rgb=aligned_rgbs.to(args.device),
-                    return_mask=True,
-                    return_masked_patch=True
-                )
+                recon_loss = None
+                if args.use_recon_loss:
+                    global_features, patch_embedding, \
+                    recon_loss, masks, cls_attn_map, \
+                    penultimate_patch_embedding, masked_patch_embedding = model(
+                        images.to(args.device),
+                        flags=flags,
+                        paired_rgb=aligned_rgbs.to(args.device),
+                        return_mask=True,
+                        return_masked_patch=True
+                    )
+                else:
+                    outputs = model(
+                        images.to(args.device),
+                        flags=flags,
+                        paired_rgb=aligned_rgbs.to(args.device),
+                        return_mask=True,
+                        return_masked_patch=True
+                    )
+                    global_features = outputs[0]
+                    patch_embedding = outputs[1]
+                    cls_attn_map = outputs[4]
 
                 # triplets_local_indexes = (batch, 3, neg_num) => [[[0, 1, 2], [0, 1, 3] ... [0, 1, neg_num+2]] * batch]
                 triplets_local_indexes = torch.transpose(
@@ -248,7 +261,7 @@ if __name__ == "__main__":
                     overall_loss += triplet_loss
                     
                     # Reranking loss
-                    if args.r2_penultimate_layer:
+                    if args.use_recon_loss and args.r2_penultimate_layer:
                         rerank_patch_embedding = penultimate_patch_embedding
                     else:
                         rerank_patch_embedding = patch_embedding
@@ -264,8 +277,11 @@ if __name__ == "__main__":
                     
                 # train_batch_size: 4, arg.negs_num_per_query: 10
                 recon_weight = args.recon_weight
-                if isinstance(recon_loss, torch.Tensor) and recon_loss.ndim > 0:
+                if recon_loss is not None:
+                    recon_loss = (recon_loss[0] + recon_loss[1]) / 2
                     recon_loss = recon_loss.mean()
+                else:
+                    recon_loss = torch.zeros(())
 
                 overall_loss += (recon_loss * recon_weight)
                 overall_loss /= (args.train_batch_size * args.negs_num_per_query)
@@ -281,16 +297,17 @@ if __name__ == "__main__":
 
                 # wandb logging
                 wandb.log({
-                    "train/overall_loss": overall_loss,
+                    "train/overall_loss": overall_loss.item(),
                     "train/triplet_loss(scaled)": triplet_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query),
                     "train/reranking_loss(scaled)": rerank_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query) if isinstance(rerank_loss_sum, torch.Tensor) else 0,
-                    "train/recon_loss(scaled)": (recon_loss * recon_weight).item() / (args.train_batch_size * args.negs_num_per_query) if isinstance(recon_loss, torch.Tensor) else 0,
+                    "train/recon_loss(Thermal)": thermal_recon.mean().item() * recon_weight / (args.train_batch_size * args.negs_num_per_query),
+                    "train/recon_loss(Rgb)": rgb_recon.mean().item() * recon_weight / (args.train_batch_size * args.negs_num_per_query),
                 }, step=global_step)
                 
                 global_step += 1
                 
-                del patch_embedding, masks, cls_attn_map, penultimate_patch_embedding, masked_patch_embedding
-                del overall_loss, triplet_loss, recon_loss
+                # del patch_embedding, masks, cls_attn_map, penultimate_patch_embedding, masked_patch_embedding
+                # del overall_loss, triplet_loss, recon_loss
                 if args.use_fast_track: break
             
             logging.info(f"Epoch[{epoch_num:02d}]({loop_num + 1}/{loops_num}): " +

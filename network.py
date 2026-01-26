@@ -1,6 +1,7 @@
 # network.py
 import math
 import torch
+import wandb
 import random
 import numpy as np
 from torch import nn
@@ -653,7 +654,6 @@ class CrossModalVPR_Net(nn.Module):
                 recon_loss_thermal = recon_loss_fn(reconstructed_thermal_patches, mask_thermal, target_thermal_patches)
                 recon_loss_rgb = recon_loss_fn(reconstructed_rgb_patches, mask_rgb, target_rgb_patches)
                 recon_loss = (recon_loss_thermal + recon_loss_rgb) / 2
-
             else:
                 # when inference
                 # NOTE: 부르는 곳에 no_grad 호출하기
@@ -697,7 +697,7 @@ class CrossModalVPR_Net(nn.Module):
             else:
                 global_desc = agg_layer(x_feat) # [B, D]
         
-        return global_desc, patch_tokens, recon_loss, mask_thermal, masked_patch_thermal, cls_attn_map, penultimate_patch
+        return global_desc, patch_tokens, [recon_loss_thermal, recon_loss_rgb], mask_thermal, masked_patch_thermal, cls_attn_map, penultimate_patch
 
     def forward_model_basic(self, x, modality='rgb'):
         """단일 모달리티에 대한 Forward"""
@@ -738,7 +738,7 @@ class CrossModalVPR_Net(nn.Module):
         penultimate_patch_emb = torch.zeros((x.size(0), self.patch_count, self.output_dim), device=x.device)
         masks = torch.zeros((x.size(0), self.patch_count), dtype=torch.bool, device=x.device)
         cls_attn_map = torch.zeros((x.size(0), self.patch_count), device=x.device)
-        recon_loss = None
+        recon_losses = None
         masked_patch_emb = None
         if is_rgb.any():
             global_emb, patch_rgb, _, _, _, cls_rgb_attn_map, penultimate_patch_rgb = self.forward_model(x[is_rgb], modality='rgb')
@@ -751,7 +751,7 @@ class CrossModalVPR_Net(nn.Module):
             if penultimate_patch_rgb is not None:
                 penultimate_patch_emb[is_rgb] = penultimate_patch_rgb
         if (~is_rgb).any():
-            global_emb, patch_thermal, recon_loss, mask, masked_patch_thermal, cls_thermal_attn_map, penultimate_patch_thermal = self.forward_model(x[~is_rgb], modality='thermal', paired_rgb=paired_rgb, return_masked_patch=return_masked_patch)
+            global_emb, patch_thermal, recon_losses, mask, masked_patch_thermal, cls_thermal_attn_map, penultimate_patch_thermal = self.forward_model(x[~is_rgb], modality='thermal', paired_rgb=paired_rgb, return_masked_patch=return_masked_patch)
             if global_emb is not None:
                 final_emb[~is_rgb] = global_emb
             if patch_thermal is not None:
@@ -766,9 +766,9 @@ class CrossModalVPR_Net(nn.Module):
                 penultimate_patch_emb[~is_rgb] = penultimate_patch_thermal
 
         if return_masked_patch: # 무조건 masked_patch_emb가 제일 뒤에 오게
-            return final_emb, patch_emb, recon_loss, masks, cls_attn_map, penultimate_patch_emb, masked_patch_emb
+            return final_emb, patch_emb, recon_losses, masks, cls_attn_map, penultimate_patch_emb, masked_patch_emb
         else:
-            return final_emb, patch_emb, recon_loss, masks, cls_attn_map, penultimate_patch_emb
+            return final_emb, patch_emb, recon_losses, masks, cls_attn_map, penultimate_patch_emb
 
     def calculate_recon_loss(self, pred, mask, target, confidence_map=None):
         recon_loss = self.reconstruction_criterion(

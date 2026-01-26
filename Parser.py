@@ -47,7 +47,7 @@ class Parser():
         self.parser.add_argument('--fuse', type=str, default=None, choices=[None, 'cat', 'add'])
         
         ### Model settings
-        self.parser.add_argument('--resize', type=int, default=[476, 644], nargs=2, help="Resizing shape for images (HxW) to be fed into the network.")
+        self.parser.add_argument('--resize', type=int, default=[448, 448], nargs=2, help="Resizing shape for images (HxW) to be fed into the network.")
         self.parser.add_argument("--features_dim", type=int, default=None, help="_")
         self.parser.add_argument("--foundation_model_path", type=str, default=None, help="_")
 

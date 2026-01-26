@@ -1,6 +1,6 @@
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
-CUDA_VISIBLE_DEVICES=0,1,2,3 \
+CUDA_VISIBLE_DEVICES=4,5,6,7 \
 python3 train_wandb.py \
     --save_dir './logs' \
     --features_dim 384 \
@@ -9,19 +9,19 @@ python3 train_wandb.py \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 4 \
     --num_trainable_blocks_THERMAL 4 \
-    --comment "476x644-CrocoFixedR2former-0.8-alpha10-decDepth8-reranking" \
+    --comment "448x448-R2former-0.8-alpha1.6-decDepth12-GeM-reranking" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
     --croco_mask_ratio 0.8 \
-    --num_decoder_depth 8 \
+    --num_decoder_depth 12 \
     --recon_weight 1.6 \
     --recon_loss_type 'mse+ssim' \
     --r2_penultimate_layer \
     --r2_global_local_score \
-    --use_reranking \
-    --use_recon_loss
-    # --use_fast_track 
+    --use_reranking
+    # --use_recon_loss
+    # --use_fast_track \
     
 # NPY 안겹치게 잘하자.... 까먹지말고 아님 방지하던가...
 

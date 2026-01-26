@@ -156,7 +156,8 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 database_attn_map[indices_npy,:] = outputs[4].cpu().numpy() # [B, N] # 이것도 저장 x
                 for num, idx in enumerate(indices_npy):
                     save_npy(patch_features[num].cpu().numpy(), f"Db_{seq_name}_{idx}")
-                    save_npy(outputs[5][num].cpu().numpy(), f"Db_{seq_name}_penultimate_{idx}")
+                    if args.r2_penultimate_layer:
+                        save_npy(outputs[5][num].cpu().numpy(), f"Db_{seq_name}_penultimate_{idx}")
                 # if args.use_fast_track: break
                 
             logging.info(f"Finished extracting {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
