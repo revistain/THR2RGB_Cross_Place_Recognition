@@ -1,30 +1,29 @@
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
-CUDA_VISIBLE_DEVICES=4,5,6,7 \
+CUDA_VISIBLE_DEVICES=1 \
 python3 train_wandb.py \
     --save_dir './logs' \
-    --features_dim 384 \
+    --features_dim 768 \
     --sequences KAIST \
-    --foundation_model_path /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/backbone/dinov2/pretrained/dinov2_vits14_pretrain.pth \
+    --foundation_model_path /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/backbone/dinov2/pretrained/dinov2_vitb14_pretrain.pth \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 4 \
     --num_trainable_blocks_THERMAL 4 \
-    --comment "448x448-R2former-0.8-alpha1.6-decDepth12-GeM-reranking" \
+    --comment "224x224-R2former-0.8-alpha10-decDepth8-GeM" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
     --croco_mask_ratio 0.8 \
-    --num_decoder_depth 12 \
-    --recon_weight 1.6 \
-    --recon_loss_type 'mse+ssim' \
-    --r2_penultimate_layer \
-    --r2_global_local_score \
-    --use_reranking
+    --num_decoder_depth 8 \
+    --recon_weight 10 \
+    --use_recon_loss \
+    --recon_loss_type 'mse+ssim'
+    # --use_fast_track
+    # --r2_penultimate_layer \
+    # --use_reranking 'r2former'
     # --use_recon_loss
     # --use_fast_track \
     
-# NPY 안겹치게 잘하자.... 까먹지말고 아님 방지하던가...
-
     # --use_fast_track \
     # --use_cls_for_vpr \
     # --r2_add_random_patch \

@@ -351,17 +351,7 @@ class DinoVisionTransformer(nn.Module):
         if is_training:
             return ret
         else:
-            return ret#self.head(ret["x_norm_clstoken"])
-
-    # def forward(self, *args, is_training=False, return_patches=False, **kwargs):
-    #     ret = self.forward_features(*args, **kwargs)
-    #     if is_training:
-    #         return ret
-    #     elif return_patches:
-    #         return ret["x_norm_patchtokens"]
-    #     else:
-    #         return self.head(ret["x_norm_clstoken"])
-
+            return ret
 
 def init_weights_vit_timm(module: nn.Module, name: str = ""):
     """ViT weight initialization, original timm impl (for reproducibility)"""

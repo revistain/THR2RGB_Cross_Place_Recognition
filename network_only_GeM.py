@@ -419,7 +419,6 @@ class CrossModalVPR_Net(nn.Module):
         # Cross-modal에서는 모달리티 간 특성이 다르므로 가중치를 공유하지 않는 것이 일반적입니다.
         self.args = args
         self.rgb_backbone = get_backbone(pretrained_foundation, foundation_model_path)
-        self.thermal_backbone = get_backbone(pretrained_foundation, foundation_model_path)
         self.output_dim = args.features_dim
         self.reranker = RerankingModule(args)
 
@@ -437,11 +436,10 @@ class CrossModalVPR_Net(nn.Module):
         
     def forward_model(self, x, paired_rgb=None, modality='rgb', return_masked_patch=False):
         """단일 모달리티에 대한 Forward"""
+        out = self.rgb_backbone(x, return_attention=True)
         if modality == 'rgb':
-            out = self.rgb_backbone(x, return_attention=True)
             agg_layer = self.rgb_aggregation
         elif modality == 'thermal':
-            out = self.thermal_backbone(x, return_attention=True)
             agg_layer = self.thermal_aggregation
         else:
             raise ValueError("Modality must be 'rgb' or 'thermal'")
@@ -480,7 +478,7 @@ class CrossModalVPR_Net(nn.Module):
         return [final_emb, patch_emb, None, None, cls_attn_map, penultimate_patch_emb]
 
 def get_backbone(pretrained_foundation, foundation_model_path):
-    backbone = vit_small(patch_size=14,img_size=518,init_values=1,block_chunks=0)
+    backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0)
     if pretrained_foundation:
         assert foundation_model_path is not None, "Please specify foundation model path."
         model_dict = backbone.state_dict()

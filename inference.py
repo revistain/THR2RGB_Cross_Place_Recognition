@@ -158,7 +158,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                     save_npy(patch_features[num].cpu().numpy(), f"Db_{seq_name}_{idx}")
                     if args.r2_penultimate_layer:
                         save_npy(outputs[5][num].cpu().numpy(), f"Db_{seq_name}_penultimate_{idx}")
-                # if args.use_fast_track: break
+                if args.use_fast_track: break
                 
             logging.info(f"Finished extracting {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
 
@@ -186,7 +186,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 for num, idx in enumerate(indices_npy):
                     save_npy(patch_features[num].cpu().numpy(), f"Query_{seq_name}_{idx}")
                     save_npy(outputs[5][num].cpu().numpy(), f"Query_{seq_name}_penultimate_{idx}")
-                # if args.use_fast_track: break
+                if args.use_fast_track: break
                 
             logging.info(f"Finished extracting {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
 
@@ -201,162 +201,165 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
         import gc; gc.collect()
         torch.cuda.empty_cache()
         
-        #####################################
-        ############# RERANKING #############
+        prev_predictions = predictions.copy()
         if args.use_reranking:
-            # 파일 개수만 확인
-            saved_files = os.listdir(NPY_ROOTPATH)
-            prefix = "penultimate" if args.r2_penultimate_layer else ""
-            
-            db_files = [f for f in saved_files if f.startswith(f"Db_{seq_name}") and prefix in f]
-            query_files = [f for f in saved_files if f.startswith(f"Query_{seq_name}") and prefix in f]
-            
-            assert len(db_files) == eval_ds.database_num, \
-                f"DB files mismatch: {len(db_files)} vs {eval_ds.database_num}"
-            assert len(query_files) == eval_ds.queries_num, \
-                f"Query files mismatch: {len(query_files)} vs {eval_ds.queries_num}"
-            
-            logging.info(f"✓ File count verified: {len(db_files)} DB + {len(query_files)} Query")
-            
-            RERANKING_TOP_K = 5
-            prev_predictions = predictions.copy()
-            reconstruction_losses_dict = {}
-            
-            queries_indexes = torch.zeros(RERANKING_TOP_K, dtype=torch.long).cuda()
-            positives_indexes = torch.arange(RERANKING_TOP_K + 1, dtype=torch.long).cuda()
-            positives_indexes = positives_indexes[positives_indexes % (RERANKING_TOP_K + 1) != 0]
-
-            try:
-                with torch.no_grad():
-                    for query_idx in tqdm(range(eval_ds.queries_num), desc="Reranking", ncols=100):
-                        # ========== 1. Query Features 준비 ==========
-                        if args.r2_penultimate_layer:
-                            encoded_queries_features = torch.from_numpy(
-                                load_npy(f"Query_{seq_name}_penultimate_{query_idx}")
-                            ).float().cuda().unsqueeze(0)
-                        else:
-                            encoded_queries_features = torch.from_numpy(
-                                load_npy(f"Query_{seq_name}_{query_idx}")
-                            ).float().cuda().unsqueeze(0) 
-                        
-                        encoded_queries_attn_map = torch.from_numpy(
-                            queries_attn_map[query_idx]
-                        ).float().cuda().unsqueeze(0)
-                        
-                        encoded_queries_descriptor = torch.from_numpy(
-                            queries_features[query_idx]
-                        ).float().cuda().unsqueeze(0) 
-
-                        # ========== 2. Top-K Database Features 준비 ==========
-                        top_k_db_indices_batch = predictions[query_idx, :RERANKING_TOP_K]  # [K]
-                        
-                        # 1. 파일 하나씩 로드해서 리스트에 담기
-                        if args.r2_penultimate_layer:
-                            db_features_list = [
-                                torch.from_numpy(
-                                    load_npy(f"Db_{seq_name}_penultimate_{db_idx}")
-                                ) 
-                                for db_idx in top_k_db_indices_batch
-                            ]
-                        else:
-                            db_features_list = [
-                                torch.from_numpy(
-                                    load_npy(f"Db_{seq_name}_{db_idx}") # 파일명 포맷에 맞게 수정
-                                ) 
-                                for db_idx in top_k_db_indices_batch
-                            ]
-
-                        # 2. 리스트를 하나의 텐서로 합치기 (Stack) -> [K, 256, 768]
-                        encoded_dbs_features = torch.stack(db_features_list).float().cuda()
-                        
-                        # 3. 배치 차원 추가 (Batch=1 이므로) -> [1, K, 256, 768]
-                        # 뒤쪽 코드(concatenation 등)와 호환되게 reshape
-                        encoded_dbs_features = encoded_dbs_features.reshape(1, RERANKING_TOP_K, patch_count, -1)
-                        
-                        encoded_dbs_attn_map = torch.from_numpy(
-                            database_attn_map[top_k_db_indices_batch]
-                        ).float().cuda()
-                        
-                        encoded_dbs_descriptor = torch.from_numpy(
-                            database_features[top_k_db_indices_batch]
-                        ).float().cuda()
-                        
-                        # Reshape: [1, K, 256, 768] (Batch=1 명시)
-                        encoded_dbs_features = encoded_dbs_features.reshape(1, RERANKING_TOP_K, patch_count, -1)
-                        encoded_dbs_attn_map = encoded_dbs_attn_map.reshape(1, RERANKING_TOP_K, patch_count)
-                        encoded_dbs_descriptor = encoded_dbs_descriptor.reshape(1, RERANKING_TOP_K, -1)
-                        
-                        # ========== 5. Reranker용 데이터 준비 ==========
-                        concated_db_patches = torch.cat([
-                            encoded_queries_features.unsqueeze(1),  # [1, 1, 256, 768]
-                            encoded_dbs_features  # [1, K, 256, 768]
-                        ], dim=1)
-                        
-                        concated_db_attn_map = torch.cat([
-                            encoded_queries_attn_map.unsqueeze(1),  # [1, 1, 256]
-                            encoded_dbs_attn_map  # [1, K, 256]
-                        ], dim=1)
-                        
-                        concated_db_patches_flat = concated_db_patches.reshape(-1, patch_count, concated_db_patches.size(-1))
-                        concated_db_attn_map_flat = concated_db_attn_map.reshape(-1, patch_count)
-                        
-                        # ========== 7. Global Descriptors ==========
-                        # Query Descriptor Expand [1, 768] -> [1, K, 768] -> [K, 768]
-                        global_query_exp = encoded_queries_descriptor.unsqueeze(1).expand(
-                            -1, RERANKING_TOP_K, -1
-                        ).reshape(-1, encoded_queries_descriptor.size(-1))
-                        
-                        global_pos_flat = encoded_dbs_descriptor.reshape(-1, encoded_dbs_descriptor.size(-1))
-                        
-                        # ========== 9. Reranking ==========
-                        reranker = model.module.reranker
-                        reranker.global_query_cache = encoded_queries_descriptor[0].unsqueeze(0)
-                        
-                        rerank_scores = reranker(
-                            concated_db_patches_flat,
-                            concated_db_attn_map_flat,
-                            queries_indexes,
-                            positives_indexes,
-                            None,
-                            global_query=global_query_exp,
-                            global_pos=global_pos_flat,
-                            global_neg=None,
-                            cross_attn_matrix=None
-                        )
-                        
-                        # ========== 10. Reshape & Reorder ==========
-                        rerank_scores = rerank_scores.reshape(1, RERANKING_TOP_K)  # [1, K]
-                    
-                        sorted_indices = torch.argsort(rerank_scores[0], descending=True)
-                        predictions[query_idx, :RERANKING_TOP_K] = top_k_db_indices_batch[sorted_indices.cpu()] # <--- 수정됨
-                        
-                        del encoded_queries_features, encoded_queries_attn_map, encoded_queries_descriptor
-                        del encoded_dbs_features, encoded_dbs_attn_map, encoded_dbs_descriptor, concated_db_patches_flat, concated_db_attn_map_flat
-                        # if args.use_fast_track: break
-            except Exception as e:
-                import traceback
-                print(f"ERROR caught: {e}")
-                traceback.print_exc()  # 전체 stack trace 출력
-                breakpoint()
+            #####################################
+            ############# RERANKING #############
+            if args.use_reranking == 'r2former':
+                # 파일 개수만 확인
+                saved_files = os.listdir(NPY_ROOTPATH)
+                prefix = "penultimate" if args.r2_penultimate_layer else ""
                 
-        del queries_features
-        del database_features
-    
-        # 4. positive query(정답)가 몇 번째 top-N에 속하는지 검사하기
-        positives_per_query = eval_ds.get_positives()
-        recalls = np.zeros(len(args.recall_values))
-        pre_num = eval_ds.queries_num
-        for query_index, pred in enumerate(predictions):
-            for i, n in enumerate(args.recall_values):
-                if np.any(np.in1d(pred[:n], positives_per_query[query_index])):
-                    recalls[i:] += 1
-                    break
-        recalls = recalls / eval_ds.queries_num * 100
-        
-        logging.info(f"recalls: {','.join(map(str, recalls))}")
-        recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, recalls)])
+                db_files = [f for f in saved_files if f.startswith(f"Db_{seq_name}") and prefix in f]
+                query_files = [f for f in saved_files if f.startswith(f"Query_{seq_name}") and prefix in f]
+                
+                assert len(db_files) == eval_ds.database_num, \
+                    f"DB files mismatch: {len(db_files)} vs {eval_ds.database_num}"
+                assert len(query_files) == eval_ds.queries_num, \
+                    f"Query files mismatch: {len(query_files)} vs {eval_ds.queries_num}"
+                
+                logging.info(f"✓ File count verified: {len(db_files)} DB + {len(query_files)} Query")
+                
+                RERANKING_TOP_K = 5
+                reconstruction_losses_dict = {}
+                
+                queries_indexes = torch.zeros(RERANKING_TOP_K, dtype=torch.long).cuda()
+                positives_indexes = torch.arange(RERANKING_TOP_K + 1, dtype=torch.long).cuda()
+                positives_indexes = positives_indexes[positives_indexes % (RERANKING_TOP_K + 1) != 0]
 
-        if args.use_reranking:
+                try:
+                    with torch.no_grad():
+                        for query_idx in tqdm(range(eval_ds.queries_num), desc="Reranking", ncols=100):
+                            # ========== 1. Query Features 준비 ==========
+                            if args.r2_penultimate_layer:
+                                encoded_queries_features = torch.from_numpy(
+                                    load_npy(f"Query_{seq_name}_penultimate_{query_idx}")
+                                ).float().cuda().unsqueeze(0)
+                            else:
+                                encoded_queries_features = torch.from_numpy(
+                                    load_npy(f"Query_{seq_name}_{query_idx}")
+                                ).float().cuda().unsqueeze(0) 
+                            
+                            encoded_queries_attn_map = torch.from_numpy(
+                                queries_attn_map[query_idx]
+                            ).float().cuda().unsqueeze(0)
+                            
+                            encoded_queries_descriptor = torch.from_numpy(
+                                queries_features[query_idx]
+                            ).float().cuda().unsqueeze(0) 
+
+                            # ========== 2. Top-K Database Features 준비 ==========
+                            top_k_db_indices_batch = predictions[query_idx, :RERANKING_TOP_K]  # [K]
+                            
+                            # 1. 파일 하나씩 로드해서 리스트에 담기
+                            if args.r2_penultimate_layer:
+                                db_features_list = [
+                                    torch.from_numpy(
+                                        load_npy(f"Db_{seq_name}_penultimate_{db_idx}")
+                                    ) 
+                                    for db_idx in top_k_db_indices_batch
+                                ]
+                            else:
+                                db_features_list = [
+                                    torch.from_numpy(
+                                        load_npy(f"Db_{seq_name}_{db_idx}") # 파일명 포맷에 맞게 수정
+                                    ) 
+                                    for db_idx in top_k_db_indices_batch
+                                ]
+
+                            # 2. 리스트를 하나의 텐서로 합치기 (Stack) -> [K, 256, 768]
+                            encoded_dbs_features = torch.stack(db_features_list).float().cuda()
+                            
+                            # 3. 배치 차원 추가 (Batch=1 이므로) -> [1, K, 256, 768]
+                            # 뒤쪽 코드(concatenation 등)와 호환되게 reshape
+                            encoded_dbs_features = encoded_dbs_features.reshape(1, RERANKING_TOP_K, patch_count, -1)
+                            
+                            encoded_dbs_attn_map = torch.from_numpy(
+                                database_attn_map[top_k_db_indices_batch]
+                            ).float().cuda()
+                            
+                            encoded_dbs_descriptor = torch.from_numpy(
+                                database_features[top_k_db_indices_batch]
+                            ).float().cuda()
+                            
+                            # Reshape: [1, K, 256, 768] (Batch=1 명시)
+                            encoded_dbs_features = encoded_dbs_features.reshape(1, RERANKING_TOP_K, patch_count, -1)
+                            encoded_dbs_attn_map = encoded_dbs_attn_map.reshape(1, RERANKING_TOP_K, patch_count)
+                            encoded_dbs_descriptor = encoded_dbs_descriptor.reshape(1, RERANKING_TOP_K, -1)
+                            
+                            # ========== 5. Reranker용 데이터 준비 ==========
+                            concated_db_patches = torch.cat([
+                                encoded_queries_features.unsqueeze(1),  # [1, 1, 256, 768]
+                                encoded_dbs_features  # [1, K, 256, 768]
+                            ], dim=1)
+                            
+                            concated_db_attn_map = torch.cat([
+                                encoded_queries_attn_map.unsqueeze(1),  # [1, 1, 256]
+                                encoded_dbs_attn_map  # [1, K, 256]
+                            ], dim=1)
+                            
+                            concated_db_patches_flat = concated_db_patches.reshape(-1, patch_count, concated_db_patches.size(-1))
+                            concated_db_attn_map_flat = concated_db_attn_map.reshape(-1, patch_count)
+                            
+                            # ========== 7. Global Descriptors ==========
+                            # Query Descriptor Expand [1, 768] -> [1, K, 768] -> [K, 768]
+                            global_query_exp = encoded_queries_descriptor.unsqueeze(1).expand(
+                                -1, RERANKING_TOP_K, -1
+                            ).reshape(-1, encoded_queries_descriptor.size(-1))
+                            
+                            global_pos_flat = encoded_dbs_descriptor.reshape(-1, encoded_dbs_descriptor.size(-1))
+                            
+                            # ========== 9. Reranking ==========
+                            reranker = model.module.reranker
+                            reranker.global_query_cache = encoded_queries_descriptor[0].unsqueeze(0)
+                            
+                            rerank_scores = reranker(
+                                concated_db_patches_flat,
+                                concated_db_attn_map_flat,
+                                queries_indexes,
+                                positives_indexes,
+                                None,
+                                global_query=global_query_exp,
+                                global_pos=global_pos_flat,
+                                global_neg=None,
+                                cross_attn_matrix=None
+                            )
+                            
+                            # ========== 10. Reshape & Reorder ==========
+                            rerank_scores = rerank_scores.reshape(1, RERANKING_TOP_K)  # [1, K]
+                        
+                            sorted_indices = torch.argsort(rerank_scores[0], descending=True)
+                            predictions[query_idx, :RERANKING_TOP_K] = top_k_db_indices_batch[sorted_indices.cpu()] # <--- 수정됨
+                            
+                            del encoded_queries_features, encoded_queries_attn_map, encoded_queries_descriptor
+                            del encoded_dbs_features, encoded_dbs_attn_map, encoded_dbs_descriptor, concated_db_patches_flat, concated_db_attn_map_flat
+                            # if args.use_fast_track: break
+                except Exception as e:
+                    import traceback
+                    print(f"ERROR caught: {e}")
+                    traceback.print_exc()  # 전체 stack trace 출력
+                    breakpoint()
+            elif args.use_reranking == 'recon':
+                # FIXME: 옛날 코드에서 긁어서 추가하기
+                ...
+                
+            del queries_features
+            del database_features
+        
+            # 4. positive query(정답)가 몇 번째 top-N에 속하는지 검사하기
+            positives_per_query = eval_ds.get_positives()
+            recalls = np.zeros(len(args.recall_values))
+            pre_num = eval_ds.queries_num
+            for query_index, pred in enumerate(predictions):
+                for i, n in enumerate(args.recall_values):
+                    if np.any(np.in1d(pred[:n], positives_per_query[query_index])):
+                        recalls[i:] += 1
+                        break
+            recalls = recalls / eval_ds.queries_num * 100
+            
+            logging.info(f"recalls: {','.join(map(str, recalls))}")
+            recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, recalls)])
+
             prev_recalls = np.zeros(len(args.recall_values))
             for query_index, pred in enumerate(prev_predictions):
                 for i, n in enumerate(args.recall_values):
@@ -370,7 +373,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
             prev_recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, prev_recalls)])
             logging.info(f"Recalls before RERANKING {seq_name}: {prev_recalls_str}")
             logging.info(f"=================================================")
-            
+        
         gc.collect()
         torch.cuda.empty_cache()
         return recalls, recalls_str

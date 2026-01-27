@@ -420,7 +420,6 @@ class CrossModalVPR_Net(nn.Module):
         # Cross-modal에서는 모달리티 간 특성이 다르므로 가중치를 공유하지 않는 것이 일반적입니다.
         self.args = args
         self.rgb_backbone = get_backbone(pretrained_foundation, foundation_model_path)
-        self.thermal_backbone = get_backbone(pretrained_foundation, foundation_model_path)
         self.output_dim = args.features_dim
         self.use_masked_inference = False
         self.use_only_cross_decdoer = args.use_only_cross_decoder
@@ -519,12 +518,7 @@ class CrossModalVPR_Net(nn.Module):
     
     
     def croco_like_encoder(self, x, modality='thermal'):
-        if modality == 'thermal':
-            current_backbone = self.thermal_backbone
-        elif modality == 'rgb':
-            current_backbone = self.rgb_backbone
-        else:
-            raise ValueError(f"Wrong Modality: {modality}")
+        current_backbone = self.rgb_backbone
         
         image_patch = current_backbone.patch_embed(x)
         patch_B, patch_N, patch_D = image_patch.shape  # N=256, D=768
@@ -575,7 +569,8 @@ class CrossModalVPR_Net(nn.Module):
         """단일 모달리티에 대한 Forward"""
         # self.use_masked_inference: rerank를 위해, decoder에 들어가기 바로 전 단계를 뱉는다
         
-        recon_loss = None
+        recon_loss_thermal = None
+        recon_loss_rgb = None
         global_desc = None
         mask_thermal = None
         penultimate_patch = None
@@ -583,11 +578,6 @@ class CrossModalVPR_Net(nn.Module):
         cls_attn_map = None
         if modality == 'rgb':
             if self.use_masked_inference:
-                # rgb_full = self.rgb_backbone(x)
-                # rgb_full = rgb_full["x_norm_patchtokens"] 
-                # rgb_full = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
-                # out = {"x_norm_patchtokens": rgb_full}
-
                 rgb_visible, mask_rgb, patch_B, patch_N, patch_D, rgb_cls = self.croco_like_encoder(x, modality='rgb')
                 rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B, patch_N, patch_D)
                 rgb_full_dec = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
@@ -608,7 +598,7 @@ class CrossModalVPR_Net(nn.Module):
                 rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb, rgb_cls = self.croco_like_encoder(paired_rgb, modality='rgb')
 
                 # 5. paired RGB도 feature tokens 추출하기
-                paired_thermal = self.thermal_backbone(x, return_attention=True)
+                paired_thermal = self.rgb_backbone(x, return_attention=True)
                 paired_thermal_cls_attn_single_head = paired_thermal["cls_attention"][:, :, 1:].sum(dim=1) # [B, MHA, 256]
                 penultimate_patch = paired_thermal["penultimate_norm_patchtokens"]
                 paired_thermal_full = paired_thermal["x_norm_patchtokens"]
@@ -653,7 +643,6 @@ class CrossModalVPR_Net(nn.Module):
                 # 10. Reconstruction loss 계산
                 recon_loss_thermal = recon_loss_fn(reconstructed_thermal_patches, mask_thermal, target_thermal_patches)
                 recon_loss_rgb = recon_loss_fn(reconstructed_rgb_patches, mask_rgb, target_rgb_patches)
-                recon_loss = (recon_loss_thermal + recon_loss_rgb) / 2
             else:
                 # when inference
                 # NOTE: 부르는 곳에 no_grad 호출하기
@@ -671,7 +660,7 @@ class CrossModalVPR_Net(nn.Module):
                         "x_norm_clstoken": thermal_cls,
                     }
                 else:
-                    out = self.thermal_backbone(x,return_attention=True)
+                    out = self.rgb_backbone(x,return_attention=True)
                     cls_attn_map = out["cls_attention"][:, :, 1:].sum(dim=1)
                     penultimate_patch = out["penultimate_norm_patchtokens"]
             agg_layer = self.thermal_aggregation
@@ -705,7 +694,7 @@ class CrossModalVPR_Net(nn.Module):
             out = self.rgb_backbone(x)
             agg_layer = self.rgb_aggregation
         elif modality == 'thermal':
-            out = self.thermal_backbone(x)
+            out = self.rgb_backbone(x)
             agg_layer = self.thermal_aggregation
         else:
             raise ValueError("Modality must be 'rgb' or 'thermal'")
@@ -728,7 +717,6 @@ class CrossModalVPR_Net(nn.Module):
         if not isinstance(flags, torch.Tensor):
             flags = torch.tensor(flags, device=x.device)
         
-        # [수정] flags가 다른 디바이스에 있을 경우를 대비해 device 맞춤
         if flags.device != x.device:
             flags = flags.to(x.device)
 
@@ -778,9 +766,8 @@ class CrossModalVPR_Net(nn.Module):
         )
         return recon_loss
 
-
 def get_backbone(pretrained_foundation, foundation_model_path):
-    backbone = vit_small(patch_size=14,img_size=518,init_values=1,block_chunks=0)
+    backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0)
     if pretrained_foundation:
         assert foundation_model_path is not None, "Please specify foundation model path."
         model_dict = backbone.state_dict()

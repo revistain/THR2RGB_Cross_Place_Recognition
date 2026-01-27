@@ -43,7 +43,7 @@ if __name__ == "__main__":
     args = parser.parse_arguments()
 
     # wandb 초기화
-    wandb.init(project="cross-modal-vpr-644x476", name=args.comment, config=vars(args))
+    wandb.init(project="cross-modal-vpr-4", name=args.comment, config=vars(args))
 
     args.save_dir = os.path.join(args.save_dir, args.comment, utils.get_timestamp())
     commons.setup_logging(args.save_dir)
@@ -99,13 +99,6 @@ if __name__ == "__main__":
             num_blocks = len(model.module.rgb_backbone.blocks)
             model.module.rgb_backbone.blocks[num_blocks - i - 1].requires_grad_(True)
 
-    for name, param in model.module.thermal_backbone.named_parameters():
-        if "adapter" not in name:
-            param.requires_grad = False
-        for i in range(args.num_trainable_blocks_THERMAL):
-            num_blocks = len(model.module.thermal_backbone.blocks)
-            model.module.thermal_backbone.blocks[num_blocks - i - 1].requires_grad_(True)
-
     for n, m in model.named_modules():
         if 'adapter' in n:
             for n2, m2 in m.named_modules():
@@ -130,7 +123,7 @@ if __name__ == "__main__":
 
         for name, param in model.named_parameters():
             if param.requires_grad:
-                if 'rgb_backbone' in name or 'thermal_backbone' in name:
+                if 'rgb_backbone' in name:
                     backbone_params.append(param)
                 else: other_params.append(param)
 
@@ -266,7 +259,7 @@ if __name__ == "__main__":
                     else:
                         rerank_patch_embedding = patch_embedding
 
-                    if args.use_reranking:
+                    if args.use_reranking == 'r2former':
                         reranker = model.module.reranker
                         rerank_loss = reranker(rerank_patch_embedding.detach(), cls_attn_map.detach(),
                                             queries_indexes, positives_indexes, negatives_indexes,
@@ -277,7 +270,7 @@ if __name__ == "__main__":
                     
                 # train_batch_size: 4, arg.negs_num_per_query: 10
                 recon_weight = args.recon_weight
-                if recon_loss is not None:
+                if args.use_recon_loss:
                     thermal_recon_loss = recon_loss[0]
                     rgb_recon_loss = recon_loss[1]
                     recon_loss = (thermal_recon_loss + rgb_recon_loss) / 2
