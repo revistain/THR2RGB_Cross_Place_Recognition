@@ -1,6 +1,6 @@
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
-CUDA_VISIBLE_DEVICES=1 \
+CUDA_VISIBLE_DEVICES=7 \
 python3 train_wandb.py \
     --save_dir './logs' \
     --features_dim 768 \
@@ -9,27 +9,42 @@ python3 train_wandb.py \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 4 \
     --num_trainable_blocks_THERMAL 4 \
-    --comment "224x224-R2former-0.8-alpha10-decDepth8-GeM" \
+    --comment "224x224-GeM-selaVPR-rerank" \
     --margin 0.1 \
     --epochs_num 100 \
+    --soft_positives_dist_threshold 10 \
+    --hard_positives_dist_threshold 10 \
     --negs_num_per_query 10 \
     --croco_mask_ratio 0.8 \
     --num_decoder_depth 8 \
-    --recon_weight 10 \
-    --use_recon_loss \
+    --use_selaVPR_loss \
+    --selaVPR_weight 1 \
+    --use_reranking 'selaVPR' \
     --recon_loss_type 'mse+ssim'
-    # --use_fast_track
-    # --r2_penultimate_layer \
-    # --use_reranking 'r2former'
-    # --use_recon_loss
-    # --use_fast_track \
-    
-    # --use_fast_track \
+
+    # --recon_weight 10 \
+    # --use_recon_loss \
+    # --use_selaVPR_loss \
+    # --selaVPR_weight 1 \
     # --use_cls_for_vpr \
+    # --r2_penultimate_layer \
+
+    #### r2former
+    # --r2_penultimate_layer \
     # --r2_add_random_patch \
+    # --use_reranking 'r2former' \
+    # --use_cls_for_vpr \
+
+    #### selaVPR
+    # --use_selaVPR_loss \
+    # --selaVPR_weight 1 \
+    # --use_reranking 'selaVPR' \
+
     # --use_fast_track \
+    # --use_selaLocalFeature \
+    # --use_recon_loss
+    # --r2_add_random_patch \
     # --rerank_with_RGB \
-    # --use_fast_track \
     # --use_only_cross_decoder \
     # --use_contrastive_recon_loss \
     # --ssim-contrastLoss
@@ -72,3 +87,5 @@ python3 train_wandb.py \
 # - reconstruction이 다 뭉개지니까 pixel level에서 명확한 비교가 안됨
 # - decoder가 가벼우니까, encoder에서 최대한 압축된 정보를 만들어내려고함
 # - 그럼 pixel 레벨 다 버려짐 
+
+## ~/.local/share/claude/versions/2.1.19

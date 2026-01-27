@@ -15,6 +15,7 @@ from timm.models.layers import trunc_normal_
 
 from croco.models.masking import RandomMask
 from croco.models.criterion import MaskedMSE
+from pathlib import Path
 
 class CroCoDecoderBlock(nn.Module):
     def __init__(self, dim=768, num_heads=12, mlp_ratio=4.0, drop_path=0.0):
@@ -410,17 +411,28 @@ class RerankingModule(nn.Module):
             )
                 
             return local_score
-        
+
+class LocalAdapt(nn.Module):
+    def __init__(self, feature_dim):
+        super().__init__()
+        self.upconv1 = torch.nn.ConvTranspose2d(in_channels=feature_dim, out_channels=256, kernel_size=3, stride=2, padding=1)
+        self.upconv2 = torch.nn.ConvTranspose2d(in_channels=256, out_channels=128, kernel_size=3, stride=2, padding=1)
+        self.relu = nn.ReLU(inplace=True)
+    def forward(self,x):
+        x = self.upconv1(x)
+        x = self.relu(x)
+        x = self.upconv2(x)
+        return x    
+
 class CrossModalVPR_Net(nn.Module):
     def __init__(self, args, pretrained_foundation=False, foundation_model_path=None):
-        # NOTE: 그냥 args를 넘기는게 편하다는건 알지만, 이미 늦어버렸습니다...
         super().__init__()
 
-        # 1. 두 개의 독립적인 Backbone 생성 (Weights Unshared)
-        # Cross-modal에서는 모달리티 간 특성이 다르므로 가중치를 공유하지 않는 것이 일반적입니다.
         self.args = args
-        self.rgb_backbone = get_backbone(pretrained_foundation, foundation_model_path)
+        self.shared_backbone = get_backbone(pretrained_foundation, foundation_model_path)
         self.output_dim = args.features_dim
+        if args.use_selaVPR_loss:
+            self.local_adapt = LocalAdapt(self.output_dim)
         self.use_masked_inference = False
         self.use_only_cross_decdoer = args.use_only_cross_decoder
         self.recon_loss_type = args.recon_loss_type
@@ -518,13 +530,13 @@ class CrossModalVPR_Net(nn.Module):
     
     
     def croco_like_encoder(self, x, modality='thermal'):
-        current_backbone = self.rgb_backbone
-        
+        current_backbone = self.shared_backbone
+
         image_patch = current_backbone.patch_embed(x)
         patch_B, patch_N, patch_D = image_patch.shape  # N=256, D=768
 
         cls_token = current_backbone.cls_token.expand(patch_B, -1, -1)  # [B, 1, 768]
-        
+
         # Positional embedding
         pos_tokens = current_backbone.pos_embed[:, 1:, :]
         pos_embed_grid = pos_tokens.reshape(1, 37, 37, patch_D).permute(0, 3, 1, 2)
@@ -537,23 +549,35 @@ class CrossModalVPR_Net(nn.Module):
         cls_token = cls_token + cls_pos_embed  # [B, 1, 768]
 
         image_with_cls = torch.cat([cls_token, image_patch], dim=1)  # [B, 257, 768]
-        
-        # Masking (CLS는 항상 visible)
+
+        # Add register tokens if they exist (DINOv2 with registers)
+        # Register tokens are added AFTER positional encoding (they don't have pos embed)
+        num_register_tokens = current_backbone.num_register_tokens
+        if current_backbone.register_tokens is not None:
+            register_tokens = current_backbone.register_tokens.expand(patch_B, -1, -1)
+            image_with_cls = torch.cat([
+                image_with_cls[:, :1],      # CLS
+                register_tokens,             # register tokens
+                image_with_cls[:, 1:]        # patches
+            ], dim=1)  # [B, 1 + num_register_tokens + 256, 768]
+
+        # Masking (CLS and register tokens are always visible)
         mask = self.mask_generator(image_patch)  # [B, 256]
-        cls_mask = torch.zeros(patch_B, 1, dtype=torch.bool, device=mask.device)
-        full_mask = torch.cat([cls_mask, mask], dim=1)  # [B, 257]
-        
-        patch_visible = image_with_cls[~full_mask].reshape(patch_B, -1, patch_D)  # [B, ~101, 768]
-        
+        cls_reg_mask = torch.zeros(patch_B, 1 + num_register_tokens, dtype=torch.bool, device=mask.device)
+        full_mask = torch.cat([cls_reg_mask, mask], dim=1)  # [B, 1 + num_reg + 256]
+
+        patch_visible = image_with_cls[~full_mask].reshape(patch_B, -1, patch_D)  # [B, ~(1+num_reg+visible_patches), 768]
+
         # Encoder 통과
         for blk in current_backbone.blocks:
             patch_visible = blk(patch_visible)
         patch_visible = current_backbone.norm(patch_visible)
-        
-        # ========== CLS 분리 ==========
+
+        # ========== CLS 분리 (skip register tokens) ==========
         cls_visible = patch_visible[:, 0:1, :]  # [B, 1, 768]
-        patch_only_visible = patch_visible[:, 1:, :]  # [B, ~100, 768]
-        
+        # Skip CLS and register tokens to get only patch tokens
+        patch_only_visible = patch_visible[:, 1 + num_register_tokens:, :]  # [B, ~visible_patches, 768]
+
         return patch_only_visible, mask, patch_B, patch_N, patch_D, cls_visible
 
 
@@ -586,8 +610,8 @@ class CrossModalVPR_Net(nn.Module):
                     "x_norm_clstoken": rgb_cls,
                 }
             else:
-                out = self.rgb_backbone(x, return_attention=True)
-                cls_attn_map = out["cls_attention"][:, :, 1:].sum(dim=1)
+                out = self.shared_backbone(x, return_attention=True)
+                cls_attn_map = out["cls_attention"].sum(dim=1)
                 penultimate_patch = out["penultimate_norm_patchtokens"]
                 
             agg_layer = self.rgb_aggregation
@@ -598,13 +622,13 @@ class CrossModalVPR_Net(nn.Module):
                 rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb, rgb_cls = self.croco_like_encoder(paired_rgb, modality='rgb')
 
                 # 5. paired RGB도 feature tokens 추출하기
-                paired_thermal = self.rgb_backbone(x, return_attention=True)
-                paired_thermal_cls_attn_single_head = paired_thermal["cls_attention"][:, :, 1:].sum(dim=1) # [B, MHA, 256]
+                paired_thermal = self.shared_backbone(x, return_attention=True)
+                paired_thermal_cls_attn_single_head = paired_thermal["cls_attention"].sum(dim=1) # [B, MHA, 256]
                 penultimate_patch = paired_thermal["penultimate_norm_patchtokens"]
                 paired_thermal_full = paired_thermal["x_norm_patchtokens"]
                 cls_attn_map = paired_thermal_cls_attn_single_head
                 
-                paired_rgb_emb = self.rgb_backbone(paired_rgb, return_attention=True)
+                paired_rgb_emb = self.shared_backbone(paired_rgb, return_attention=True)
                 paired_rgb_full = paired_rgb_emb["x_norm_patchtokens"]
                 # paired_rgb_cls_attn = paired_rgb_emb["cls_attention"][:, :, 1:]
                 # paired_rgb_cls_attn_single_head = paired_rgb_cls_attn.sum(dim=1)
@@ -660,8 +684,8 @@ class CrossModalVPR_Net(nn.Module):
                         "x_norm_clstoken": thermal_cls,
                     }
                 else:
-                    out = self.rgb_backbone(x,return_attention=True)
-                    cls_attn_map = out["cls_attention"][:, :, 1:].sum(dim=1)
+                    out = self.shared_backbone(x,return_attention=True)
+                    cls_attn_map = out["cls_attention"].sum(dim=1)
                     penultimate_patch = out["penultimate_norm_patchtokens"]
             agg_layer = self.thermal_aggregation
         else:
@@ -669,7 +693,7 @@ class CrossModalVPR_Net(nn.Module):
             
         # Backbone 출력 처리 (ViT 기준)
         # x['x_norm_patchtokens']: (B, num_patchs, D)
-        patch_tokens = out["x_norm_patchtokens"]
+        patch_tokens = out["x_norm_patchtokens"] # torch.Size([64, 260, 768])
         
         if not self.use_masked_inference:
             # attnetion_dict_keys(['x_norm_clstoken', 'x_norm_patchtokens', 'x_prenorm', 'masks'])
@@ -690,11 +714,10 @@ class CrossModalVPR_Net(nn.Module):
 
     def forward_model_basic(self, x, modality='rgb'):
         """단일 모달리티에 대한 Forward"""
+        out = self.shared_backbone(x)
         if modality == 'rgb':
-            out = self.rgb_backbone(x)
             agg_layer = self.rgb_aggregation
         elif modality == 'thermal':
-            out = self.rgb_backbone(x)
             agg_layer = self.thermal_aggregation
         else:
             raise ValueError("Modality must be 'rgb' or 'thermal'")
@@ -765,9 +788,17 @@ class CrossModalVPR_Net(nn.Module):
             target=target,    # [B, 3, 256, 768]
         )
         return recon_loss
-
+    
 def get_backbone(pretrained_foundation, foundation_model_path):
-    backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0)
+    model_path = Path(foundation_model_path)
+    if 'reg4' in model_path.parts[-1]:
+        print("=" * 40)
+        print("- Using REGISTER DINOv2 -")
+        print("=" * 40)
+        backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0, num_register_tokens=4)
+    else:
+        backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0)
+        
     if pretrained_foundation:
         assert foundation_model_path is not None, "Please specify foundation model path."
         model_dict = backbone.state_dict()

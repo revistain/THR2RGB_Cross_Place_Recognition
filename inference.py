@@ -16,6 +16,7 @@ torch.backends.cudnn.deterministic = True
 
 from croco.models.masking import RandomMask
 from croco.models.criterion import MaskedMSE
+from local_matching import *
 
 from recon_vis import *
 
@@ -153,11 +154,12 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 
                 indices_npy = indices.numpy()
                 database_features[indices_npy,:] = features.cpu().numpy() # [B, C] # 이건 저장 x
-                database_attn_map[indices_npy,:] = outputs[4].cpu().numpy() # [B, N] # 이것도 저장 x
-                for num, idx in enumerate(indices_npy):
-                    save_npy(patch_features[num].cpu().numpy(), f"Db_{seq_name}_{idx}")
-                    if args.r2_penultimate_layer:
-                        save_npy(outputs[5][num].cpu().numpy(), f"Db_{seq_name}_penultimate_{idx}")
+                if args.use_reranking:
+                    database_attn_map[indices_npy,:] = outputs[4].cpu().numpy() # [B, N] # 이것도 저장 x
+                    for num, idx in enumerate(indices_npy):
+                        save_npy(patch_features[num].cpu().numpy(), f"Db_{seq_name}_{idx}")
+                        if args.r2_penultimate_layer:
+                            save_npy(outputs[5][num].cpu().numpy(), f"Db_{seq_name}_penultimate_{idx}")
                 if args.use_fast_track: break
                 
             logging.info(f"Finished extracting {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
@@ -181,13 +183,14 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 
                 indices_npy = indices.numpy()-eval_ds.database_num
                 queries_features[indices.numpy()-eval_ds.database_num,:] = features.cpu().numpy()
-                queries_attn_map[indices.numpy()-eval_ds.database_num,:] = outputs[4].cpu().numpy()
-                
-                for num, idx in enumerate(indices_npy):
-                    save_npy(patch_features[num].cpu().numpy(), f"Query_{seq_name}_{idx}")
-                    save_npy(outputs[5][num].cpu().numpy(), f"Query_{seq_name}_penultimate_{idx}")
+                if args.use_reranking:
+                    queries_attn_map[indices.numpy()-eval_ds.database_num,:] = outputs[4].cpu().numpy()
+                    
+                    for num, idx in enumerate(indices_npy):
+                        save_npy(patch_features[num].cpu().numpy(), f"Query_{seq_name}_{idx}")
+                        save_npy(outputs[5][num].cpu().numpy(), f"Query_{seq_name}_penultimate_{idx}")
                 if args.use_fast_track: break
-                
+                    
             logging.info(f"Finished extracting {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
 
         # 3. faiss를 이용하여, L2 distance로 가까운 descriptor 찾기
@@ -201,10 +204,12 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
         import gc; gc.collect()
         torch.cuda.empty_cache()
         
-        prev_predictions = predictions.copy()
         if args.use_reranking:
+            prev_predictions = predictions.copy()
             #####################################
             ############# RERANKING #############
+            print("=" * 30)
+            print("- USING RERANKING -")
             if args.use_reranking == 'r2former':
                 # 파일 개수만 확인
                 saved_files = os.listdir(NPY_ROOTPATH)
@@ -342,6 +347,18 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
             elif args.use_reranking == 'recon':
                 # FIXME: 옛날 코드에서 긁어서 추가하기
                 ...
+            elif args.use_reranking == 'selaVPR':
+                predictions = []
+                for query_index, pred in enumerate(tqdm(prev_predictions)):
+                    breakpoint()
+                    query_local_features = queries_features[query_index]
+                    candidates_local_features = database_features[pred]
+                    query_local_features = torch.Tensor(query_local_features).cuda()
+                    candidates_local_features = torch.Tensor(candidates_local_features).cuda()
+                    rerank_index = local_sim(query_local_features, candidates_local_features).cpu().numpy().argsort()[::-1]
+                    predictions.append(predictions[query_index][rerank_index])
+                    
+                predictions = np.array(predictions)
                 
             del queries_features
             del database_features
@@ -359,20 +376,20 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
             
             logging.info(f"recalls: {','.join(map(str, recalls))}")
             recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, recalls)])
-
-            prev_recalls = np.zeros(len(args.recall_values))
-            for query_index, pred in enumerate(prev_predictions):
-                for i, n in enumerate(args.recall_values):
-                    if np.any(np.in1d(pred[:n], positives_per_query[query_index])):
-                        prev_recalls[i:] += 1
-                        break
-            prev_recalls = prev_recalls / eval_ds.queries_num * 100
             
-            logging.info(f"=================================================")
-            logging.info(f"recalls before RERANKING: {','.join(map(str, prev_recalls))}")
-            prev_recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, prev_recalls)])
-            logging.info(f"Recalls before RERANKING {seq_name}: {prev_recalls_str}")
-            logging.info(f"=================================================")
+            if args.use_reranking:
+                prev_recalls = np.zeros(len(args.recall_values))
+                for query_index, pred in enumerate(prev_predictions):
+                    for i, n in enumerate(args.recall_values):
+                        if np.any(np.in1d(pred[:n], positives_per_query[query_index])):
+                            prev_recalls[i:] += 1
+                            break
+                prev_recalls = prev_recalls / eval_ds.queries_num * 100
+            
+                logging.info(f"=================================================")
+                prev_recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, prev_recalls)])
+                logging.info(f"Recalls before RERANKING {seq_name}: {prev_recalls_str}")
+                logging.info(f"=================================================")
         
         gc.collect()
         torch.cuda.empty_cache()

@@ -101,8 +101,10 @@ class Parser():
         self.parser.add_argument("--r2_add_random_patch", action='store_true', default=False)
         self.parser.add_argument("--use_cls_for_vpr", action='store_true', default=False)
         self.parser.add_argument("--use_recon_loss", action='store_true', default=False)
+        self.parser.add_argument("--use_selaVPR_loss", action='store_true', default=False)
+        self.parser.add_argument("--selaVPR_weight", type=float, default=1, help="_")
         self.parser.add_argument("--decoder_dim", type=int, default=128)
-        self.parser.add_argument("--use_reranking", type=str, default="none", choices=['recon', 'r2former'])
+        self.parser.add_argument("--use_reranking", type=str, default="none", choices=['recon', 'r2former', 'selaVPR'])
     
     def parse_arguments(self):
         args = self.parser.parse_args()

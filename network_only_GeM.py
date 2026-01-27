@@ -14,6 +14,7 @@ from timm.models.layers import trunc_normal_
 
 from croco.models.masking import RandomMask
 from croco.models.criterion import MaskedMSE
+from pathlib import Path
   
 class CroCoDecoderBlock(nn.Module):
     def __init__(self, dim=768, num_heads=12, mlp_ratio=4.0, drop_path=0.0):
@@ -409,7 +410,19 @@ class RerankingModule(nn.Module):
             )
                 
             return local_score
-      
+
+class LocalAdapt(nn.Module):
+    def __init__(self, feature_dim):
+        super().__init__()
+        self.upconv1 = torch.nn.ConvTranspose2d(in_channels=feature_dim, out_channels=256, kernel_size=3, stride=2, padding=1)
+        self.upconv2 = torch.nn.ConvTranspose2d(in_channels=256, out_channels=128, kernel_size=3, stride=2, padding=1)
+        self.relu = nn.ReLU(inplace=True)
+    def forward(self,x):
+        x = self.upconv1(x)
+        x = self.relu(x)
+        x = self.upconv2(x)
+        return x    
+
 class CrossModalVPR_Net(nn.Module):
     def __init__(self, args, pretrained_foundation=False, foundation_model_path=None):
         # NOTE: 그냥 args를 넘기는게 편하다는건 알지만, 이미 늦어버렸습니다...
@@ -418,8 +431,10 @@ class CrossModalVPR_Net(nn.Module):
         # 1. 두 개의 독립적인 Backbone 생성 (Weights Unshared)
         # Cross-modal에서는 모달리티 간 특성이 다르므로 가중치를 공유하지 않는 것이 일반적입니다.
         self.args = args
-        self.rgb_backbone = get_backbone(pretrained_foundation, foundation_model_path)
+        self.shared_backbone = get_backbone(pretrained_foundation, foundation_model_path)
         self.output_dim = args.features_dim
+        if args.use_selaVPR_loss:
+            self.local_adapt = LocalAdapt(args.features_dim)
         self.reranker = RerankingModule(args)
 
         # 2. Aggregation Layer (각각 따로 두는 것을 추천)
@@ -436,7 +451,7 @@ class CrossModalVPR_Net(nn.Module):
         
     def forward_model(self, x, paired_rgb=None, modality='rgb', return_masked_patch=False):
         """단일 모달리티에 대한 Forward"""
-        out = self.rgb_backbone(x, return_attention=True)
+        out = self.shared_backbone(x, return_attention=True)
         if modality == 'rgb':
             agg_layer = self.rgb_aggregation
         elif modality == 'thermal':
@@ -456,10 +471,21 @@ class CrossModalVPR_Net(nn.Module):
         x_feat = patch_tokens.permute(0, 2, 1).view(B, D, H_feat, W_feat)
         
         # Aggregation -> Descriptor
-        global_desc = agg_layer(x_feat) # [B, D]
-        cls_attn_map = out["cls_attention"][:, :, 1:].sum(dim=1)
+        if self.args.use_cls_for_vpr:
+            global_desc = out["x_norm_clstoken"]
+        else:
+            global_desc = agg_layer(x_feat) # [B, D]
+            
+        cls_attn_map = out["cls_attention"].sum(dim=1)
         
-        return global_desc, patch_tokens, cls_attn_map, out["penultimate_norm_patchtokens"]
+        sela_local_feature = None
+        if self.args.use_selaVPR_loss:
+            x0 = patch_tokens.view(-1,H_feat,W_feat,self.output_dim).permute(0, 3, 1, 2)
+            x0 = self.local_adapt(x0)
+            x0 = x0.permute(0, 2, 3, 1)
+            sela_local_feature = torch.nn.functional.normalize(x0, p=2, dim=-1) # [B, 61, 61, 128] / 224x224 기준
+        
+        return global_desc, patch_tokens, cls_attn_map, out["penultimate_norm_patchtokens"], sela_local_feature
 
     def forward(self, x, flags, paired_rgb=None, return_mask=False, return_masked_patch=False):
         is_rgb = torch.tensor([f == 'rgb' for f in flags], device=x.device)
@@ -468,17 +494,28 @@ class CrossModalVPR_Net(nn.Module):
         patch_emb = torch.zeros((x.size(0), patch_count, self.output_dim), device=x.device)
         cls_attn_map = torch.zeros((x.size(0), patch_count), device=x.device)
         penultimate_patch_emb = torch.zeros((x.size(0), patch_count, self.output_dim), device=x.device)
+        if self.args.use_selaVPR_loss:
+            sela_local_emb = torch.zeros((x.size(0), 61, 61, 128), device=x.device)
         
         if is_rgb.any(): 
-            final_emb[is_rgb], patch_emb[is_rgb], cls_attn_map[is_rgb], penultimate_patch_emb[is_rgb] = self.forward_model(x[is_rgb], 'rgb')
+            final_emb[is_rgb], patch_emb[is_rgb], cls_attn_map[is_rgb], penultimate_patch_emb[is_rgb], sela_local_feature = self.forward_model(x[is_rgb], 'rgb')
+            if self.args.use_selaVPR_loss:
+                sela_local_emb[is_rgb] = sela_local_feature
             
         if (~is_rgb).any():
-            final_emb[~is_rgb], patch_emb[~is_rgb], cls_attn_map[~is_rgb], penultimate_patch_emb[~is_rgb] = self.forward_model(x[~is_rgb], 'thermal')
+            final_emb[~is_rgb], patch_emb[~is_rgb], cls_attn_map[~is_rgb], penultimate_patch_emb[~is_rgb], sela_local_feature = self.forward_model(x[~is_rgb], 'thermal')
+            if self.args.use_selaVPR_loss:
+                sela_local_emb[~is_rgb] = sela_local_feature
         
-        return [final_emb, patch_emb, None, None, cls_attn_map, penultimate_patch_emb]
+        return [final_emb, patch_emb, None, None, cls_attn_map, penultimate_patch_emb, sela_local_emb]
 
 def get_backbone(pretrained_foundation, foundation_model_path):
-    backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0)
+    model_path = Path(foundation_model_path)
+    if 'reg4' in model_path.parts[-1]:
+        backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0, num_register_tokens=4)
+    else:
+        backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0)
+        
     if pretrained_foundation:
         assert foundation_model_path is not None, "Please specify foundation model path."
         model_dict = backbone.state_dict()

@@ -23,10 +23,12 @@ import inference
 import random
 from croco.models.criterion import MaskedMSE
 from recon_vis import visualize_during_training
+from visual import visualize_attention_maps_pca
 from info_nce import InfoNCE, info_nce
 
 import network
 import network_only_GeM
+from local_matching import LocalFeatureLoss
 def set_seed(seed=42):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -92,12 +94,12 @@ if __name__ == "__main__":
     print("- Tuning RGB backbone layers: ", args.num_trainable_blocks_RGB)
     print("- Tuning THERMAL backbone layers: ", args.num_trainable_blocks_THERMAL)
     print("="*30)
-    for name, param in model.module.rgb_backbone.named_parameters():
+    for name, param in model.module.shared_backbone.named_parameters():
         if "adapter" not in name:
             param.requires_grad = False
         for i in range(args.num_trainable_blocks_RGB):
-            num_blocks = len(model.module.rgb_backbone.blocks)
-            model.module.rgb_backbone.blocks[num_blocks - i - 1].requires_grad_(True)
+            num_blocks = len(model.module.shared_backbone.blocks)
+            model.module.shared_backbone.blocks[num_blocks - i - 1].requires_grad_(True)
 
     for n, m in model.named_modules():
         if 'adapter' in n:
@@ -123,7 +125,7 @@ if __name__ == "__main__":
 
         for name, param in model.named_parameters():
             if param.requires_grad:
-                if 'rgb_backbone' in name:
+                if 'shared_backbone' in name:
                     backbone_params.append(param)
                 else: other_params.append(param)
 
@@ -147,6 +149,7 @@ if __name__ == "__main__":
 
     '''Loss Function'''
     GlobalTriplet = nn.TripletMarginLoss(margin=args.margin, p=2, reduction="sum")
+    MNNLocalFeatureLoss = LocalFeatureLoss().to(args.device)
 
     '''Resume from checkpoint'''
     if args.resume:
@@ -231,6 +234,8 @@ if __name__ == "__main__":
                     global_features = outputs[0]
                     patch_embedding = outputs[1]
                     cls_attn_map = outputs[4]
+                    if args.use_selaVPR_loss:
+                        sela_local_embedding = outputs[6]
 
                 # triplets_local_indexes = (batch, 3, neg_num) => [[[0, 1, 2], [0, 1, 3] ... [0, 1, neg_num+2]] * batch]
                 triplets_local_indexes = torch.transpose(
@@ -239,6 +244,7 @@ if __name__ == "__main__":
                 overall_loss = 0
                 triplet_loss_sum = 0
                 rerank_loss_sum = 0
+                local_loss_sum = 0
                 # 각 triplet에 대해 triplet loss 계산
                 for triplets in triplets_local_indexes:
                     queries_indexes, positives_indexes, negatives_indexes = triplets.T
@@ -266,11 +272,10 @@ if __name__ == "__main__":
                                             query_features.detach(), positive_features.detach(), negative_features.detach())
                         overall_loss += rerank_loss
                         rerank_loss_sum += rerank_loss
-
                     
                 # train_batch_size: 4, arg.negs_num_per_query: 10
-                recon_weight = args.recon_weight
                 if args.use_recon_loss:
+                    recon_weight = args.recon_weight
                     thermal_recon_loss = recon_loss[0]
                     rgb_recon_loss = recon_loss[1]
                     recon_loss = (thermal_recon_loss + rgb_recon_loss) / 2
@@ -283,7 +288,19 @@ if __name__ == "__main__":
                         "train/recon_loss(Rgb)": rgb_recon_loss.mean().item()
                             * recon_weight / (args.train_batch_size * args.negs_num_per_query),
                     }, step=global_step)
-
+                    
+                if args.use_selaVPR_loss:
+                    selaVPR_weight = args.selaVPR_weight
+                    local_loss = MNNLocalFeatureLoss([sela_local_embedding[queries_indexes],
+                                sela_local_embedding[positives_indexes],
+                                sela_local_embedding[negatives_indexes]])
+                    local_loss_sum += local_loss
+                    overall_loss += (local_loss * selaVPR_weight)
+                    
+                    wandb.log({
+                        "train/selaVPR_loss": local_loss.mean().item() / (args.train_batch_size * args.negs_num_per_query),
+                    }, step=global_step)
+                        
                 overall_loss /= (args.train_batch_size * args.negs_num_per_query)
 
                 del global_features, query_features, positive_features, negative_features
@@ -313,15 +330,28 @@ if __name__ == "__main__":
                         f"current batch triplet loss = {batch_loss:.8f}, " +
                         f"average epoch triplet loss = {epoch_losses.mean():.8f}")
         
-        # visualize_during_training(
-        #     args,
-        #     model, 
-        #     triplets_dl, 
-        #     args.device, 
-        #     epoch_num,
-        #     save_dir=os.path.join(args.save_dir, 'reconstructions'),
-        #     comment=args.comment
-        # )
+        if args.use_recon_loss:
+            visualize_during_training(
+                args,
+                model,
+                triplets_dl,
+                args.device,
+                epoch_num,
+                save_dir=os.path.join(args.save_dir, 'reconstructions'),
+                comment=args.comment
+            )
+
+        # Visualize attention maps (penultimate and last layer) using PCA
+        visualize_attention_maps_pca(
+            args,
+            model,
+            triplets_dl,
+            args.device,
+            epoch_num,
+            num_samples=4,
+            save_dir=os.path.join(args.save_dir, 'attention_maps'),
+            comment=args.comment
+        )
 
         # wandb 로깅 (epoch 단위)
         wandb.log({"train/epoch_avg_loss": epoch_losses.mean(), "epoch": epoch_num}, step=global_step)
