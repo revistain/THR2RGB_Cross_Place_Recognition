@@ -216,7 +216,7 @@ if __name__ == "__main__":
                 if args.use_recon_loss:
                     global_features, patch_embedding, \
                     recon_loss, masks, cls_attn_map, \
-                    penultimate_patch_embedding, masked_patch_embedding = model(
+                    penultimate_patch_embedding, sela_local_embedding, masked_patch_embedding = model(
                         images.to(args.device),
                         flags=flags,
                         paired_rgb=aligned_rgbs.to(args.device),
@@ -272,7 +272,16 @@ if __name__ == "__main__":
                                             query_features.detach(), positive_features.detach(), negative_features.detach())
                         overall_loss += rerank_loss
                         rerank_loss_sum += rerank_loss
-                    
+                        
+                    if args.use_selaVPR_loss:
+                        selaVPR_weight = args.selaVPR_weight
+                        local_loss = MNNLocalFeatureLoss([
+                                    sela_local_embedding[queries_indexes],
+                                    sela_local_embedding[positives_indexes],
+                                    sela_local_embedding[negatives_indexes]])
+                        local_loss_sum += local_loss
+                        overall_loss += (local_loss * selaVPR_weight)
+                        
                 # train_batch_size: 4, arg.negs_num_per_query: 10
                 if args.use_recon_loss:
                     recon_weight = args.recon_weight
@@ -290,17 +299,10 @@ if __name__ == "__main__":
                     }, step=global_step)
                     
                 if args.use_selaVPR_loss:
-                    selaVPR_weight = args.selaVPR_weight
-                    local_loss = MNNLocalFeatureLoss([sela_local_embedding[queries_indexes],
-                                sela_local_embedding[positives_indexes],
-                                sela_local_embedding[negatives_indexes]])
-                    local_loss_sum += local_loss
-                    overall_loss += (local_loss * selaVPR_weight)
-                    
                     wandb.log({
                         "train/selaVPR_loss": local_loss.mean().item() / (args.train_batch_size * args.negs_num_per_query),
                     }, step=global_step)
-                        
+                    
                 overall_loss /= (args.train_batch_size * args.negs_num_per_query)
 
                 del global_features, query_features, positive_features, negative_features

@@ -36,7 +36,7 @@ def patchify(imgs):
     return x
 
 START_TIME = get_timestamp()
-NPY_ROOTPATH = f"/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/npys_agg/{START_TIME}"
+NPY_ROOTPATH = None
 def save_npy(data, path):
     np.save(os.path.join(NPY_ROOTPATH, path), data)
     
@@ -121,6 +121,9 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
     * hard_size method for all database images
     * selected test_method for all query images
     '''
+    global NPY_ROOTPATH
+    if NPY_ROOTPATH is None:
+        NPY_ROOTPATH = f"/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/npys_agg/{START_TIME}_{args.comment}"
     if os.path.exists(NPY_ROOTPATH):
         import shutil
         shutil.rmtree(NPY_ROOTPATH)
@@ -145,6 +148,10 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
             database_features = np.empty((eval_ds.database_num, args.features_dim), dtype="float32")
             database_attn_map = np.empty((eval_ds.database_num, patch_count), dtype="float32")
             
+            use_selaVPR = args.use_reranking == 'selaVPR'
+            use_penultimate = args.r2_penultimate_layer
+            print(f"Using SelaVPR: {use_selaVPR}")
+            print(f"Using penultimate: {use_penultimate}")
             for inputs, indices, flags in tqdm(database_dataloader, ncols=100):
                 flags_int = [1 if f == 'rgb' else 0 for f in flags]
                 flags = torch.tensor(flags_int, dtype=torch.long, device=args.device)
@@ -154,13 +161,13 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 
                 indices_npy = indices.numpy()
                 database_features[indices_npy,:] = features.cpu().numpy() # [B, C] # 이건 저장 x
-                if args.use_reranking:
+                if args.use_reranking != 'none':
                     database_attn_map[indices_npy,:] = outputs[4].cpu().numpy() # [B, N] # 이것도 저장 x
                     for num, idx in enumerate(indices_npy):
-                        save_npy(patch_features[num].cpu().numpy(), f"Db_{seq_name}_{idx}")
-                        if args.r2_penultimate_layer:
-                            save_npy(outputs[5][num].cpu().numpy(), f"Db_{seq_name}_penultimate_{idx}")
-                if args.use_fast_track: break
+                        if use_penultimate: save_npy(outputs[5][num].cpu().numpy(), f"Db_{seq_name}_penultimate_{idx}")
+                        if use_selaVPR: save_npy(outputs[6][num].cpu().numpy(), f"Db_{seq_name}_sela_{idx}")
+                        else: save_npy(patch_features[num].cpu().numpy(), f"Db_{seq_name}_{idx}")
+                # if args.use_fast_track: break
                 
             logging.info(f"Finished extracting {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
 
@@ -173,7 +180,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
 
             queries_features = np.empty((eval_ds.queries_num, args.features_dim), dtype="float32")
             queries_attn_map = np.empty((eval_ds.queries_num, patch_count), dtype="float32")
-            
+                
             for inputs, indices, flags in tqdm(queries_dataloader, ncols=100):
                 flags_int = [1 if f == 'rgb' else 0 for f in flags]
                 flags = torch.tensor(flags_int, dtype=torch.long, device=args.device)
@@ -183,13 +190,14 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 
                 indices_npy = indices.numpy()-eval_ds.database_num
                 queries_features[indices.numpy()-eval_ds.database_num,:] = features.cpu().numpy()
-                if args.use_reranking:
+                if args.use_reranking != 'none':
                     queries_attn_map[indices.numpy()-eval_ds.database_num,:] = outputs[4].cpu().numpy()
                     
                     for num, idx in enumerate(indices_npy):
-                        save_npy(patch_features[num].cpu().numpy(), f"Query_{seq_name}_{idx}")
-                        save_npy(outputs[5][num].cpu().numpy(), f"Query_{seq_name}_penultimate_{idx}")
-                if args.use_fast_track: break
+                        if use_penultimate: save_npy(outputs[5][num].cpu().numpy(), f"Query_{seq_name}_penultimate_{idx}")
+                        if use_selaVPR: save_npy(outputs[6][num].cpu().numpy(), f"Query_{seq_name}_sela_{idx}")
+                        else: save_npy(patch_features[num].cpu().numpy(), f"Query_{seq_name}_{idx}")
+                # if args.use_fast_track: break
                     
             logging.info(f"Finished extracting {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
 
@@ -204,12 +212,13 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
         import gc; gc.collect()
         torch.cuda.empty_cache()
         
-        if args.use_reranking:
+        if args.use_reranking != none:
             prev_predictions = predictions.copy()
             #####################################
             ############# RERANKING #############
             print("=" * 30)
             print("- USING RERANKING -")
+            RERANKING_TOP_K = 5
             if args.use_reranking == 'r2former':
                 # 파일 개수만 확인
                 saved_files = os.listdir(NPY_ROOTPATH)
@@ -225,7 +234,6 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 
                 logging.info(f"✓ File count verified: {len(db_files)} DB + {len(query_files)} Query")
                 
-                RERANKING_TOP_K = 5
                 reconstruction_losses_dict = {}
                 
                 queries_indexes = torch.zeros(RERANKING_TOP_K, dtype=torch.long).cuda()
@@ -348,15 +356,36 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 # FIXME: 옛날 코드에서 긁어서 추가하기
                 ...
             elif args.use_reranking == 'selaVPR':
+                saved_files = os.listdir(NPY_ROOTPATH)
+                prefix = "sela"
+                db_files = [f for f in saved_files if f.startswith(f"Db_{seq_name}") and prefix in f]
+                query_files = [f for f in saved_files if f.startswith(f"Query_{seq_name}") and prefix in f]
+                
+                assert len(db_files) == eval_ds.database_num, \
+                    f"DB files mismatch: {len(db_files)} vs {eval_ds.database_num}"
+                assert len(query_files) == eval_ds.queries_num, \
+                    f"Query files mismatch: {len(query_files)} vs {eval_ds.queries_num}"
+                
+                logging.info(f"✓ File count verified: {len(db_files)} DB + {len(query_files)} Query")
+
                 predictions = []
+                candidates_local_features = torch.zeros(RERANKING_TOP_K, 61, 61, 128, device='cuda')
                 for query_index, pred in enumerate(tqdm(prev_predictions)):
-                    breakpoint()
-                    query_local_features = queries_features[query_index]
-                    candidates_local_features = database_features[pred]
-                    query_local_features = torch.Tensor(query_local_features).cuda()
-                    candidates_local_features = torch.Tensor(candidates_local_features).cuda()
-                    rerank_index = local_sim(query_local_features, candidates_local_features).cpu().numpy().argsort()[::-1]
-                    predictions.append(predictions[query_index][rerank_index])
+                    # Load query local features: [61, 61, 128]
+                    query_local_features = torch.from_numpy(
+                        load_npy(f"Query_{seq_name}_sela_{query_index}")
+                    ).float().cuda()
+
+                    # Load candidate local features: [K, 61, 61, 128]
+                    for cnt, candidates_index in enumerate(pred[:RERANKING_TOP_K]):
+                        candidates_local_features[cnt] = torch.from_numpy(
+                            load_npy(f"Db_{seq_name}_sela_{candidates_index}")
+                        ).float().cuda()
+
+                    # local_sim expects: query [H, W, C], candidates [B, H, W, C]
+                    rerank_scores = local_sim(query_local_features, candidates_local_features, trainflag=False)
+                    rerank_index = rerank_scores.cpu().numpy().argsort()[::-1]
+                    predictions.append(pred[rerank_index])
                     
                 predictions = np.array(predictions)
                 
@@ -377,7 +406,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
             logging.info(f"recalls: {','.join(map(str, recalls))}")
             recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, recalls)])
             
-            if args.use_reranking:
+            if args.use_reranking != 'none':
                 prev_recalls = np.zeros(len(args.recall_values))
                 for query_index, pred in enumerate(prev_predictions):
                     for i, n in enumerate(args.recall_values):

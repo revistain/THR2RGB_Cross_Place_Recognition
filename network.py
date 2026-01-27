@@ -122,9 +122,6 @@ class L2Norm(nn.Module):
         return F.normalize(x, p=2, dim=self.dim)
 
 class AggregationHead(nn.Module):
-    # residue + bottleneck구조 사용함
-    # 1. residue 사용이유: 초반에 GeM을 사용하기 위해(triplet을 구하는 과정을 조금이라도 초반에 안정적으로 하기 위함)
-    # 2. bottleneck 사용이유: 너무 parameter가 많아지면 overfitting 우려가 있어 줄이기 위해
     def __init__(self, dim=768, bottleneck=192):
         super().__init__()
         self.gem = nn.Sequential(L2Norm(), GeM(), Flatten())
@@ -133,7 +130,6 @@ class AggregationHead(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(bottleneck, dim)
         )
-        # 0 초기화
         nn.init.zeros_(self.mlp[-1].weight)
         nn.init.zeros_(self.mlp[-1].bias)
     
@@ -431,7 +427,7 @@ class CrossModalVPR_Net(nn.Module):
         self.args = args
         self.shared_backbone = get_backbone(pretrained_foundation, foundation_model_path)
         self.output_dim = args.features_dim
-        if args.use_selaVPR_loss:
+        if args.use_selaVPR_loss or args.use_reranking == 'selaVPR':
             self.local_adapt = LocalAdapt(self.output_dim)
         self.use_masked_inference = False
         self.use_only_cross_decdoer = args.use_only_cross_decoder
@@ -694,23 +690,31 @@ class CrossModalVPR_Net(nn.Module):
         # Backbone 출력 처리 (ViT 기준)
         # x['x_norm_patchtokens']: (B, num_patchs, D)
         patch_tokens = out["x_norm_patchtokens"] # torch.Size([64, 260, 768])
-        
+
+        sela_local_feature = None
         if not self.use_masked_inference:
             # attnetion_dict_keys(['x_norm_clstoken', 'x_norm_patchtokens', 'x_prenorm', 'masks'])
             B, N, D = patch_tokens.shape # B, # N # D
-            
+
             # 224,224 정방 이미지 입력 가정(patch 2D 복원)
             H_feat = int(x.shape[2]/14)
             W_feat = int(x.shape[3]/14)
             x_feat = patch_tokens.permute(0, 2, 1).view(B, D, H_feat, W_feat)
-            
+
             # Aggregation -> Descriptor
             if self.args.use_cls_for_vpr:
                 global_desc = out["x_norm_clstoken"]
             else:
                 global_desc = agg_layer(x_feat) # [B, D]
-        
-        return global_desc, patch_tokens, [recon_loss_thermal, recon_loss_rgb], mask_thermal, masked_patch_thermal, cls_attn_map, penultimate_patch
+
+            # selaVPR local feature computation
+            if self.args.use_selaVPR_loss or (not self.training and self.args.use_reranking == 'selaVPR'):
+                x0 = patch_tokens.view(-1, H_feat, W_feat, self.output_dim).permute(0, 3, 1, 2)
+                x0 = self.local_adapt(x0)
+                x0 = x0.permute(0, 2, 3, 1)
+                sela_local_feature = torch.nn.functional.normalize(x0, p=2, dim=-1)  # [B, 61, 61, 128] for 224x224
+
+        return global_desc, patch_tokens, [recon_loss_thermal, recon_loss_rgb], mask_thermal, masked_patch_thermal, cls_attn_map, penultimate_patch, sela_local_feature
 
     def forward_model_basic(self, x, modality='rgb'):
         """단일 모달리티에 대한 Forward"""
@@ -739,7 +743,7 @@ class CrossModalVPR_Net(nn.Module):
     def forward(self, x, flags, paired_rgb=None, return_mask=False, return_masked_patch=False):
         if not isinstance(flags, torch.Tensor):
             flags = torch.tensor(flags, device=x.device)
-        
+
         if flags.device != x.device:
             flags = flags.to(x.device)
 
@@ -751,8 +755,15 @@ class CrossModalVPR_Net(nn.Module):
         cls_attn_map = torch.zeros((x.size(0), self.patch_count), device=x.device)
         recon_losses = None
         masked_patch_emb = None
+
+        # selaVPR local embedding initialization
+        sela_local_emb = None
+        if self.args.use_selaVPR_loss or self.args.use_reranking == 'selaVPR':
+            # Output size from LocalAdapt: 61x61 for 224x224 input (16x16 patches upsampled 2x2)
+            sela_local_emb = torch.zeros((x.size(0), 61, 61, 128), device=x.device)
+
         if is_rgb.any():
-            global_emb, patch_rgb, _, _, _, cls_rgb_attn_map, penultimate_patch_rgb = self.forward_model(x[is_rgb], modality='rgb')
+            global_emb, patch_rgb, _, _, _, cls_rgb_attn_map, penultimate_patch_rgb, sela_local_rgb = self.forward_model(x[is_rgb], modality='rgb')
             if global_emb is not None:
                 final_emb[is_rgb] = global_emb
             if patch_rgb is not None:
@@ -761,8 +772,11 @@ class CrossModalVPR_Net(nn.Module):
                 cls_attn_map[is_rgb] = cls_rgb_attn_map
             if penultimate_patch_rgb is not None:
                 penultimate_patch_emb[is_rgb] = penultimate_patch_rgb
+            if sela_local_rgb is not None and sela_local_emb is not None:
+                sela_local_emb[is_rgb] = sela_local_rgb
+
         if (~is_rgb).any():
-            global_emb, patch_thermal, recon_losses, mask, masked_patch_thermal, cls_thermal_attn_map, penultimate_patch_thermal = self.forward_model(x[~is_rgb], modality='thermal', paired_rgb=paired_rgb, return_masked_patch=return_masked_patch)
+            global_emb, patch_thermal, recon_losses, mask, masked_patch_thermal, cls_thermal_attn_map, penultimate_patch_thermal, sela_local_thermal = self.forward_model(x[~is_rgb], modality='thermal', paired_rgb=paired_rgb, return_masked_patch=return_masked_patch)
             if global_emb is not None:
                 final_emb[~is_rgb] = global_emb
             if patch_thermal is not None:
@@ -775,11 +789,14 @@ class CrossModalVPR_Net(nn.Module):
                 cls_attn_map[~is_rgb] = cls_thermal_attn_map
             if penultimate_patch_thermal is not None:
                 penultimate_patch_emb[~is_rgb] = penultimate_patch_thermal
+            if sela_local_thermal is not None and sela_local_emb is not None:
+                sela_local_emb[~is_rgb] = sela_local_thermal
 
-        if return_masked_patch: # 무조건 masked_patch_emb가 제일 뒤에 오게
-            return final_emb, patch_emb, recon_losses, masks, cls_attn_map, penultimate_patch_emb, masked_patch_emb
+        # Always return sela_local_emb at index [6] for compatibility with inference.py and train_wandb.py
+        if return_masked_patch:
+            return final_emb, patch_emb, recon_losses, masks, cls_attn_map, penultimate_patch_emb, sela_local_emb, masked_patch_emb
         else:
-            return final_emb, patch_emb, recon_losses, masks, cls_attn_map, penultimate_patch_emb
+            return final_emb, patch_emb, recon_losses, masks, cls_attn_map, penultimate_patch_emb, sela_local_emb
 
     def calculate_recon_loss(self, pred, mask, target, confidence_map=None):
         recon_loss = self.reconstruction_criterion(

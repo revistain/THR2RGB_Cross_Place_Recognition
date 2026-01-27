@@ -433,7 +433,7 @@ class CrossModalVPR_Net(nn.Module):
         self.args = args
         self.shared_backbone = get_backbone(pretrained_foundation, foundation_model_path)
         self.output_dim = args.features_dim
-        if args.use_selaVPR_loss:
+        if args.use_selaVPR_loss or self.args.use_reranking == 'selaVPR':
             self.local_adapt = LocalAdapt(args.features_dim)
         self.reranker = RerankingModule(args)
 
@@ -479,7 +479,7 @@ class CrossModalVPR_Net(nn.Module):
         cls_attn_map = out["cls_attention"].sum(dim=1)
         
         sela_local_feature = None
-        if self.args.use_selaVPR_loss:
+        if self.args.use_selaVPR_loss or (not self.training and self.args.use_reranking == 'selaVPR'):
             x0 = patch_tokens.view(-1,H_feat,W_feat,self.output_dim).permute(0, 3, 1, 2)
             x0 = self.local_adapt(x0)
             x0 = x0.permute(0, 2, 3, 1)
@@ -494,17 +494,18 @@ class CrossModalVPR_Net(nn.Module):
         patch_emb = torch.zeros((x.size(0), patch_count, self.output_dim), device=x.device)
         cls_attn_map = torch.zeros((x.size(0), patch_count), device=x.device)
         penultimate_patch_emb = torch.zeros((x.size(0), patch_count, self.output_dim), device=x.device)
-        if self.args.use_selaVPR_loss:
+        sela_local_emb = None
+        if self.args.use_selaVPR_loss or self.args.use_reranking == 'selaVPR':
             sela_local_emb = torch.zeros((x.size(0), 61, 61, 128), device=x.device)
         
         if is_rgb.any(): 
             final_emb[is_rgb], patch_emb[is_rgb], cls_attn_map[is_rgb], penultimate_patch_emb[is_rgb], sela_local_feature = self.forward_model(x[is_rgb], 'rgb')
-            if self.args.use_selaVPR_loss:
+            if self.args.use_selaVPR_loss or (not self.training and self.args.use_reranking == 'selaVPR'):
                 sela_local_emb[is_rgb] = sela_local_feature
             
         if (~is_rgb).any():
             final_emb[~is_rgb], patch_emb[~is_rgb], cls_attn_map[~is_rgb], penultimate_patch_emb[~is_rgb], sela_local_feature = self.forward_model(x[~is_rgb], 'thermal')
-            if self.args.use_selaVPR_loss:
+            if self.args.use_selaVPR_loss or (not self.training and self.args.use_reranking == 'selaVPR'):
                 sela_local_emb[~is_rgb] = sela_local_feature
         
         return [final_emb, patch_emb, None, None, cls_attn_map, penultimate_patch_emb, sela_local_emb]

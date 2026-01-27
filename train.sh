@@ -1,6 +1,6 @@
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
-CUDA_VISIBLE_DEVICES=7 \
+CUDA_VISIBLE_DEVICES=5 \
 python3 train_wandb.py \
     --save_dir './logs' \
     --features_dim 768 \
@@ -9,7 +9,7 @@ python3 train_wandb.py \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 4 \
     --num_trainable_blocks_THERMAL 4 \
-    --comment "224x224-GeM-selaVPR-rerank" \
+    --comment "224x224-GeM-r2formerReranking" \
     --margin 0.1 \
     --epochs_num 100 \
     --soft_positives_dist_threshold 10 \
@@ -17,17 +17,16 @@ python3 train_wandb.py \
     --negs_num_per_query 10 \
     --croco_mask_ratio 0.8 \
     --num_decoder_depth 8 \
-    --use_selaVPR_loss \
-    --selaVPR_weight 1 \
-    --use_reranking 'selaVPR' \
-    --recon_loss_type 'mse+ssim'
-
+    --r2_penultimate_layer \
+    --use_reranking 'r2former'
     # --recon_weight 10 \
     # --use_recon_loss \
-    # --use_selaVPR_loss \
-    # --selaVPR_weight 1 \
-    # --use_cls_for_vpr \
-    # --r2_penultimate_layer \
+    # --recon_loss_type 'mse+ssim'
+
+    #### Croco
+    # --recon_weight 10 \
+    # --use_recon_loss \
+    # --recon_loss_type 'mse+ssim' \
 
     #### r2former
     # --r2_penultimate_layer \
