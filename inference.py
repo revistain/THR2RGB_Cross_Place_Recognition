@@ -361,15 +361,16 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 prefix = "sela"
                 db_files = [f for f in saved_files if f.startswith(f"Db_{seq_name}") and prefix in f]
                 query_files = [f for f in saved_files if f.startswith(f"Query_{seq_name}") and prefix in f]
-                
+
                 assert len(db_files) == eval_ds.database_num, \
                     f"DB files mismatch: {len(db_files)} vs {eval_ds.database_num}"
                 assert len(query_files) == eval_ds.queries_num, \
                     f"Query files mismatch: {len(query_files)} vs {eval_ds.queries_num}"
-                
+
                 logging.info(f"✓ File count verified: {len(db_files)} DB + {len(query_files)} Query")
 
                 predictions = []
+                rerank_scores_dict = {}  # For visualization
                 candidates_local_features = torch.zeros(RERANKING_TOP_K, 61, 61, 128, device='cuda')
                 for query_index, pred in enumerate(tqdm(prev_predictions)):
                     # Load query local features: [61, 61, 128]
@@ -385,10 +386,29 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
 
                     # local_sim expects: query [H, W, C], candidates [B, H, W, C]
                     rerank_scores = local_sim(query_local_features, candidates_local_features, trainflag=False)
-                    rerank_index = rerank_scores.cpu().numpy().argsort()[::-1]
+                    rerank_scores_np = rerank_scores.cpu().numpy()
+                    rerank_index = rerank_scores_np.argsort()[::-1]
+                    rerank_scores_dict[query_index] = rerank_scores_np[rerank_index].tolist()
                     predictions.append(pred[rerank_index])
-                    
+
                 predictions = np.array(predictions)
+
+                # Visualization for selaVPR
+                positives_per_query_vis = eval_ds.get_positives()
+                vis_save_dir = f"./selaVPR_visualizations/{args.comment}_{seq_name}"
+                visualize_selaVPR_reranking(
+                    args, eval_ds,
+                    prev_predictions, predictions,
+                    rerank_scores_dict,
+                    positives_per_query_vis,
+                    epoch=0,
+                    distances=None,
+                    npy_root_path=NPY_ROOTPATH,
+                    seq_name=seq_name,
+                    save_dir=vis_save_dir,
+                    num_samples=4,
+                    reranking_method='selaVPR'
+                )
 
             elif args.use_reranking == 'match_conf':
                 # Match Confidence reranking using trained MatchConfidenceModule
@@ -409,6 +429,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 match_conf_module.eval()
 
                 predictions = []
+                rerank_scores_dict = {}  # For visualization
                 candidates_local_features = torch.zeros(RERANKING_TOP_K, 61, 61, 128, device='cuda')
 
                 with torch.no_grad():
@@ -433,10 +454,29 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                         )
 
                         # Sort by score (higher = better match)
-                        rerank_index = rerank_scores.cpu().numpy().argsort()[::-1]
+                        rerank_scores_np = rerank_scores.cpu().numpy()
+                        rerank_index = rerank_scores_np.argsort()[::-1]
+                        rerank_scores_dict[query_index] = rerank_scores_np[rerank_index].tolist()
                         predictions.append(pred[rerank_index])
 
                 predictions = np.array(predictions)
+
+                # Visualization for match_conf
+                positives_per_query_vis = eval_ds.get_positives()
+                vis_save_dir = f"./match_conf_visualizations/{args.comment}_{seq_name}"
+                visualize_selaVPR_reranking(
+                    args, eval_ds,
+                    prev_predictions, predictions,
+                    rerank_scores_dict,
+                    positives_per_query_vis,
+                    epoch=0,
+                    distances=None,
+                    npy_root_path=NPY_ROOTPATH,
+                    seq_name=seq_name,
+                    save_dir=vis_save_dir,
+                    num_samples=4,
+                    reranking_method='match_conf'
+                )
 
             del queries_features
             del database_features

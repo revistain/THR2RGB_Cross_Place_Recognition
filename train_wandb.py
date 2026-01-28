@@ -288,6 +288,10 @@ if __name__ == "__main__":
                     triplet_loss_sum += triplet_loss
                     overall_loss += triplet_loss
                     
+                    ## GeM / CLS cosine sim 구하기
+                    # cls_desc = out["x_norm_clstoken"]
+                    # cosine_sim = (global_desc * cls_desc) / (np.norm(global_desc) * np.norm(cls_desc))
+                    
                     # Reranking loss
                     if args.use_recon_loss and args.r2_penultimate_layer:
                         rerank_patch_embedding = penultimate_patch_embedding

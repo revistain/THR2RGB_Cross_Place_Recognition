@@ -901,3 +901,448 @@ def save_mnn_visualization(eval_ds, query_indices, top_k_db_indices,
         print(f"[{list_idx+1}/{len(query_indices)}] Saved: {save_path}")
 
     print(f"Visualization complete: {len(query_indices)} queries saved to {save_dir}")
+
+
+def visualize_selaVPR_reranking(args, eval_ds,
+                                 original_predictions,
+                                 reranked_predictions,
+                                 rerank_scores_dict,
+                                 positives_per_query,
+                                 epoch,
+                                 distances=None,
+                                 npy_root_path=None,
+                                 seq_name="",
+                                 save_dir='./selaVPR_visualizations',
+                                 num_samples=2,
+                                 reranking_method='selaVPR'):
+    """
+    Visualize selaVPR/match_conf reranking with MNN matching visualization.
+
+    Args:
+        args: training arguments
+        eval_ds: evaluation dataset
+        original_predictions: [num_queries, K] - original Faiss predictions
+        reranked_predictions: [num_queries, K] - reranked predictions
+        rerank_scores_dict: dict mapping query_idx -> list of scores (MNN count or confidence)
+        positives_per_query: dict mapping query_idx -> set of positive db indices
+        epoch: current epoch
+        distances: [num_queries, K] - L2 distances (optional)
+        npy_root_path: path to NPY files (for loading sela features on demand)
+        seq_name: sequence name for loading sela features
+        save_dir: save directory
+        num_samples: number of samples to visualize
+        reranking_method: 'selaVPR' or 'match_conf'
+    """
+    import os
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+    import torch.nn.functional as F
+    import csv
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    # ===== Score statistics =====
+    all_scores = []
+    for query_idx, scores in rerank_scores_dict.items():
+        all_scores.extend(scores)
+    all_scores = np.array(all_scores)
+
+    stats = {
+        'epoch': epoch,
+        'mean': all_scores.mean(),
+        'std': all_scores.std(),
+        'method': reranking_method
+    }
+
+    # ===== CSV logging =====
+    csv_path = os.path.join(save_dir, 'score_stats.csv')
+    file_exists = os.path.exists(csv_path)
+
+    with open(csv_path, 'a', newline='') as f:
+        fieldnames = ['epoch', 'mean', 'std', 'method']
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(stats)
+
+    # ===== Sampling strategy =====
+    improved_queries = []
+    worsened_queries = []
+    unchanged_queries = []
+
+    for q_idx in range(eval_ds.queries_num):
+        orig_top1 = original_predictions[q_idx, 0]
+        rerank_top1 = reranked_predictions[q_idx, 0]
+        positives = positives_per_query[q_idx]
+
+        if orig_top1 != rerank_top1:
+            if rerank_top1 in positives:
+                improved_queries.append(q_idx)
+            else:
+                worsened_queries.append(q_idx)
+        else:
+            unchanged_queries.append(q_idx)
+
+    # Sample
+    sample_indices = []
+    if len(improved_queries) > 0:
+        n_improved = min(num_samples // 2, len(improved_queries))
+        sample_indices.extend(np.random.choice(improved_queries, n_improved, replace=False))
+
+    if len(sample_indices) < num_samples and len(worsened_queries) > 0:
+        n_worsened = min(num_samples - len(sample_indices), len(worsened_queries))
+        sample_indices.extend(np.random.choice(worsened_queries, n_worsened, replace=False))
+
+    if len(sample_indices) < num_samples:
+        remaining = num_samples - len(sample_indices)
+        all_remaining = list(set(range(eval_ds.queries_num)) - set(sample_indices))
+        if len(all_remaining) > 0:
+            sample_indices.extend(np.random.choice(all_remaining, min(remaining, len(all_remaining)), replace=False))
+
+    # ===== NPY loading helper =====
+    def load_sela_npy(npy_path):
+        """Load sela features from NPY file."""
+        return np.load(npy_path)
+
+    # ===== MNN extraction helper =====
+    def extract_mnn_matches(fm1, fm2, top_n=50):
+        """
+        Extract MNN matches between two feature maps.
+        fm1, fm2: [H, W, D] numpy arrays
+        Returns: (matches_i, matches_j, similarities)
+        """
+        H, W, D = fm1.shape
+        fm1_flat = fm1.reshape(-1, D)  # [L, D]
+        fm2_flat = fm2.reshape(-1, D)  # [L, D]
+
+        # Normalize
+        fm1_norm = fm1_flat / (np.linalg.norm(fm1_flat, axis=1, keepdims=True) + 1e-8)
+        fm2_norm = fm2_flat / (np.linalg.norm(fm2_flat, axis=1, keepdims=True) + 1e-8)
+
+        # Similarity matrix
+        sim_matrix = np.dot(fm1_norm, fm2_norm.T)  # [L, L]
+
+        # Mutual nearest neighbors
+        max1 = np.argmax(sim_matrix, axis=1)  # [L] - best match in fm2 for each fm1
+        max2 = np.argmax(sim_matrix, axis=0)  # [L] - best match in fm1 for each fm2
+
+        # Check mutual consistency
+        mutual_mask = max2[max1] == np.arange(len(max1))
+
+        matches_i = np.where(mutual_mask)[0]
+        matches_j = max1[matches_i]
+        similarities = sim_matrix[matches_i, matches_j]
+
+        # Sort by similarity and take top_n
+        sorted_idx = np.argsort(similarities)[::-1][:top_n]
+        return matches_i[sorted_idx], matches_j[sorted_idx], similarities[sorted_idx]
+
+    def patch_to_pixel(patch_idx, patch_size=4, grid_h=61, grid_w=61):
+        """Convert patch index to pixel coordinates (for 61x61 grid on 224x224 image)."""
+        row = patch_idx // grid_w
+        col = patch_idx % grid_w
+        # Map to 224x224 image
+        y = int((row + 0.5) * 224 / grid_h)
+        x = int((col + 0.5) * 224 / grid_w)
+        return x, y
+
+    # Check if we can load sela features
+    has_sela = npy_root_path is not None and os.path.exists(npy_root_path)
+
+    # ===== Visualization =====
+    for sample_num, query_idx in enumerate(sample_indices):
+        # Decide number of rows based on whether we have sela features
+        # Check if sela file exists for this query
+        query_has_sela = has_sela and os.path.exists(
+            os.path.join(npy_root_path, f"Query_{seq_name}_sela_{query_idx}.npy")
+        ) if has_sela else False
+        # Row 3: MNN visualization, Row 4: similarity graphs
+        n_rows = 5 if query_has_sela else 3
+
+        fig = plt.figure(figsize=(24, 6 * n_rows // 2))
+        gs = fig.add_gridspec(n_rows, 7, hspace=0.4, wspace=0.3)
+
+        # Load query image
+        query_img = eval_ds.get_thermal_img(eval_ds.t_queries_paths[query_idx])
+        query_img = cv2.resize(query_img, (224, 224))
+        query_img = cv2.cvtColor(query_img, cv2.COLOR_BGR2RGB)
+
+        positives = positives_per_query[query_idx]
+
+        # === Row 0: Query ===
+        ax_query = fig.add_subplot(gs[0, :])
+        ax_query.imshow(query_img)
+        ax_query.set_title(f'Query #{query_idx} (Thermal)\nPositives in DB: {len(positives)}',
+                          fontsize=14, fontweight='bold')
+        ax_query.axis('off')
+
+        # === Row 1: Original (Before Reranking) ===
+        for rank in range(5):
+            ax = fig.add_subplot(gs[1, rank + 1])
+
+            pred_idx = original_predictions[query_idx, rank]
+            db_img = eval_ds.get_rgb_img(eval_ds.rgb_database_paths[pred_idx])
+            db_img = cv2.resize(db_img, (224, 224))
+            db_img = cv2.cvtColor(db_img, cv2.COLOR_BGR2RGB)
+
+            is_correct = pred_idx in positives
+
+            # GPS distance
+            if hasattr(eval_ds, 'database_utms') and hasattr(eval_ds, 'queries_utms'):
+                query_gps = eval_ds.queries_utms[query_idx]
+                db_gps = eval_ds.database_utms[pred_idx]
+                gps_distance = np.linalg.norm(query_gps - db_gps)
+            else:
+                gps_distance = None
+
+            border_color = 'green' if is_correct else 'red'
+            border_width = 4 if is_correct else 2
+
+            ax.imshow(db_img)
+            rect = Rectangle((0, 0), 223, 223, linewidth=border_width,
+                             edgecolor=border_color, facecolor='none')
+            ax.add_patch(rect)
+
+            title = f'Rank {rank + 1}'
+            if is_correct:
+                title += ' ✓'
+            if distances is not None:
+                title += f'\nL2: {distances[query_idx, rank]:.2f}'
+            if gps_distance is not None:
+                title += f'\nGPS: {gps_distance:.1f}m'
+
+            ax.set_title(title, fontsize=10, fontweight='bold', color=border_color)
+            ax.axis('off')
+
+        # Row 1 labels
+        ax_label1 = fig.add_subplot(gs[1, 0])
+        ax_label1.text(0.5, 0.5, 'Before\nReranking', fontsize=12,
+                      fontweight='bold', ha='center', va='center')
+        ax_label1.axis('off')
+
+        ax_legend1 = fig.add_subplot(gs[1, 6])
+        ax_legend1.text(0.1, 0.7, 'Faiss', fontsize=14, fontweight='bold', va='center')
+        ax_legend1.text(0.1, 0.3, '(L2 Distance)', fontsize=11, style='italic', va='center')
+        ax_legend1.axis('off')
+
+        # === Row 2: Reranked ===
+        for rank in range(5):
+            ax = fig.add_subplot(gs[2, rank + 1])
+
+            pred_idx = reranked_predictions[query_idx, rank]
+            db_img = eval_ds.get_rgb_img(eval_ds.rgb_database_paths[pred_idx])
+            db_img = cv2.resize(db_img, (224, 224))
+            db_img = cv2.cvtColor(db_img, cv2.COLOR_BGR2RGB)
+
+            is_correct = pred_idx in positives
+
+            # GPS distance
+            if hasattr(eval_ds, 'database_utms') and hasattr(eval_ds, 'queries_utms'):
+                query_gps = eval_ds.queries_utms[query_idx]
+                db_gps = eval_ds.database_utms[pred_idx]
+                gps_distance = np.linalg.norm(query_gps - db_gps)
+            else:
+                gps_distance = None
+
+            # Rank change
+            orig_rank = np.where(original_predictions[query_idx, :20] == pred_idx)[0]
+            if len(orig_rank) > 0:
+                rank_change = f"(R{orig_rank[0] + 1}→R{rank + 1})"
+            else:
+                rank_change = "(new)"
+
+            border_color = 'green' if is_correct else 'red'
+            border_width = 4 if is_correct else 2
+
+            ax.imshow(db_img)
+            rect = Rectangle((0, 0), 223, 223, linewidth=border_width,
+                             edgecolor=border_color, facecolor='none')
+            ax.add_patch(rect)
+
+            title = f'Rank {rank + 1}'
+            if is_correct:
+                title += ' ✓'
+            title += f' {rank_change}'
+
+            # Reranking score
+            rerank_scores = rerank_scores_dict.get(query_idx, [0] * 5)
+            if rank < len(rerank_scores):
+                if reranking_method == 'selaVPR':
+                    title += f'\nMNN: {int(rerank_scores[rank])}'
+                else:  # match_conf
+                    title += f'\nConf: {rerank_scores[rank]:.3f}'
+
+            if gps_distance is not None:
+                title += f'\nGPS: {gps_distance:.1f}m'
+
+            ax.set_title(title, fontsize=10, fontweight='bold', color=border_color)
+            ax.axis('off')
+
+        # Row 2 labels
+        ax_label2 = fig.add_subplot(gs[2, 0])
+        ax_label2.text(0.5, 0.5, 'After\nReranking', fontsize=12,
+                      fontweight='bold', ha='center', va='center')
+        ax_label2.axis('off')
+
+        ax_legend2 = fig.add_subplot(gs[2, 6])
+        if reranking_method == 'selaVPR':
+            ax_legend2.text(0.1, 0.7, 'selaVPR', fontsize=14, fontweight='bold', va='center')
+            ax_legend2.text(0.1, 0.3, '(MNN Count)', fontsize=11, style='italic', va='center')
+        else:
+            ax_legend2.text(0.1, 0.7, 'MatchConf', fontsize=14, fontweight='bold', va='center')
+            ax_legend2.text(0.1, 0.3, '(Confidence)', fontsize=11, style='italic', va='center')
+        ax_legend2.axis('off')
+
+        # === Row 3: MNN Matching Visualization (if sela features available) ===
+        # === Row 4: Similarity Distribution Graphs ===
+        if query_has_sela:
+            # Load query sela features on demand
+            query_sela_path = os.path.join(npy_root_path, f"Query_{seq_name}_sela_{query_idx}.npy")
+            query_feat = load_sela_npy(query_sela_path)  # [H, W, D]
+
+            # Store similarity data for graphs
+            all_sims_data = []
+
+            for rank in range(min(3, 5)):  # Show top 3 matches
+                ax = fig.add_subplot(gs[3, rank * 2 + 1: rank * 2 + 3])
+
+                pred_idx = reranked_predictions[query_idx, rank]
+                db_img = eval_ds.get_rgb_img(eval_ds.rgb_database_paths[pred_idx])
+                db_img = cv2.resize(db_img, (224, 224))
+                db_img = cv2.cvtColor(db_img, cv2.COLOR_BGR2RGB) / 255.0
+
+                query_img_norm = query_img.astype(np.float32) / 255.0
+
+                # Combined image
+                combined = np.hstack([query_img_norm, db_img])
+                ax.imshow(combined)
+
+                n_matches = 0
+                sims_for_graph = []
+
+                # Load DB sela features on demand
+                db_sela_path = os.path.join(npy_root_path, f"Db_{seq_name}_sela_{pred_idx}.npy")
+                if os.path.exists(db_sela_path):
+                    db_feat = load_sela_npy(db_sela_path)
+
+                    matches_i, matches_j, sims = extract_mnn_matches(query_feat, db_feat, top_n=100)
+                    n_matches = len(matches_i)
+                    sims_for_graph = sims.tolist()
+
+                    H, W = query_feat.shape[:2]
+                    for idx in range(min(50, len(matches_i))):  # Draw top 50
+                        i, j, sim = matches_i[idx], matches_j[idx], sims[idx]
+
+                        x1, y1 = patch_to_pixel(i, grid_h=H, grid_w=W)
+                        x2, y2 = patch_to_pixel(j, grid_h=H, grid_w=W)
+                        x2 += 224  # Offset for right image
+
+                        color = plt.cm.hot(min(sim, 1.0))
+                        alpha = 0.3 + 0.5 * sim
+                        ax.plot([x1, x2], [y1, y2], color=color, linewidth=1, alpha=alpha)
+
+                all_sims_data.append((pred_idx, n_matches, sims_for_graph))
+
+                ax.axvline(x=224, color='white', linewidth=2, linestyle='--', alpha=0.7)
+
+                is_correct = pred_idx in positives
+                border_color = 'lime' if is_correct else 'red'
+                status_str = 'CORRECT' if is_correct else 'WRONG'
+                # Show match count in title
+                ax.set_title(f'Rank {rank + 1} [{status_str}]\n{n_matches} MNN matches',
+                            fontsize=11, fontweight='bold', color=border_color)
+                ax.axis('off')
+
+            ax_label3 = fig.add_subplot(gs[3, 0])
+            ax_label3.text(0.5, 0.5, 'MNN\nMatches', fontsize=12,
+                          fontweight='bold', ha='center', va='center')
+            ax_label3.axis('off')
+
+            # === Row 4: Similarity Distribution Graphs ===
+            for rank in range(min(3, 5)):
+                ax = fig.add_subplot(gs[4, rank * 2 + 1: rank * 2 + 3])
+
+                pred_idx, n_matches, sims_list = all_sims_data[rank]
+
+                if len(sims_list) > 0:
+                    # Histogram of cosine similarities
+                    ax.hist(sims_list, bins=20, color='steelblue', edgecolor='white', alpha=0.8)
+                    ax.axvline(x=np.mean(sims_list), color='red', linestyle='--',
+                              linewidth=2, label=f'Mean: {np.mean(sims_list):.3f}')
+                    ax.set_xlabel('Cosine Similarity', fontsize=9)
+                    ax.set_ylabel('Count', fontsize=9)
+                    ax.set_xlim(0, 1)
+                    ax.legend(fontsize=8)
+                    ax.grid(alpha=0.3)
+
+                    is_correct = pred_idx in positives
+                    border_color = 'green' if is_correct else 'red'
+                    ax.set_title(f'Rank {rank + 1} Similarity Dist.\n'
+                                f'Mean={np.mean(sims_list):.3f}, Max={np.max(sims_list):.3f}',
+                                fontsize=10, fontweight='bold', color=border_color)
+                else:
+                    ax.text(0.5, 0.5, 'No MNN\nMatches', ha='center', va='center',
+                           fontsize=12, color='gray')
+                    ax.axis('off')
+
+            ax_label4 = fig.add_subplot(gs[4, 0])
+            ax_label4.text(0.5, 0.5, 'Similarity\nDistribution', fontsize=12,
+                          fontweight='bold', ha='center', va='center')
+            ax_label4.axis('off')
+
+        # === Overall title ===
+        orig_top1 = original_predictions[query_idx, 0]
+        rerank_top1 = reranked_predictions[query_idx, 0]
+
+        if orig_top1 != rerank_top1:
+            if rerank_top1 in positives:
+                status = "IMPROVED (Wrong -> Correct)"
+                color = 'darkgreen'
+            elif orig_top1 in positives:
+                status = "WORSENED (Correct -> Wrong)"
+                color = 'darkred'
+            else:
+                status = "CHANGED (Wrong -> Wrong)"
+                color = 'orange'
+        else:
+            if orig_top1 in positives:
+                status = "MAINTAINED (Correct -> Correct)"
+                color = 'blue'
+            else:
+                status = "MAINTAINED (Wrong -> Wrong)"
+                color = 'gray'
+
+        method_name = 'selaVPR' if reranking_method == 'selaVPR' else 'MatchConf'
+        fig.suptitle(f'Query #{query_idx} - {status} [{method_name} Reranking]',
+                    fontsize=16, fontweight='bold', color=color)
+
+        # Save
+        save_path = os.path.join(save_dir, f'epoch_{epoch:03d}_query_{query_idx:05d}.png')
+        plt.savefig(save_path, dpi=120, bbox_inches='tight')
+        plt.close()
+        print(f"Saved: {save_path}")
+
+    # ===== Summary =====
+    summary_path = os.path.join(save_dir, f'epoch_{epoch:03d}_summary.txt')
+    with open(summary_path, 'w') as f:
+        f.write(f"{reranking_method} Reranking Summary - Epoch {epoch}\n")
+        f.write("=" * 50 + "\n\n")
+        f.write(f"Total queries: {eval_ds.queries_num}\n")
+        f.write(f"Improved (wrong->correct): {len(improved_queries)}\n")
+        f.write(f"Worsened (correct->wrong): {len(worsened_queries)}\n")
+        f.write(f"Unchanged: {len(unchanged_queries)}\n\n")
+
+        orig_correct = sum([1 for q in range(eval_ds.queries_num)
+                           if original_predictions[q, 0] in positives_per_query[q]])
+        rerank_correct = sum([1 for q in range(eval_ds.queries_num)
+                             if reranked_predictions[q, 0] in positives_per_query[q]])
+
+        f.write(f"Top-1 Accuracy:\n")
+        f.write(f"  Before: {orig_correct}/{eval_ds.queries_num} ({100*orig_correct/eval_ds.queries_num:.2f}%)\n")
+        f.write(f"  After:  {rerank_correct}/{eval_ds.queries_num} ({100*rerank_correct/eval_ds.queries_num:.2f}%)\n")
+        f.write(f"  Delta:  {rerank_correct-orig_correct:+d} ({100*(rerank_correct-orig_correct)/eval_ds.queries_num:+.2f}%)\n")
+        f.write(f"\nScore Stats: Mean={stats['mean']:.4f}, Std={stats['std']:.4f}\n")
+
+    print(f"Saved summary: {summary_path}")
+
+    return improved_queries, worsened_queries, unchanged_queries

@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=6
+CUDA_VISIBLE_DEVICES=2
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
@@ -11,7 +11,7 @@ python3 train_wandb.py \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
-    --comment "test-224x224-Croco-ViTs-numBlock0-matchConfLoss" \
+    --comment "224x224-Croco-ViTs-numBlock0-selaVPRReranking" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
@@ -20,8 +20,8 @@ python3 train_wandb.py \
     --recon_weight 10 \
     --use_recon_loss \
     --recon_loss_type 'mse+ssim' \
-    --use_selaVPR_loss \
-    --num_decoder_depth 8
+    --num_decoder_depth 8 \
+    --use_reranking 'selaVPR'
 
     #### Croco
     # --croco_mask_ratio 0.8 \
