@@ -29,6 +29,8 @@ from info_nce import InfoNCE, info_nce
 import network
 import network_only_GeM
 from local_matching import LocalFeatureLoss
+from pathlib import Path
+
 def set_seed(seed=42):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -43,6 +45,12 @@ if __name__ == "__main__":
     set_seed()
     parser = Parser()
     args = parser.parse_arguments()
+    if True:
+        import backbone.dinov2.block as dinoblock
+        dinoblock.adapter_dim = args.features_dim
+        model_path = Path(args.foundation_model_path)
+        model_name = model_path.parts[-1].lower()
+        args.features_dim = 768 if 'vitb' in model_name else 384
 
     # wandb 초기화
     wandb.init(project="cross-modal-vpr-4", name=args.comment, config=vars(args))
@@ -154,7 +162,8 @@ if __name__ == "__main__":
     '''Resume from checkpoint'''
     if args.resume:
         model, _, best_r1, start_epoch_num, not_improved_num = utils.resume_train(args, model, strict=False)
-        logging.info(f"Resuming from epoch {start_epoch_num} with best recall@1 {best_r1:.1f}")
+        best_r1 = 0
+        logging.info(f"Resuming from epoch {start_epoch_num}")
     else:
         best_r1 = start_epoch_num = not_improved_num = 0
 

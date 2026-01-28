@@ -431,7 +431,7 @@ class CrossModalVPR_Net(nn.Module):
         # 1. 두 개의 독립적인 Backbone 생성 (Weights Unshared)
         # Cross-modal에서는 모달리티 간 특성이 다르므로 가중치를 공유하지 않는 것이 일반적입니다.
         self.args = args
-        self.shared_backbone = get_backbone(pretrained_foundation, foundation_model_path)
+        self.shared_backbone = get_backbone(pretrained_foundation, foundation_model_path, args=args)
         self.output_dim = args.features_dim
         if args.use_selaVPR_loss or self.args.use_reranking == 'selaVPR':
             self.local_adapt = LocalAdapt(args.features_dim)
@@ -510,12 +510,24 @@ class CrossModalVPR_Net(nn.Module):
         
         return [final_emb, patch_emb, None, None, cls_attn_map, penultimate_patch_emb, sela_local_emb]
 
-def get_backbone(pretrained_foundation, foundation_model_path):
+def get_backbone(pretrained_foundation, foundation_model_path, args=None):
     model_path = Path(foundation_model_path)
     if 'reg4' in model_path.parts[-1]:
-        backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0, num_register_tokens=4)
+        print("=" * 40)
+        print("- Using REGISTER DINOv2 -")
+        num_register_tokens = 4
     else:
-        backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0)
+        num_register_tokens = 0
+        
+    if args is not None:
+        if 'vits' in model_path.parts[-1]:
+            print("=" * 40)
+            print("- Using ViT SMALL -")
+            backbone = vit_small(patch_size=14,img_size=518,init_values=1,block_chunks=0, num_register_tokens=num_register_tokens)
+        elif 'vitb' in model_path.parts[-1]:
+            print("=" * 40)
+            print("- Using ViT BASE -")
+            backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0, num_register_tokens=num_register_tokens)
         
     if pretrained_foundation:
         assert foundation_model_path is not None, "Please specify foundation model path."

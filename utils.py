@@ -34,6 +34,8 @@ def resume_model(resume_path, model, optimizer=None, strict=False):
 
 def resume_train(args, model, optimizer=None, strict=False):
     """Load model, optimizer, and other training parameters"""
+    if type(args.resume) is list and len(args.resume) != 0:
+        args.resume = args.resume[0]
     checkpoint = torch.load(args.resume)
     start_epoch_num = checkpoint["epoch_num"]
     model.load_state_dict(checkpoint["model_state_dict"], strict=strict)

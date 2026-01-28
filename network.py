@@ -425,7 +425,7 @@ class CrossModalVPR_Net(nn.Module):
         super().__init__()
 
         self.args = args
-        self.shared_backbone = get_backbone(pretrained_foundation, foundation_model_path)
+        self.shared_backbone = get_backbone(pretrained_foundation, foundation_model_path, args=args)
         self.output_dim = args.features_dim
         if args.use_selaVPR_loss or args.use_reranking == 'selaVPR':
             self.local_adapt = LocalAdapt(self.output_dim)
@@ -806,16 +806,35 @@ class CrossModalVPR_Net(nn.Module):
         )
         return recon_loss
     
-def get_backbone(pretrained_foundation, foundation_model_path):
+def get_backbone(pretrained_foundation, foundation_model_path, args=None):
     model_path = Path(foundation_model_path)
-    if 'reg4' in model_path.parts[-1]:
+    model_name = model_path.parts[-1].lower()
+
+    # Determine model size (vit_small or vit_base)
+    use_vit_small = 'vits' in model_name
+    use_register = 'reg4' in model_name
+    num_register_tokens = 4 if use_register else 0
+
+    if use_register:
         print("=" * 40)
         print("- Using REGISTER DINOv2 -")
         print("=" * 40)
-        backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0, num_register_tokens=4)
+
+    if use_vit_small:
+        print("=" * 40)
+        print("- Using ViT-Small (embed_dim=384) -")
+        print("=" * 40)
+        backbone = vit_small(patch_size=14, img_size=518, init_values=1, block_chunks=0, num_register_tokens=num_register_tokens)
+        if args is not None:
+            args.features_dim = 384
     else:
-        backbone = vit_base(patch_size=14,img_size=518,init_values=1,block_chunks=0)
-        
+        print("=" * 40)
+        print("- Using ViT-Base (embed_dim=768) -")
+        print("=" * 40)
+        backbone = vit_base(patch_size=14, img_size=518, init_values=1, block_chunks=0, num_register_tokens=num_register_tokens)
+        if args is not None:
+            args.features_dim = 768
+
     if pretrained_foundation:
         assert foundation_model_path is not None, "Please specify foundation model path."
         model_dict = backbone.state_dict()

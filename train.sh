@@ -1,32 +1,32 @@
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
-CUDA_VISIBLE_DEVICES=5 \
+CUDA_VISIBLE_DEVICES=0 \
 python3 train_wandb.py \
     --save_dir './logs' \
-    --features_dim 768 \
     --sequences KAIST \
     --foundation_model_path /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/backbone/dinov2/pretrained/dinov2_vitb14_pretrain.pth \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 4 \
     --num_trainable_blocks_THERMAL 4 \
-    --comment "224x224-GeM-r2formerReranking" \
+    --comment "224x224-Croco-r2former-rerank-resume" \
     --margin 0.1 \
     --epochs_num 100 \
-    --soft_positives_dist_threshold 10 \
-    --hard_positives_dist_threshold 10 \
     --negs_num_per_query 10 \
     --croco_mask_ratio 0.8 \
+    --recon_weight 10 \
+    --use_recon_loss \
+    --recon_loss_type 'mse+ssim' \
     --num_decoder_depth 8 \
-    --r2_penultimate_layer \
-    --use_reranking 'r2former'
-    # --recon_weight 10 \
-    # --use_recon_loss \
-    # --recon_loss_type 'mse+ssim'
+    --use_selaVPR_loss \
+    --selaVPR_weight 1 \
+    --use_reranking 'selaVPR'
 
     #### Croco
+    # --croco_mask_ratio 0.8 \
     # --recon_weight 10 \
     # --use_recon_loss \
     # --recon_loss_type 'mse+ssim' \
+    # --num_decoder_depth 8
 
     #### r2former
     # --r2_penultimate_layer \

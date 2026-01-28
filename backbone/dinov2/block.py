@@ -69,7 +69,7 @@ class BasicConv2d(nn.Module):
         x = self.bn(x)
         return F.relu(x, inplace=True)
 
-        
+adapter_dim = None
 class Block(nn.Module):
     def __init__(
         self,
@@ -116,7 +116,7 @@ class Block(nn.Module):
 
         self.sample_drop_ratio = drop_path
 
-        self.adapter = VanillaAdapter(768, 384)
+        self.adapter = VanillaAdapter(adapter_dim, adapter_dim // 2)
 
         drop_path = 0.
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()

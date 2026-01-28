@@ -48,7 +48,6 @@ class Parser():
         
         ### Model settings
         self.parser.add_argument('--resize', type=int, default=[224, 224], nargs=2, help="Resizing shape for images (HxW) to be fed into the network.")
-        self.parser.add_argument("--features_dim", type=int, default=None, help="_")
         self.parser.add_argument("--foundation_model_path", type=str, default=None, help="_")
 
         ### Dataset parameters
@@ -105,6 +104,7 @@ class Parser():
         self.parser.add_argument("--selaVPR_weight", type=float, default=1, help="_")
         self.parser.add_argument("--decoder_dim", type=int, default=128)
         self.parser.add_argument("--use_reranking", type=str, default="none", choices=['recon', 'r2former', 'selaVPR'])
+        self.parser.add_argument("--features_dim", type=int, default=768)
     
     def parse_arguments(self):
         args = self.parser.parse_args()

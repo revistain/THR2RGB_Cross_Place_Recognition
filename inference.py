@@ -212,7 +212,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
         import gc; gc.collect()
         torch.cuda.empty_cache()
         
-        if args.use_reranking != none:
+        if args.use_reranking != 'none':
             prev_predictions = predictions.copy()
             #####################################
             ############# RERANKING #############
@@ -392,33 +392,33 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
             del queries_features
             del database_features
         
-            # 4. positive query(정답)가 몇 번째 top-N에 속하는지 검사하기
-            positives_per_query = eval_ds.get_positives()
-            recalls = np.zeros(len(args.recall_values))
-            pre_num = eval_ds.queries_num
-            for query_index, pred in enumerate(predictions):
+        # 4. positive query(정답)가 몇 번째 top-N에 속하는지 검사하기
+        positives_per_query = eval_ds.get_positives()
+        recalls = np.zeros(len(args.recall_values))
+        pre_num = eval_ds.queries_num
+        for query_index, pred in enumerate(predictions):
+            for i, n in enumerate(args.recall_values):
+                if np.any(np.in1d(pred[:n], positives_per_query[query_index])):
+                    recalls[i:] += 1
+                    break
+        recalls = recalls / eval_ds.queries_num * 100
+        
+        logging.info(f"recalls: {','.join(map(str, recalls))}")
+        recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, recalls)])
+        
+        if args.use_reranking != 'none':
+            prev_recalls = np.zeros(len(args.recall_values))
+            for query_index, pred in enumerate(prev_predictions):
                 for i, n in enumerate(args.recall_values):
                     if np.any(np.in1d(pred[:n], positives_per_query[query_index])):
-                        recalls[i:] += 1
+                        prev_recalls[i:] += 1
                         break
-            recalls = recalls / eval_ds.queries_num * 100
-            
-            logging.info(f"recalls: {','.join(map(str, recalls))}")
-            recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, recalls)])
-            
-            if args.use_reranking != 'none':
-                prev_recalls = np.zeros(len(args.recall_values))
-                for query_index, pred in enumerate(prev_predictions):
-                    for i, n in enumerate(args.recall_values):
-                        if np.any(np.in1d(pred[:n], positives_per_query[query_index])):
-                            prev_recalls[i:] += 1
-                            break
-                prev_recalls = prev_recalls / eval_ds.queries_num * 100
-            
-                logging.info(f"=================================================")
-                prev_recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, prev_recalls)])
-                logging.info(f"Recalls before RERANKING {seq_name}: {prev_recalls_str}")
-                logging.info(f"=================================================")
+            prev_recalls = prev_recalls / eval_ds.queries_num * 100
+        
+            logging.info(f"=================================================")
+            prev_recalls_str = ", ".join([f"R@{val}: {rec:.1f}" for val, rec in zip(args.recall_values, prev_recalls)])
+            logging.info(f"Recalls before RERANKING {seq_name}: {prev_recalls_str}")
+            logging.info(f"=================================================")
         
         gc.collect()
         torch.cuda.empty_cache()
