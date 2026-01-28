@@ -12,6 +12,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 import random
+import cv2
 
 
 def denormalize(tensor, device='cpu'):
@@ -578,3 +579,270 @@ def visualize_attention_comparison(
             print(f"Saved: {save_path}")
 
     model.train()
+
+
+def get_mnn_matches(fm1, fm2):
+    """
+    Get mutual nearest neighbor matches between two feature maps.
+
+    Args:
+        fm1: [H*W, C] features from image 1 (e.g., thermal)
+        fm2: [H*W, C] features from image 2 (e.g., RGB)
+
+    Returns:
+        idx1: indices of matched keypoints in fm1
+        idx2: indices of matched keypoints in fm2
+    """
+    # Compute similarity matrix
+    M = torch.matmul(fm2, fm1.T)  # [l2, l1]
+
+    # Find nearest neighbors in both directions
+    max1 = torch.argmax(M, dim=0)  # For each fm1 point, best match in fm2: [l1]
+    max2 = torch.argmax(M, dim=1)  # For each fm2 point, best match in fm1: [l2]
+
+    # Check mutual nearest neighbors
+    # For each point i in fm1, check if its match in fm2 also matches back to i
+    mutual_check = max2[max1]  # [l1] - for each fm1 point, get the fm1 index that fm2 matches to
+    valid_mask = torch.arange(fm1.shape[0], device=fm1.device) == mutual_check
+
+    idx1 = torch.nonzero(valid_mask).squeeze(-1)  # Valid indices in fm1
+    idx2 = max1[idx1]  # Corresponding indices in fm2
+
+    return idx1, idx2
+
+
+def visualize_mnn_matches(
+    args,
+    model,
+    dataloader,
+    device,
+    epoch,
+    num_samples=4,
+    save_dir='./mnn_visualizations',
+    comment='default',
+    max_matches=50
+):
+    """
+    Visualize MNN (Mutual Nearest Neighbor) matched lines between thermal and RGB images,
+    along with the encoder's last layer attention map.
+
+    Args:
+        args: training arguments (must have use_selaVPR_loss or use_reranking=='selaVPR')
+        model: the model with LocalAdapt module
+        dataloader: data loader to sample images from
+        device: cuda/cpu device
+        epoch: current epoch number
+        num_samples: number of random image pairs to visualize
+        save_dir: directory to save visualizations
+        comment: experiment comment for subfolder
+        max_matches: maximum number of MNN lines to draw
+    """
+    from utils import get_timestamp
+
+    # Check if selaVPR features are available
+    if not (args.use_selaVPR_loss or args.use_reranking == 'selaVPR'):
+        print("MNN visualization requires use_selaVPR_loss or use_reranking='selaVPR'")
+        return
+
+    timestamp = get_timestamp()
+    save_subdir = os.path.join(save_dir, comment, f'epoch_{epoch:03d}_{timestamp}')
+    os.makedirs(save_subdir, exist_ok=True)
+
+    model.eval()
+
+    # Get a batch of images
+    images, _, _, aligned_rgbs = next(iter(dataloader))
+
+    # Calculate batch structure
+    batch_size = args.train_batch_size
+    sample_size = 1 + 1 + args.negs_num_per_query  # thermal + pos + negs
+
+    # Collect indices
+    thermal_indices = [i * sample_size for i in range(batch_size)]
+    rgb_pos_indices = [i * sample_size + 1 for i in range(batch_size)]
+
+    # Select random samples
+    num_samples = min(num_samples, batch_size)
+    selected_batch_indices = random.sample(range(batch_size), num_samples)
+
+    with torch.no_grad():
+        for sample_idx, batch_idx in enumerate(selected_batch_indices):
+            # Get thermal and RGB images
+            thermal_idx = thermal_indices[batch_idx]
+            rgb_idx = rgb_pos_indices[batch_idx]
+
+            thermal_img = images[thermal_idx:thermal_idx+1].to(device)
+            rgb_img = images[rgb_idx:rgb_idx+1].to(device)
+
+            # Forward pass through backbone to get attention
+            thermal_out = model.module.shared_backbone(thermal_img, return_attention=True)
+            rgb_out = model.module.shared_backbone(rgb_img, return_attention=True)
+
+            # Get patch tokens for local features
+            thermal_patch_tokens = thermal_out["x_norm_patchtokens"]  # [1, N, D]
+            rgb_patch_tokens = rgb_out["x_norm_patchtokens"]  # [1, N, D]
+
+            # Get image dimensions
+            H, W = thermal_img.shape[2], thermal_img.shape[3]
+            H_feat = H // 14
+            W_feat = W // 14
+
+            # Compute selaVPR local features through LocalAdapt
+            # Reshape patch tokens: [1, N, D] -> [1, D, H_feat, W_feat]
+            thermal_x = thermal_patch_tokens.permute(0, 2, 1).view(1, -1, H_feat, W_feat)
+            rgb_x = rgb_patch_tokens.permute(0, 2, 1).view(1, -1, H_feat, W_feat)
+
+            # Pass through LocalAdapt
+            thermal_local = model.module.local_adapt(thermal_x)  # [1, 128, H_local, W_local]
+            rgb_local = model.module.local_adapt(rgb_x)
+
+            # Get local feature dimensions
+            _, C_local, H_local, W_local = thermal_local.shape
+
+            # Reshape to [H*W, C] and normalize
+            thermal_local_flat = thermal_local.permute(0, 2, 3, 1).view(-1, C_local)  # [H*W, C]
+            rgb_local_flat = rgb_local.permute(0, 2, 3, 1).view(-1, C_local)
+            thermal_local_flat = torch.nn.functional.normalize(thermal_local_flat, p=2, dim=-1)
+            rgb_local_flat = torch.nn.functional.normalize(rgb_local_flat, p=2, dim=-1)
+
+            # Get MNN matches
+            idx1, idx2 = get_mnn_matches(thermal_local_flat, rgb_local_flat)
+
+            # Convert to numpy
+            idx1_np = idx1.cpu().numpy()
+            idx2_np = idx2.cpu().numpy()
+
+            # Get CLS attention maps
+            thermal_cls_attn = thermal_out.get("cls_attention", None)
+            rgb_cls_attn = rgb_out.get("cls_attention", None)
+
+            # Denormalize images
+            thermal_denorm = denormalize(thermal_img, device).cpu()[0].permute(1, 2, 0).numpy()
+            rgb_denorm = denormalize(rgb_img, device).cpu()[0].permute(1, 2, 0).numpy()
+
+            # Convert to uint8 for OpenCV
+            thermal_vis = (thermal_denorm * 255).astype(np.uint8)
+            rgb_vis = (rgb_denorm * 255).astype(np.uint8)
+
+            # Create figure: 2 rows
+            # Row 0: MNN matches visualization
+            # Row 1: Last layer attention maps
+            fig, axes = plt.subplots(2, 3, figsize=(24, 16))
+
+            # ============ Row 0: MNN Matches ============
+            # Create side-by-side image
+            gap = 20  # gap between images
+            combined_img = np.ones((H, 2*W + gap, 3), dtype=np.uint8) * 255
+            combined_img[:, :W] = thermal_vis
+            combined_img[:, W+gap:] = rgb_vis
+
+            # Convert idx to (x, y) coordinates in the local feature grid
+            # Local features are H_local x W_local
+            thermal_kp_y = (idx1_np // W_local) * (H / H_local) + (H / H_local / 2)
+            thermal_kp_x = (idx1_np % W_local) * (W / W_local) + (W / W_local / 2)
+
+            rgb_kp_y = (idx2_np // W_local) * (H / H_local) + (H / H_local / 2)
+            rgb_kp_x = (idx2_np % W_local) * (W / W_local) + (W / W_local / 2) + W + gap
+
+            # Randomly sample matches if too many
+            num_matches = len(idx1_np)
+            if num_matches > max_matches:
+                sample_indices = np.random.choice(num_matches, max_matches, replace=False)
+            else:
+                sample_indices = np.arange(num_matches)
+
+            # Draw matches
+            combined_with_lines = combined_img.copy()
+            colors = plt.cm.hsv(np.linspace(0, 1, len(sample_indices)))[:, :3] * 255
+
+            for i, sidx in enumerate(sample_indices):
+                pt1 = (int(thermal_kp_x[sidx]), int(thermal_kp_y[sidx]))
+                pt2 = (int(rgb_kp_x[sidx]), int(rgb_kp_y[sidx]))
+                color = tuple(map(int, colors[i]))
+                cv2.line(combined_with_lines, pt1, pt2, color, 1, cv2.LINE_AA)
+                cv2.circle(combined_with_lines, pt1, 3, color, -1)
+                cv2.circle(combined_with_lines, pt2, 3, color, -1)
+
+            # Plot MNN matches
+            axes[0, 0].imshow(combined_with_lines)
+            axes[0, 0].set_title(f'MNN Matches: {num_matches} total ({len(sample_indices)} shown)', fontsize=14, fontweight='bold')
+            axes[0, 0].axis('off')
+
+            # Plot thermal image with keypoints
+            thermal_with_kp = thermal_vis.copy()
+            for sidx in sample_indices:
+                pt = (int(thermal_kp_x[sidx]), int(thermal_kp_y[sidx]))
+                cv2.circle(thermal_with_kp, pt, 4, (0, 255, 0), -1)
+            axes[0, 1].imshow(thermal_with_kp)
+            axes[0, 1].set_title(f'Thermal Query ({len(sample_indices)} keypoints)', fontsize=12)
+            axes[0, 1].axis('off')
+
+            # Plot RGB image with keypoints
+            rgb_with_kp = rgb_vis.copy()
+            for sidx in sample_indices:
+                pt = (int(rgb_kp_x[sidx] - W - gap), int(rgb_kp_y[sidx]))
+                cv2.circle(rgb_with_kp, pt, 4, (0, 255, 0), -1)
+            axes[0, 2].imshow(rgb_with_kp)
+            axes[0, 2].set_title(f'RGB Positive ({len(sample_indices)} keypoints)', fontsize=12)
+            axes[0, 2].axis('off')
+
+            # ============ Row 1: Attention Maps ============
+            grid_h, grid_w = H // 14, W // 14
+
+            # Thermal attention
+            if thermal_cls_attn is not None:
+                thermal_attn = thermal_cls_attn[0].mean(dim=0).cpu().numpy().reshape(grid_h, grid_w)
+                thermal_attn_resized = np.kron(thermal_attn, np.ones((14, 14)))
+                thermal_attn_resized = normalize_for_vis(thermal_attn_resized)
+                heatmap = plt.cm.hot(thermal_attn_resized)[:, :, :3]
+                overlay = 0.5 * thermal_denorm + 0.5 * heatmap
+                axes[1, 0].imshow(overlay)
+                axes[1, 0].set_title('Thermal Last Layer Attention', fontsize=12)
+            else:
+                axes[1, 0].imshow(thermal_denorm)
+                axes[1, 0].set_title('Thermal (no attention)', fontsize=12)
+            axes[1, 0].axis('off')
+
+            # RGB attention
+            if rgb_cls_attn is not None:
+                rgb_attn = rgb_cls_attn[0].mean(dim=0).cpu().numpy().reshape(grid_h, grid_w)
+                rgb_attn_resized = np.kron(rgb_attn, np.ones((14, 14)))
+                rgb_attn_resized = normalize_for_vis(rgb_attn_resized)
+                heatmap = plt.cm.hot(rgb_attn_resized)[:, :, :3]
+                overlay = 0.5 * rgb_denorm + 0.5 * heatmap
+                axes[1, 1].imshow(overlay)
+                axes[1, 1].set_title('RGB Last Layer Attention', fontsize=12)
+            else:
+                axes[1, 1].imshow(rgb_denorm)
+                axes[1, 1].set_title('RGB (no attention)', fontsize=12)
+            axes[1, 1].axis('off')
+
+            # Info panel
+            axes[1, 2].axis('off')
+            info_text = (
+                f"Epoch: {epoch}\n"
+                f"Sample: {sample_idx+1}/{num_samples}\n"
+                f"Local Feature Grid: {H_local}x{W_local}\n"
+                f"Total MNN Matches: {num_matches}\n"
+                f"Displayed: {len(sample_indices)}\n"
+                f"Feature Dim: {C_local}"
+            )
+            axes[1, 2].text(0.5, 0.5, info_text, ha='center', va='center',
+                          fontsize=14, transform=axes[1, 2].transAxes,
+                          bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+            # Overall title
+            fig.suptitle(f'MNN Matching Visualization (Epoch {epoch}, Sample {sample_idx+1})',
+                        fontsize=16, fontweight='bold')
+
+            plt.tight_layout(rect=[0, 0, 1, 0.97])
+
+            # Save
+            save_path = os.path.join(save_subdir, f'mnn_epoch_{epoch}_{sample_idx:02d}.png')
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            plt.close()
+
+            print(f"Saved MNN visualization: {save_path}")
+
+    model.train()
+    print(f"MNN visualization complete for epoch {epoch}")

@@ -475,7 +475,6 @@ class CrossModalVPR_Net(nn.Module):
             global_desc = out["x_norm_clstoken"]
         else:
             global_desc = agg_layer(x_feat) # [B, D]
-            
         cls_attn_map = out["cls_attention"].sum(dim=1)
         
         sela_local_feature = None

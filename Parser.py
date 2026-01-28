@@ -84,6 +84,7 @@ class Parser():
         
         # custom settings
         self.parser.add_argument('--comment', type=str)
+        self.parser.add_argument('--cuda_device', type=str)
         self.parser.add_argument("--use_alignment_loss", action='store_true', default=False)
         self.parser.add_argument("--use_sepearte_backbone_lr", action='store_true', default=False)
         self.parser.add_argument("--backbone_lr", type=float, default=0.00001, help="_")
@@ -102,8 +103,11 @@ class Parser():
         self.parser.add_argument("--use_recon_loss", action='store_true', default=False)
         self.parser.add_argument("--use_selaVPR_loss", action='store_true', default=False)
         self.parser.add_argument("--selaVPR_weight", type=float, default=1, help="_")
+        self.parser.add_argument("--match_conf_weight", type=float, default=1.0, help="Weight for match confidence loss")
+        self.parser.add_argument("--match_conf_top_k", type=int, default=500, help="Top-K MNN matches to use")
+        self.parser.add_argument("--match_conf_embed_dim", type=int, default=32, help="Embedding dim for match conf transformer")
         self.parser.add_argument("--decoder_dim", type=int, default=128)
-        self.parser.add_argument("--use_reranking", type=str, default="none", choices=['recon', 'r2former', 'selaVPR'])
+        self.parser.add_argument("--use_reranking", type=str, default="none", choices=['none', 'recon', 'r2former', 'selaVPR', 'match_conf'])
         self.parser.add_argument("--features_dim", type=int, default=768)
     
     def parse_arguments(self):

@@ -708,13 +708,15 @@ class CrossModalVPR_Net(nn.Module):
                 global_desc = agg_layer(x_feat) # [B, D]
 
             # selaVPR local feature computation
-            if self.args.use_selaVPR_loss or (not self.training and self.args.use_reranking == 'selaVPR'):
+            if self.args.use_selaVPR_loss or (not self.training and (self.args.use_reranking == 'selaVPR' or self.args.use_reranking == 'match_conf')):
                 x0 = patch_tokens.view(-1, H_feat, W_feat, self.output_dim).permute(0, 3, 1, 2)
                 x0 = self.local_adapt(x0)
                 x0 = x0.permute(0, 2, 3, 1)
                 sela_local_feature = torch.nn.functional.normalize(x0, p=2, dim=-1)  # [B, 61, 61, 128] for 224x224
 
-        return global_desc, patch_tokens, [recon_loss_thermal, recon_loss_rgb], mask_thermal, masked_patch_thermal, cls_attn_map, penultimate_patch, sela_local_feature
+        return global_desc, patch_tokens, [recon_loss_thermal, recon_loss_rgb], \
+                mask_thermal, masked_patch_thermal, cls_attn_map, \
+                penultimate_patch, sela_local_feature
 
     def forward_model_basic(self, x, modality='rgb'):
         """단일 모달리티에 대한 Forward"""

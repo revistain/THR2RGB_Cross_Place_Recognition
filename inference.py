@@ -17,6 +17,7 @@ torch.backends.cudnn.deterministic = True
 from croco.models.masking import RandomMask
 from croco.models.criterion import MaskedMSE
 from local_matching import *
+from match_conf_module import MatchConfidenceModule
 
 from recon_vis import *
 
@@ -148,9 +149,9 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
             database_features = np.empty((eval_ds.database_num, args.features_dim), dtype="float32")
             database_attn_map = np.empty((eval_ds.database_num, patch_count), dtype="float32")
             
-            use_selaVPR = args.use_reranking == 'selaVPR'
+            use_selaVPR = args.use_reranking in ['selaVPR', 'match_conf']
             use_penultimate = args.r2_penultimate_layer
-            print(f"Using SelaVPR: {use_selaVPR}")
+            print(f"Using SelaVPR features: {use_selaVPR}")
             print(f"Using penultimate: {use_penultimate}")
             for inputs, indices, flags in tqdm(database_dataloader, ncols=100):
                 flags_int = [1 if f == 'rgb' else 0 for f in flags]
@@ -388,7 +389,55 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                     predictions.append(pred[rerank_index])
                     
                 predictions = np.array(predictions)
-                
+
+            elif args.use_reranking == 'match_conf':
+                # Match Confidence reranking using trained MatchConfidenceModule
+                saved_files = os.listdir(NPY_ROOTPATH)
+                prefix = "sela"
+                db_files = [f for f in saved_files if f.startswith(f"Db_{seq_name}") and prefix in f]
+                query_files = [f for f in saved_files if f.startswith(f"Query_{seq_name}") and prefix in f]
+
+                assert len(db_files) == eval_ds.database_num, \
+                    f"DB files mismatch: {len(db_files)} vs {eval_ds.database_num}"
+                assert len(query_files) == eval_ds.queries_num, \
+                    f"Query files mismatch: {len(query_files)} vs {eval_ds.queries_num}"
+
+                logging.info(f"✓ File count verified: {len(db_files)} DB + {len(query_files)} Query")
+
+                # Get the match confidence module from model
+                match_conf_module = getattr(model.module, 'match_conf', None)
+                match_conf_module.eval()
+
+                predictions = []
+                candidates_local_features = torch.zeros(RERANKING_TOP_K, 61, 61, 128, device='cuda')
+
+                with torch.no_grad():
+                    for query_index, pred in enumerate(tqdm(prev_predictions, desc="Match Conf Reranking")):
+                        # Load query local features: [61, 61, 128]
+                        query_local_features = torch.from_numpy(
+                            load_npy(f"Query_{seq_name}_sela_{query_index}")
+                        ).float().cuda()
+
+                        # Load candidate local features: [K, 61, 61, 128]
+                        for cnt, candidates_index in enumerate(pred[:RERANKING_TOP_K]):
+                            candidates_local_features[cnt] = torch.from_numpy(
+                                load_npy(f"Db_{seq_name}_sela_{candidates_index}")
+                            ).float().cuda()
+
+                        # Get confidence scores using trained module
+                        # query: [1, 61, 61, 128], candidates: [K, 61, 61, 128]
+                        rerank_scores = match_conf_module.module.get_confidence_score(
+                            query_local_features.unsqueeze(0),
+                            candidates_local_features,
+                            grid_size=(61, 61)
+                        )
+
+                        # Sort by score (higher = better match)
+                        rerank_index = rerank_scores.cpu().numpy().argsort()[::-1]
+                        predictions.append(pred[rerank_index])
+
+                predictions = np.array(predictions)
+
             del queries_features
             del database_features
         
