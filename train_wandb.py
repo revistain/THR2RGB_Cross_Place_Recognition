@@ -47,10 +47,10 @@ if __name__ == "__main__":
     args = parser.parse_arguments()
     if True:
         import backbone.dinov2.block as dinoblock
-        dinoblock.adapter_dim = args.features_dim
         model_path = Path(args.foundation_model_path)
         model_name = model_path.parts[-1].lower()
         args.features_dim = 768 if 'vitb' in model_name else 384
+        dinoblock.adapter_dim = args.features_dim
 
     # wandb 초기화
     wandb.init(project="cross-modal-vpr-4", name=args.comment, config=vars(args))
@@ -80,19 +80,28 @@ if __name__ == "__main__":
         test_ds = datasets_T2R.BaseSTheReODual(args, DATASET_FOLDER, split='test')
         test_ds_list.append(test_ds)
 
-    '''Model'''
-    if args.use_recon_loss:
-        model = network.CrossModalVPR_Net(
-            args,
-            pretrained_foundation = True,
-            foundation_model_path = args.foundation_model_path,
-        )
+    '''Resume from checkpoint'''
+    if args.resume:
+        model, _, best_r1, start_epoch_num, not_improved_num = utils.resume_train(args, model, strict=False)
+        best_r1 = 0
+        logging.info(f"Resuming from epoch {start_epoch_num}")
     else:
-        model = network_only_GeM.CrossModalVPR_Net(
-            args,
-            pretrained_foundation = True,
-            foundation_model_path = args.foundation_model_path,
-        )
+        best_r1 = start_epoch_num = not_improved_num = 0
+        
+        '''Model'''
+        if args.use_recon_loss:
+            model = network.CrossModalVPR_Net(
+                args,
+                pretrained_foundation = True,
+                foundation_model_path = args.foundation_model_path,
+            )
+        else:
+            model = network_only_GeM.CrossModalVPR_Net(
+                args,
+                pretrained_foundation = True,
+                foundation_model_path = args.foundation_model_path,
+            )
+            
     model = model.to(args.device)
     model = torch.nn.DataParallel(model)
 
@@ -158,14 +167,6 @@ if __name__ == "__main__":
     '''Loss Function'''
     GlobalTriplet = nn.TripletMarginLoss(margin=args.margin, p=2, reduction="sum")
     MNNLocalFeatureLoss = LocalFeatureLoss().to(args.device)
-
-    '''Resume from checkpoint'''
-    if args.resume:
-        model, _, best_r1, start_epoch_num, not_improved_num = utils.resume_train(args, model, strict=False)
-        best_r1 = 0
-        logging.info(f"Resuming from epoch {start_epoch_num}")
-    else:
-        best_r1 = start_epoch_num = not_improved_num = 0
 
     thermal_flag = torch.zeros(1, dtype=torch.long)
     rgb_flags = torch.ones(1 + args.negs_num_per_query, dtype=torch.long)

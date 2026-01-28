@@ -6,20 +6,13 @@ python3 train_wandb.py \
     --sequences KAIST \
     --foundation_model_path /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/backbone/dinov2/pretrained/dinov2_vitb14_pretrain.pth \
     --queries_per_epoch 2000 \
-    --num_trainable_blocks_RGB 4 \
-    --num_trainable_blocks_THERMAL 4 \
-    --comment "224x224-Croco-r2former-rerank-resume" \
+    --num_trainable_blocks_RGB 0 \
+    --num_trainable_blocks_THERMAL 0 \
+    --comment "224x224-GeM-r2former" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
-    --croco_mask_ratio 0.8 \
-    --recon_weight 10 \
-    --use_recon_loss \
-    --recon_loss_type 'mse+ssim' \
-    --num_decoder_depth 8 \
-    --use_selaVPR_loss \
-    --selaVPR_weight 1 \
-    --use_reranking 'selaVPR'
+    --use_reranking 'r2former'
 
     #### Croco
     # --croco_mask_ratio 0.8 \
