@@ -109,6 +109,8 @@ class Parser():
         self.parser.add_argument("--decoder_dim", type=int, default=128)
         self.parser.add_argument("--use_reranking", type=str, default="none", choices=['none', 'recon', 'r2former', 'selaVPR', 'match_conf'])
         self.parser.add_argument("--features_dim", type=int, default=768)
+        self.parser.add_argument("--selaVPR_rerank_score_type", type=str, default="none", choices=['none', 'quantile_attn', 'mul_cossim'])
+        
     
     def parse_arguments(self):
         args = self.parser.parse_args()

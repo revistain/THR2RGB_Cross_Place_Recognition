@@ -11,16 +11,16 @@ python3 train_wandb.py \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
-    --comment "224x224-Croco-ViTs-numBlock0-selaVPRReranking" \
+    --comment "224x224-Croco-ViTs-numBlock0-selaVPRRerankingWithQuantileAttn" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
-    --selaVPR_weight 1 \
     --croco_mask_ratio 0.8 \
     --recon_weight 10 \
     --use_recon_loss \
     --recon_loss_type 'mse+ssim' \
     --num_decoder_depth 8 \
+    --selaVPR_rerank_score_type 'quantile_attn' \
     --use_reranking 'selaVPR'
 
     #### Croco
@@ -38,11 +38,11 @@ python3 train_wandb.py \
 
     #### selaVPR
     # --use_selaVPR_loss \
-    # --selaVPR_weight 1 \
     # --use_reranking 'selaVPR' \
     # --match_conf_weight \
     # --match_conf_top_k \
     # --match_conf_embed_dim \
+    # --use_selaVPR_attn_score \
     ###
     # --use_reranking 'match_conf' \
 
