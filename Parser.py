@@ -107,14 +107,13 @@ class Parser():
         self.parser.add_argument("--match_conf_top_k", type=int, default=500, help="Top-K MNN matches to use")
         self.parser.add_argument("--match_conf_embed_dim", type=int, default=32, help="Embedding dim for match conf transformer")
         self.parser.add_argument("--decoder_dim", type=int, default=128)
-        self.parser.add_argument("--use_reranking", type=str, default="none", choices=['none', 'recon', 'r2former', 'selaVPR', 'match_conf'])
+        self.parser.add_argument("--use_reranking", type=str, default="none", choices=['none', 'recon', 'r2former', 'selaVPR', 'reconSelaVPR'])
         self.parser.add_argument("--features_dim", type=int, default=768)
         self.parser.add_argument("--selaVPR_rerank_score_type", type=str, default="none", choices=['none', 'quantile_attn', 'mul_cossim'])
-        
-    
+
+
     def parse_arguments(self):
         args = self.parser.parse_args()
-
         if args.config is not None:
             with open(args.config, 'r') as file:
                 config = yaml.safe_load(file)

@@ -17,7 +17,6 @@ torch.backends.cudnn.deterministic = True
 from croco.models.masking import RandomMask
 from croco.models.criterion import MaskedMSE
 from local_matching import *
-from match_conf_module import MatchConfidenceModule
 
 from recon_vis import *
 
@@ -109,8 +108,6 @@ def visualize_top5_predictions(args, eval_ds, predictions, distances, positives_
 def index_to_image_tensor(dataset, index):
     return dataset[index][0]
 
-# TODO: can be less memory cost
-# TODO: finish the uncompleted parts
 def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,seq_name=""):
     '''
     hard_resize: directly use the resized image
@@ -167,7 +164,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                     for num, idx in enumerate(indices_npy):
                         if use_penultimate: save_npy(outputs[5][num].cpu().numpy(), f"Db_{seq_name}_penultimate_{idx}")
                         if use_selaVPR: save_npy(outputs[6][num].cpu().numpy(), f"Db_{seq_name}_sela_{idx}")
-                        else: save_npy(patch_features[num].cpu().numpy(), f"Db_{seq_name}_{idx}")
+                        save_npy(patch_features[num].cpu().numpy(), f"Db_{seq_name}_{idx}")
                 # if args.use_fast_track: break
                 
             logging.info(f"Finished extracting {eval_ds.database_num} database features in {time.time() - start_time:.2f} s")
@@ -197,7 +194,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                     for num, idx in enumerate(indices_npy):
                         if use_penultimate: save_npy(outputs[5][num].cpu().numpy(), f"Query_{seq_name}_penultimate_{idx}")
                         if use_selaVPR: save_npy(outputs[6][num].cpu().numpy(), f"Query_{seq_name}_sela_{idx}")
-                        else: save_npy(patch_features[num].cpu().numpy(), f"Query_{seq_name}_{idx}")
+                        save_npy(patch_features[num].cpu().numpy(), f"Query_{seq_name}_{idx}")
                 # if args.use_fast_track: break
                     
             logging.info(f"Finished extracting {eval_ds.queries_num} query features in {time.time() - start_time:.2f} s")
@@ -369,6 +366,8 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
 
                 logging.info(f"✓ File count verified: {len(db_files)} DB + {len(query_files)} Query")
 
+                use_GeM_attn = True
+                print(f"use_GEM_attn: {use_GeM_attn}")
                 predictions = []
                 rerank_scores_dict = {}  # For visualization
                 candidates_local_features = torch.zeros(RERANKING_TOP_K, 61, 61, 128, device='cuda')
@@ -384,12 +383,26 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                         candidates_local_features[cnt] = torch.from_numpy(
                             load_npy(f"Db_{seq_name}_sela_{candidates_index}")
                         ).float().cuda()
-                        candidates_db_attn_map[cnt] = torch.from_numpy(database_attn_map[candidates_index]).float().cuda()
-
+                        
+                        if use_GeM_attn:
+                            cur_database_features = load_npy(f"Db_{seq_name}_{candidates_index}")
+                            cur_database_attn_map = database_features[candidates_index] @ cur_database_features.T # softmax?
+                            candidates_db_attn_map[cnt] = torch.from_numpy(cur_database_attn_map).float().cuda()
+                        else:
+                            candidates_db_attn_map[cnt] = torch.from_numpy(database_attn_map[candidates_index]).float().cuda()
+                        
                     # local_sim expects: query [H, W, C], candidates [B, H, W, C]
+                    if use_GeM_attn:
+                        cur_queries_features = load_npy(f"Query_{seq_name}_{query_index}")
+                        cur_queries_attn_map = queries_features[query_index] @ cur_queries_features.T # softmax?
+                        cur_queries_attn_map = torch.from_numpy(cur_queries_attn_map).float().cuda()
+                    else:
+                        cur_queries_attn_map = torch.from_numpy(queries_attn_map[query_index]).float().cuda()
+                    
                     rerank_scores = local_sim(query_local_features, candidates_local_features, trainflag=False,
-                        query_attn_map=torch.from_numpy(queries_attn_map[query_index]).float().cuda(),
-                        db_attn_map=candidates_db_attn_map, method_type=args.selaVPR_rerank_score_type
+                        query_attn_map=cur_queries_attn_map,
+                        db_attn_map=candidates_db_attn_map,
+                        method_type=args.selaVPR_rerank_score_type
                     )
 
                     rerank_scores_np = rerank_scores.cpu().numpy()
@@ -415,74 +428,68 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 #     num_samples=4,
                 #     reranking_method='selaVPR'
                 # )
+            elif args.use_reranking == 'reconSelaVPR':
+                # ReconSelaVPR: CroCo bidirectional decoder + SelaVPR-style local matching
+                logging.info("Using reconSelaVPR reranking (bidirectional decoder + local matching)")
 
-            elif args.use_reranking == 'match_conf':
-                # Match Confidence reranking using trained MatchConfidenceModule
+                # Verify saved patch features exist
                 saved_files = os.listdir(NPY_ROOTPATH)
-                prefix = "sela"
-                db_files = [f for f in saved_files if f.startswith(f"Db_{seq_name}") and prefix in f]
-                query_files = [f for f in saved_files if f.startswith(f"Query_{seq_name}") and prefix in f]
+                db_files = [f for f in saved_files if f.startswith(f"Db_{seq_name}_")
+                            and "sela" not in f and "penultimate" not in f]
+                query_files = [f for f in saved_files if f.startswith(f"Query_{seq_name}_")
+                               and "sela" not in f and "penultimate" not in f]
 
                 assert len(db_files) == eval_ds.database_num, \
                     f"DB files mismatch: {len(db_files)} vs {eval_ds.database_num}"
                 assert len(query_files) == eval_ds.queries_num, \
                     f"Query files mismatch: {len(query_files)} vs {eval_ds.queries_num}"
-
-                logging.info(f"✓ File count verified: {len(db_files)} DB + {len(query_files)} Query")
-
-                # Get the match confidence module from model
-                match_conf_module = getattr(model.module, 'match_conf', None)
-                match_conf_module.eval()
+                logging.info(f"✓ Verified: {len(db_files)} DB + {len(query_files)} Query patch files")
 
                 predictions = []
-                rerank_scores_dict = {}  # For visualization
-                candidates_local_features = torch.zeros(RERANKING_TOP_K, 61, 61, 128, device='cuda')
+                rerank_scores_dict = {}
+                candidates_features = torch.zeros(RERANKING_TOP_K, patch_count, args.features_dim, device='cuda')
 
                 with torch.no_grad():
-                    for query_index, pred in enumerate(tqdm(prev_predictions, desc="Match Conf Reranking")):
-                        # Load query local features: [61, 61, 128]
-                        query_local_features = torch.from_numpy(
-                            load_npy(f"Query_{seq_name}_sela_{query_index}")
+                    for query_index, pred in enumerate(tqdm(prev_predictions, desc="ReconSelaVPR Reranking")):
+                        # Load query encoder features: [256, 768]
+                        query_enc_features = torch.from_numpy(
+                            load_npy(f"Query_{seq_name}_{query_index}")
                         ).float().cuda()
 
-                        # Load candidate local features: [K, 61, 61, 128]
-                        for cnt, candidates_index in enumerate(pred[:RERANKING_TOP_K]):
-                            candidates_local_features[cnt] = torch.from_numpy(
-                                load_npy(f"Db_{seq_name}_sela_{candidates_index}")
+                        # Load top-K candidate encoder features
+                        for cnt, candidate_idx in enumerate(pred[:RERANKING_TOP_K]):
+                            candidates_features[cnt] = torch.from_numpy(
+                                load_npy(f"Db_{seq_name}_{candidate_idx}")
                             ).float().cuda()
 
-                        # Get confidence scores using trained module
-                        # query: [1, 61, 61, 128], candidates: [K, 61, 61, 128]
-                        rerank_scores = match_conf_module.module.get_confidence_score(
-                            query_local_features.unsqueeze(0),
-                            candidates_local_features,
-                            grid_size=(61, 61)
+                        # Expand query to batch: [K, 256, 768]
+                        query_batch = query_enc_features.unsqueeze(0).expand(RERANKING_TOP_K, -1, -1)
+
+                        # Bidirectional decoding
+                        thermal_decoded_local, rgb_decoded_local = model.module.forward_recon_sela_decode(
+                            query_batch,         # thermal [K, 256, 768]
+                            candidates_features  # RGB [K, 256, 768]
+                        )
+                        # thermal_decoded_local: [K, 61, 61, 128] - thermal refined with RGB context
+                        # rgb_decoded_local: [K, 61, 61, 128] - RGB refined with thermal context
+
+                        # MNN matching between decoded features
+                        query_local = thermal_decoded_local[0]  # [61, 61, 128]
+                        db_local = rgb_decoded_local            # [K, 61, 61, 128]
+
+                        rerank_scores = local_sim(
+                            query_local, db_local,
+                            trainflag=False,
+                            method_type=args.selaVPR_rerank_score_type
                         )
 
-                        # Sort by score (higher = better match)
+                        # Sort and reorder
                         rerank_scores_np = rerank_scores.cpu().numpy()
                         rerank_index = rerank_scores_np.argsort()[::-1]
                         rerank_scores_dict[query_index] = rerank_scores_np[rerank_index].tolist()
                         predictions.append(pred[rerank_index])
 
                 predictions = np.array(predictions)
-
-                # Visualization for match_conf
-                positives_per_query_vis = eval_ds.get_positives()
-                vis_save_dir = f"./match_conf_visualizations/{args.comment}_{seq_name}"
-                # visualize_selaVPR_reranking(
-                #     args, eval_ds,
-                #     prev_predictions, predictions,
-                #     rerank_scores_dict,
-                #     positives_per_query_vis,
-                #     epoch=0,
-                #     distances=None,
-                #     npy_root_path=NPY_ROOTPATH,
-                #     seq_name=seq_name,
-                #     save_dir=vis_save_dir,
-                #     num_samples=4,
-                #     reranking_method='match_conf'
-                # )
 
             del queries_features
             del database_features

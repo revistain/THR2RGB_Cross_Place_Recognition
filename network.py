@@ -708,7 +708,7 @@ class CrossModalVPR_Net(nn.Module):
                 global_desc = agg_layer(x_feat) # [B, D]
 
             # selaVPR local feature computation
-            if self.args.use_selaVPR_loss or (not self.training and (self.args.use_reranking == 'selaVPR' or self.args.use_reranking == 'match_conf')):
+            if self.args.use_selaVPR_loss or (not self.training and self.args.use_reranking in ['selaVPR', 'match_conf']):
                 x0 = patch_tokens.view(-1, H_feat, W_feat, self.output_dim).permute(0, 3, 1, 2)
                 x0 = self.local_adapt(x0)
                 x0 = x0.permute(0, 2, 3, 1)
@@ -739,9 +739,56 @@ class CrossModalVPR_Net(nn.Module):
         
         # Aggregation -> Descriptor
         global_desc = agg_layer(x_feat) # [B, D]
-        
+
         return global_desc
-    
+
+    def forward_recon_sela_decode(self, thermal_feat, rgb_feat):
+        """
+        Bidirectional CroCo decoding for reconSelaVPR reranking.
+
+        Args:
+            thermal_feat: [B, 256, 768] encoder patch features from thermal
+            rgb_feat: [B, 256, 768] encoder patch features from RGB
+        Returns:
+            thermal_decoded_local: [B, 61, 61, 768] thermal decoded with RGB context
+            rgb_decoded_local: [B, 61, 61, 768] RGB decoded with thermal context
+        """
+        # Add positional embedding
+        thermal_dec = thermal_feat + self.decoder_pos_embed
+        rgb_dec = rgb_feat + self.decoder_pos_embed
+
+        # Direction 1: Thermal decoded with RGB as context
+        thermal_decoded = thermal_dec.clone()
+        for blk in self.decoder_thermal_blocks:
+            thermal_decoded = blk(thermal_decoded, rgb_dec)
+        thermal_decoded = self.decoder_norm(thermal_decoded)
+
+        # Direction 2: RGB decoded with Thermal as context
+        rgb_decoded = rgb_dec.clone()
+        for blk in self.decoder_rgb_blocks:
+            rgb_decoded = blk(rgb_decoded, thermal_dec)
+        rgb_decoded = self.decoder_norm(rgb_decoded)
+
+        # Reshape to spatial format: [B, N, C] -> [B, C, H, W]
+        B = thermal_decoded.shape[0]
+        H = W = int(math.sqrt(thermal_decoded.shape[1]))  # 16
+
+        thermal_spatial = thermal_decoded.permute(0, 2, 1).view(B, -1, H, W)  # [B, 768, 16, 16]
+        rgb_spatial = rgb_decoded.permute(0, 2, 1).view(B, -1, H, W)          # [B, 768, 16, 16]
+
+        # Bilinear interpolation: [B, 768, 16, 16] -> [B, 768, 61, 61]
+        thermal_local = F.interpolate(thermal_spatial, size=(61, 61), mode='bilinear', align_corners=False)
+        rgb_local = F.interpolate(rgb_spatial, size=(61, 61), mode='bilinear', align_corners=False)
+
+        # Permute to [B, H, W, C] and L2 normalize
+        thermal_local = thermal_local.permute(0, 2, 3, 1)  # [B, 61, 61, 768]
+        rgb_local = rgb_local.permute(0, 2, 3, 1)          # [B, 61, 61, 768]
+
+        thermal_decoded_local = F.normalize(thermal_local, p=2, dim=-1)
+        rgb_decoded_local = F.normalize(rgb_local, p=2, dim=-1)
+
+        return thermal_decoded_local, rgb_decoded_local
+
     def forward(self, x, flags, paired_rgb=None, return_mask=False, return_masked_patch=False):
         if not isinstance(flags, torch.Tensor):
             flags = torch.tensor(flags, device=x.device)

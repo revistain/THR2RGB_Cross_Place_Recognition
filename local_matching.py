@@ -81,9 +81,11 @@ def match_batch_tensor(fm1, fm2, trainflag, grid_size, query_attn_map=None, db_a
     query_attn_map = query_attn_map.reshape(-1)
     db_attn_map = db_attn_map.reshape(db_attn_map.shape[0], -1)
     
+    LOW_LIMIT = 0.00 # 하위 trim
+    HIGH_LIMIT = 0.97 # 상위 trim
     if method_type == 'quantile_attn' and query_attn_map is not None:
-        q_limit_low = torch.quantile(query_attn_map, 0.2)  # 하위 20% 지점
-        q_limit_high = torch.quantile(query_attn_map, 0.8) # 상위 20% 지점 (80% 지점)
+        q_limit_low = torch.quantile(query_attn_map, LOW_LIMIT)  # 하위 20% 지점
+        q_limit_high = torch.quantile(query_attn_map, HIGH_LIMIT) # 상위 20% 지점 (80% 지점)
         
     for i in range(fm2.shape[0]):
         idx1 = torch.nonzero(valid[i,:]).squeeze() # matching된 fm1 index들
@@ -103,8 +105,8 @@ def match_batch_tensor(fm1, fm2, trainflag, grid_size, query_attn_map=None, db_a
             else:
                 if method_type == 'quantile_attn' and query_attn_map is not None and db_attn_map is not None:
                     # 1. 현재 DB 이미지(i) 전체 분포에서 상/하위 20% 기준값 계산
-                    d_limit_low = torch.quantile(db_attn_map[i], 0.2)
-                    d_limit_high = torch.quantile(db_attn_map[i], 0.8)
+                    d_limit_low = torch.quantile(db_attn_map[i], LOW_LIMIT) # 하위 20퍼 거르기
+                    d_limit_high = torch.quantile(db_attn_map[i], HIGH_LIMIT) # 상위 20퍼 거르기
                     
                     # 2. 매칭된 포인트들이 '각자의 이미지'에서 정상 범위(중위 60%)에 있는지 확인
                     # Query 쪽 조건: Query 전체 맵 기준 중간 60%

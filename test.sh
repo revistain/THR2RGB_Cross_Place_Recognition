@@ -1,9 +1,9 @@
-CUDA_VISIBLE_DEVICES=5
+CUDA_VISIBLE_DEVICES=6
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
-python3 train_wandb.py \
+python3 fast_inference.py \
     --save_dir './logs' \
     --sequences KAIST \
     --cuda_device $CUDA_VISIBLE_DEVICES \
@@ -11,7 +11,7 @@ python3 train_wandb.py \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
-    --comment "224x224-Croco-ViTs-numBlock0-selaVPRRerankingWithQuantileAttn(up10)" \
+    --comment "224x224-Croco-ViTs-numBlock0-selaVPRRerankingWithQuantileAttn(up3)" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
@@ -21,7 +21,8 @@ python3 train_wandb.py \
     --recon_loss_type 'mse+ssim' \
     --num_decoder_depth 8 \
     --selaVPR_rerank_score_type 'quantile_attn' \
-    --use_reranking 'selaVPR'
+    --use_reranking 'reconSelaVPR' \
+    --resume /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/224x224-Croco-ViTs-numBlock0-selaVPRRerankingWithCosSimFixed/260129_054808/last_model.pth
 
     #### Croco
     # --croco_mask_ratio 0.8 \
