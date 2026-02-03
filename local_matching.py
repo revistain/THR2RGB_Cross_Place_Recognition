@@ -10,6 +10,18 @@ import math
 
 import matplotlib.pyplot as plt
 
+class LocalFeatureLoss(torch.nn.Module):
+    def __init__(self):
+        super(LocalFeatureLoss,self).__init__()
+        return
+    def forward(self, feature_data):
+        anchor, positive, negative = feature_data[0], feature_data[1], feature_data[2]
+        simP = local_sim(anchor,positive,trainflag=True)
+        simN = local_sim(anchor,negative,trainflag=True)
+        # loss = torch.sum(torch.clamp(-simP+simN+0., min=0.))
+        loss = torch.sum(-simP+simN+0.)
+        return loss
+    
 def plot_attention_1d(attn_map):
     """
     1D Attention Map을 시각화하는 함수
@@ -78,12 +90,13 @@ def match_batch_tensor(fm1, fm2, trainflag, grid_size, query_attn_map=None, db_a
     valid = torch.arange(M.shape[-1]).repeat((M.shape[0],1)).cuda() == m # (N, l) bool # MNN matched?
     scores = torch.zeros(fm2.shape[0]).cuda()
     
-    query_attn_map = query_attn_map.reshape(-1)
-    db_attn_map = db_attn_map.reshape(db_attn_map.shape[0], -1)
+
     
     LOW_LIMIT = 0.00 # 하위 trim
     HIGH_LIMIT = 0.97 # 상위 trim
     if method_type == 'quantile_attn' and query_attn_map is not None:
+        query_attn_map = query_attn_map.reshape(-1)
+        db_attn_map = db_attn_map.reshape(db_attn_map.shape[0], -1)
         q_limit_low = torch.quantile(query_attn_map, LOW_LIMIT)  # 하위 20% 지점
         q_limit_high = torch.quantile(query_attn_map, HIGH_LIMIT) # 상위 20% 지점 (80% 지점)
         

@@ -433,7 +433,7 @@ class CrossModalVPR_Net(nn.Module):
         self.args = args
         self.shared_backbone = get_backbone(pretrained_foundation, foundation_model_path, args=args)
         self.output_dim = args.features_dim
-        if args.use_selaVPR_loss or self.args.use_reranking == 'selaVPR':
+        if self.args.use_reranking == 'selaVPR':
             self.local_adapt = LocalAdapt(args.features_dim)
         self.reranker = RerankingModule(args)
 
@@ -476,15 +476,19 @@ class CrossModalVPR_Net(nn.Module):
         else:
             global_desc = agg_layer(x_feat) # [B, D]
         cls_attn_map = out["cls_attention"].sum(dim=1)
-        
+
+        # Compute GeM attention map: dot product between global descriptor and patch tokens
+        # global_desc: [B, D], patch_tokens: [B, N, D] -> gem_attn_map: [B, N]
+        gem_attn_map = torch.einsum('bd,bnd->bn', global_desc, patch_tokens)
+
         sela_local_feature = None
-        if self.args.use_selaVPR_loss or (not self.training and self.args.use_reranking == 'selaVPR'):
+        if (not self.training and self.args.use_reranking == 'selaVPR'):
             x0 = patch_tokens.view(-1,H_feat,W_feat,self.output_dim).permute(0, 3, 1, 2)
             x0 = self.local_adapt(x0)
             x0 = x0.permute(0, 2, 3, 1)
             sela_local_feature = torch.nn.functional.normalize(x0, p=2, dim=-1) # [B, 61, 61, 128] / 224x224 기준
-        
-        return global_desc, patch_tokens, cls_attn_map, out["penultimate_norm_patchtokens"], sela_local_feature
+
+        return global_desc, patch_tokens, cls_attn_map, out["penultimate_norm_patchtokens"], sela_local_feature, gem_attn_map
 
     def forward(self, x, flags, paired_rgb=None, return_mask=False, return_masked_patch=False):
         is_rgb = torch.tensor([f == 'rgb' for f in flags], device=x.device)
@@ -492,22 +496,23 @@ class CrossModalVPR_Net(nn.Module):
         patch_count = x.shape[2] // 14 * x.shape[3] // 14
         patch_emb = torch.zeros((x.size(0), patch_count, self.output_dim), device=x.device)
         cls_attn_map = torch.zeros((x.size(0), patch_count), device=x.device)
+        gem_attn_map = torch.zeros((x.size(0), patch_count), device=x.device)
         penultimate_patch_emb = torch.zeros((x.size(0), patch_count, self.output_dim), device=x.device)
         sela_local_emb = None
-        if self.args.use_selaVPR_loss or self.args.use_reranking == 'selaVPR':
+        if self.args.use_reranking == 'selaVPR':
             sela_local_emb = torch.zeros((x.size(0), 61, 61, 128), device=x.device)
-        
-        if is_rgb.any(): 
-            final_emb[is_rgb], patch_emb[is_rgb], cls_attn_map[is_rgb], penultimate_patch_emb[is_rgb], sela_local_feature = self.forward_model(x[is_rgb], 'rgb')
-            if self.args.use_selaVPR_loss or (not self.training and self.args.use_reranking == 'selaVPR'):
+
+        if is_rgb.any():
+            final_emb[is_rgb], patch_emb[is_rgb], cls_attn_map[is_rgb], penultimate_patch_emb[is_rgb], sela_local_feature, gem_attn_map[is_rgb] = self.forward_model(x[is_rgb], 'rgb')
+            if (not self.training and self.args.use_reranking == 'selaVPR'):
                 sela_local_emb[is_rgb] = sela_local_feature
-            
+
         if (~is_rgb).any():
-            final_emb[~is_rgb], patch_emb[~is_rgb], cls_attn_map[~is_rgb], penultimate_patch_emb[~is_rgb], sela_local_feature = self.forward_model(x[~is_rgb], 'thermal')
-            if self.args.use_selaVPR_loss or (not self.training and self.args.use_reranking == 'selaVPR'):
+            final_emb[~is_rgb], patch_emb[~is_rgb], cls_attn_map[~is_rgb], penultimate_patch_emb[~is_rgb], sela_local_feature, gem_attn_map[~is_rgb] = self.forward_model(x[~is_rgb], 'thermal')
+            if not self.training and self.args.use_reranking == 'selaVPR':
                 sela_local_emb[~is_rgb] = sela_local_feature
-        
-        return [final_emb, patch_emb, None, None, cls_attn_map, penultimate_patch_emb, sela_local_emb]
+
+        return [final_emb, patch_emb, None, None, cls_attn_map, penultimate_patch_emb, sela_local_emb, gem_attn_map]
 
 def get_backbone(pretrained_foundation, foundation_model_path, args=None):
     model_path = Path(foundation_model_path)

@@ -11,22 +11,23 @@ import cv2
 
 np.random.seed(42)
 
-dataset_dir = '/data/datasets/sthereo'
-seq = 'KAIST'
+dataset_dir = '~/workspace/THR2RGB_Cross_Place_Recognition/ms2_dataset'
+seq = 'Valley'
 sequence_key = {'KAIST': ['sthereo_01_kaist_morning', 'sthereo_02_kaist_afternoon', 'sthereo_03_kaist_evening'], 
                 'SNU': ['sthereo_04_snu_morning', 'sthereo_05_snu_afternoon', 'sthereo_06_snu_evening'], 
                 'Valley': ['sthereo_07_valley_morning', 'sthereo_08_valley_afternoon', 'sthereo_09_valley_evening']}
 
-dataset_path = [os.path.join(dataset_dir, index) for index in sequence_key[seq]]   
-pose_path = [path + '/pose/local_pose.csv' for path in dataset_path]  
+dataset_path = [os.path.join(dataset_dir, index) for index in sequence_key[seq]]    
+pose_path = [path + '/pose/global_pose.csv' for path in dataset_path]  
 rgb_path = [path + '/image/stereo_left/' for path in dataset_path]   
 thermal_path = [path + '/image/stereo_thermal_14_left/' for path in dataset_path]   
+
 morning_pose_pd = pd.read_csv(pose_path[0], header=None)
 afternoon_pose_pd = pd.read_csv(pose_path[1], header=None)
 evening_pose_pd = pd.read_csv(pose_path[2], header=None)
 
 DB_DIS_TH = 5
-EXP1_DATA_DIST = 1
+Query_DIS_TH = 1
 
 save_path = os.path.join('save_mat', seq)
 if not os.path.exists(save_path):
@@ -69,7 +70,7 @@ for filename in os.listdir(thermal_path[0]):
 morning_rgb_list.sort()
 morning_t_list.sort()
 
-morning_rgb_time = np.array(morning_rgb_list).astype(np.int64)* 10e-10
+morning_rgb_time = np.array(morning_rgb_list).astype(np.int64)* 10e-10  
 morning_t_time = np.array(morning_t_list).astype(np.int64)* 10e-10
 morning_db_time = morning_pose_pd.iloc[db_index, 0].to_numpy()
 
@@ -107,27 +108,27 @@ assert len(morning_db_rgb) == len(morning_db_t) == morning_db.shape[0]
 morning_index = [i for i in range(morning_pose_gt.shape[0])]
 morning_index = list(set(morning_index) - set(db_index))
 
-morning_test_index = [morning_index[0]]
-morning_test_pose = morning_pose_gt[morning_test_index, :].reshape(1, -1)  # add the first frame
+morning_train_index = [morning_index[0]]
+morning_train_pose = morning_pose_gt[morning_train_index, :].reshape(1, -1)  # add the first frame
 
 for i in range(1, morning_pose_gt.shape[0]):
     if i not in db_index:
         knn = NearestNeighbors(n_neighbors=1)
-        knn.fit(morning_test_pose[:, 0:2])
+        knn.fit(morning_train_pose[:, 0:2])
         dis, index = knn.kneighbors(morning_pose_gt[i, 0:2].reshape(1, -1), 1, return_distance=True)
     
-        if dis > EXP1_DATA_DIST:
-            morning_test_pose = np.concatenate((morning_test_pose, morning_pose_gt[i, :].reshape(1, -1)), axis=0)
-            morning_test_index.append(i)
+        if dis > Query_DIS_TH:
+            morning_train_pose = np.concatenate((morning_train_pose, morning_pose_gt[i, :].reshape(1, -1)), axis=0)
+            morning_train_index.append(i)
 
-test_q_index = morning_test_index
+train_q_index = morning_train_index
 
-index = list(set(morning_index) - set(test_q_index))
+index = list(set(morning_index) - set(train_q_index))
 
 val_q_num = int(len(index) *0.5)
 
-val_q_index = np.random.choice(list(set(morning_index)-set(test_q_index)), val_q_num, replace=False)
-train_q_index = list(set(morning_index) - set(test_q_index) - set(val_q_index))    
+val_q_index = np.random.choice(list(set(morning_index)-set(train_q_index)), val_q_num, replace=False)
+test_q_index = list(set(morning_index) - set(train_q_index) - set(val_q_index))
 
 # get train image
 morning_query_time = morning_pose_pd.iloc[train_q_index, 0].to_numpy()
@@ -176,42 +177,44 @@ afternoon_pose_pd = afternoon_pose_pd.iloc[1:-1, :].reset_index(drop=True)
 afternoon_pose_gt = afternoon_pose_pd.iloc[:, 1:3].to_numpy()
 afternoon_index = [i for i in range(afternoon_pose_gt.shape[0])]
 
-afternoon_test_index = [0]
-afternoon_test_pose = afternoon_pose_gt[0, :].reshape(1, -1)  # add the first frame
+afternoon_train_index = [0]
+afternoon_train_pose = afternoon_pose_gt[0, :].reshape(1, -1)  # add the first frame
 
 for i in range(1, afternoon_pose_gt.shape[0]):
     knn = NearestNeighbors(n_neighbors=1)
-    knn.fit(afternoon_test_pose[:, 0:2])
+    knn.fit(afternoon_train_pose[:, 0:2])
     dis, index = knn.kneighbors(afternoon_pose_gt[i, 0:2].reshape(1, -1), 1, return_distance=True)
 
-    if dis > EXP1_DATA_DIST:
-        afternoon_test_pose = np.concatenate((afternoon_test_pose, afternoon_pose_gt[i, :].reshape(1, -1)), axis=0)
-        afternoon_test_index.append(i)
+    if dis > Query_DIS_TH:
+        afternoon_train_pose = np.concatenate((afternoon_train_pose, afternoon_pose_gt[i, :].reshape(1, -1)), axis=0)
+        afternoon_train_index.append(i)
 
-test_q_index = afternoon_test_index
+train_q_index = afternoon_train_index
 
-index = list(set(afternoon_index)- set(test_q_index))
+index = list(set(afternoon_index)- set(train_q_index))
 val_q_num = int(len(index) *0.5)
 
 
 val_q_index = np.random.choice(index, val_q_num, replace=False)
-train_q_index = list(set(index)- set(val_q_index))
+test_q_index = list(set(index)- set(val_q_index))
 
 afternoon_rgb_list = []
 for filename in os.listdir(rgb_path[1]):
     if filename.endswith('.png'):
+        # 去掉文件后缀并存入列表
         name_without_extension = os.path.splitext(filename)[0]
         afternoon_rgb_list.append(name_without_extension)
 
 afternoon_t_list = []
 for filename in os.listdir(thermal_path[1]):
     if filename.endswith('.png'):
+        # 去掉文件后缀并存入列表
         name_without_extension = os.path.splitext(filename)[0]
         afternoon_t_list.append(name_without_extension)
 
 afternoon_rgb_list.sort()
 afternoon_t_list.sort()
-afternoon_rgb_time = np.array(afternoon_rgb_list).astype(np.int64)* 10e-10
+afternoon_rgb_time = np.array(afternoon_rgb_list).astype(np.int64)* 10e-10  # 这样操作的时间戳精度有下降，但是理论上应该还是够用的？
 afternoon_t_time = np.array(afternoon_t_list).astype(np.int64)* 10e-10
 
 # get train image
@@ -256,30 +259,29 @@ print(len(afternoon_q_rgb_val), len(afternoon_q_t_val), len(afternoon_q_pose_val
 print(len(afternoon_q_rgb_test), len(afternoon_q_t_test), len(afternoon_q_pose_test))
 
 ## create Evening query
-# NOTE
 evening_pose_pd = evening_pose_pd.iloc[1:-1, :].reset_index(drop=True)
 evening_pose_gt = evening_pose_pd.iloc[:, 1:3].to_numpy()
 evening_index = [i for i in range(evening_pose_gt.shape[0])]
 
-evening_test_index = [0]
-evening_test_pose = evening_pose_gt[0, :].reshape(1, -1)  # add the first frame
+evening_train_index = [0]
+evening_train_pose = evening_pose_gt[0, :].reshape(1, -1)  # add the first frame
 
 for i in range(1, evening_pose_gt.shape[0]):
     knn = NearestNeighbors(n_neighbors=1)
-    knn.fit(evening_test_pose[:, 0:2])
+    knn.fit(evening_train_pose[:, 0:2])
     dis, index = knn.kneighbors(evening_pose_gt[i, 0:2].reshape(1, -1), 1, return_distance=True)
 
-    if dis > EXP1_DATA_DIST:
-        evening_test_pose = np.concatenate((evening_test_pose, evening_pose_gt[i, :].reshape(1, -1)), axis=0)
-        evening_test_index.append(i)
+    if dis > Query_DIS_TH:
+        evening_train_pose = np.concatenate((evening_train_pose, evening_pose_gt[i, :].reshape(1, -1)), axis=0)
+        evening_train_index.append(i)
 
-test_q_index = evening_test_index
+train_q_index = evening_train_index
 
-index = list(set(evening_index)- set(test_q_index))
+index = list(set(evening_index)- set(train_q_index))
 val_q_num = int(len(index) *0.5)
 
 val_q_index = np.random.choice(index, val_q_num, replace=False)
-train_q_index = list(set(index) - set(val_q_index))
+test_q_index = list(set(index) - set(val_q_index))
 
 evening_rgb_list = []
 for filename in os.listdir(rgb_path[2]):
@@ -295,7 +297,7 @@ for filename in os.listdir(thermal_path[2]):
 
 evening_rgb_list.sort()
 evening_t_list.sort()
-evening_rgb_time = np.array(evening_rgb_list).astype(np.int64)* 10e-10
+evening_rgb_time = np.array(evening_rgb_list).astype(np.int64)* 10e-10  
 evening_t_time = np.array(evening_t_list).astype(np.int64)* 10e-10
 
 # get train image

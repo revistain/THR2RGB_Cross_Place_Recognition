@@ -427,11 +427,11 @@ class CrossModalVPR_Net(nn.Module):
         self.args = args
         self.shared_backbone = get_backbone(pretrained_foundation, foundation_model_path, args=args)
         self.output_dim = args.features_dim
-        if args.use_selaVPR_loss or args.use_reranking == 'selaVPR':
-            self.local_adapt = LocalAdapt(self.output_dim)
         self.use_masked_inference = False
         self.use_only_cross_decdoer = args.use_only_cross_decoder
         self.recon_loss_type = args.recon_loss_type
+        if args.use_sela_local_loss or args.use_reranking == 'selaVPR':
+            self.local_adapt = LocalAdapt(self.output_dim)
                
         # Croco settings
         dec_depth = args.num_decoder_depth
@@ -584,7 +584,6 @@ class CrossModalVPR_Net(nn.Module):
         thermal_full = thermal_full.view(patch_B, patch_N, patch_D)
         return thermal_full
 
-    
     def forward_model(self, x, paired_rgb=None, modality='rgb', return_masked_patch=False):
         """단일 모달리티에 대한 Forward"""
         # self.use_masked_inference: rerank를 위해, decoder에 들어가기 바로 전 단계를 뱉는다
@@ -692,6 +691,7 @@ class CrossModalVPR_Net(nn.Module):
         patch_tokens = out["x_norm_patchtokens"] # torch.Size([64, 260, 768])
 
         sela_local_feature = None
+        gem_attn_map = None
         if not self.use_masked_inference:
             # attnetion_dict_keys(['x_norm_clstoken', 'x_norm_patchtokens', 'x_prenorm', 'masks'])
             B, N, D = patch_tokens.shape # B, # N # D
@@ -707,16 +707,20 @@ class CrossModalVPR_Net(nn.Module):
             else:
                 global_desc = agg_layer(x_feat) # [B, D]
 
-            # selaVPR local feature computation
-            if self.args.use_selaVPR_loss or (not self.training and self.args.use_reranking in ['selaVPR', 'match_conf']):
+            # Compute GeM attention map: dot product between global descriptor and patch tokens
+            # global_desc: [B, D], patch_tokens: [B, N, D] -> gem_attn_map: [B, N]
+            gem_attn_map = torch.einsum('bd,bnd->bn', global_desc, patch_tokens)
+
+            # selaVPR local feature computation using interpolation
+            if self.args.use_sela_local_loss or (not self.training and (self.args.use_reranking == 'selaVPR' or self.args.use_reranking == 'match_conf')):
                 x0 = patch_tokens.view(-1, H_feat, W_feat, self.output_dim).permute(0, 3, 1, 2)
                 x0 = self.local_adapt(x0)
                 x0 = x0.permute(0, 2, 3, 1)
-                sela_local_feature = torch.nn.functional.normalize(x0, p=2, dim=-1)  # [B, 61, 61, 128] for 224x224
+                sela_local_feature = torch.nn.functional.normalize(x0, p=2, dim=-1)
 
         return global_desc, patch_tokens, [recon_loss_thermal, recon_loss_rgb], \
                 mask_thermal, masked_patch_thermal, cls_attn_map, \
-                penultimate_patch, sela_local_feature
+                penultimate_patch, sela_local_feature, gem_attn_map
 
     def forward_model_basic(self, x, modality='rgb'):
         """단일 모달리티에 대한 Forward"""
@@ -741,7 +745,7 @@ class CrossModalVPR_Net(nn.Module):
         global_desc = agg_layer(x_feat) # [B, D]
 
         return global_desc
-
+    
     def forward_recon_sela_decode(self, thermal_feat, rgb_feat):
         """
         Bidirectional CroCo decoding for reconSelaVPR reranking.
@@ -757,16 +761,23 @@ class CrossModalVPR_Net(nn.Module):
         thermal_dec = thermal_feat + self.decoder_pos_embed
         rgb_dec = rgb_feat + self.decoder_pos_embed
 
+        RETURN_LAYER_NUM = 2
         # Direction 1: Thermal decoded with RGB as context
+        layer_thermal_decoded = None
         thermal_decoded = thermal_dec.clone()
-        for blk in self.decoder_thermal_blocks:
+        for idx, blk in enumerate(self.decoder_thermal_blocks):
             thermal_decoded = blk(thermal_decoded, rgb_dec)
+            if idx == RETURN_LAYER_NUM - 1:
+                layer_thermal_decoded = thermal_decoded.clone
         thermal_decoded = self.decoder_norm(thermal_decoded)
 
         # Direction 2: RGB decoded with Thermal as context
+        layer_rgb_decoded = None
         rgb_decoded = rgb_dec.clone()
-        for blk in self.decoder_rgb_blocks:
+        for idx, blk in enumerate(self.decoder_rgb_blocks):
             rgb_decoded = blk(rgb_decoded, thermal_dec)
+            if idx == RETURN_LAYER_NUM - 1:
+                layer_rgb_decoded = rgb_decoded.clone
         rgb_decoded = self.decoder_norm(rgb_decoded)
 
         # Reshape to spatial format: [B, N, C] -> [B, C, H, W]
@@ -777,13 +788,18 @@ class CrossModalVPR_Net(nn.Module):
         rgb_spatial = rgb_decoded.permute(0, 2, 1).view(B, -1, H, W)          # [B, 768, 16, 16]
 
         # Bilinear interpolation: [B, 768, 16, 16] -> [B, 768, 61, 61]
-        thermal_local = F.interpolate(thermal_spatial, size=(61, 61), mode='bilinear', align_corners=False)
-        rgb_local = F.interpolate(rgb_spatial, size=(61, 61), mode='bilinear', align_corners=False)
+        # thermal_local = F.interpolate(thermal_spatial, size=(61, 61), mode='bilinear', align_corners=False)
+        # rgb_local = F.interpolate(rgb_spatial, size=(61, 61), mode='bilinear', align_corners=False)
 
-        # Permute to [B, H, W, C] and L2 normalize
+        x0 = thermal_spatial.view(-1, H, W, self.output_dim).permute(0, 3, 1, 2)
+        thermal_local = self.local_adapt(x0)
         thermal_local = thermal_local.permute(0, 2, 3, 1)  # [B, 61, 61, 768]
-        rgb_local = rgb_local.permute(0, 2, 3, 1)          # [B, 61, 61, 768]
 
+        x0 = rgb_spatial.view(-1, H, W, self.output_dim).permute(0, 3, 1, 2)
+        rgb_local = self.local_adapt(x0)
+        rgb_local = rgb_local.permute(0, 2, 3, 1)          # [B, 61, 61, 768]
+                
+        # Permute to [B, H, W, C] and L2 normalize
         thermal_decoded_local = F.normalize(thermal_local, p=2, dim=-1)
         rgb_decoded_local = F.normalize(rgb_local, p=2, dim=-1)
 
@@ -802,30 +818,32 @@ class CrossModalVPR_Net(nn.Module):
         penultimate_patch_emb = torch.zeros((x.size(0), self.patch_count, self.output_dim), device=x.device)
         masks = torch.zeros((x.size(0), self.patch_count), dtype=torch.bool, device=x.device)
         cls_attn_map = torch.zeros((x.size(0), self.patch_count), device=x.device)
+        gem_attn_map = torch.zeros((x.size(0), self.patch_count), device=x.device)
         recon_losses = None
         masked_patch_emb = None
 
-        # selaVPR local embedding initialization
+        # selaVPR local embedding initialization (768-dim with interpolation)
         sela_local_emb = None
-        if self.args.use_selaVPR_loss or self.args.use_reranking == 'selaVPR':
-            # Output size from LocalAdapt: 61x61 for 224x224 input (16x16 patches upsampled 2x2)
+        if self.args.use_sela_local_loss or self.args.use_reranking == 'selaVPR':
             sela_local_emb = torch.zeros((x.size(0), 61, 61, 128), device=x.device)
 
         if is_rgb.any():
-            global_emb, patch_rgb, _, _, _, cls_rgb_attn_map, penultimate_patch_rgb, sela_local_rgb = self.forward_model(x[is_rgb], modality='rgb')
+            global_emb, patch_rgb, _, _, _, cls_rgb_attn_map, penultimate_patch_rgb, sela_local_rgb, gem_rgb_attn_map = self.forward_model(x[is_rgb], modality='rgb')
             if global_emb is not None:
                 final_emb[is_rgb] = global_emb
             if patch_rgb is not None:
                 patch_emb[is_rgb] = patch_rgb
             if cls_rgb_attn_map is not None:
                 cls_attn_map[is_rgb] = cls_rgb_attn_map
+            if gem_rgb_attn_map is not None:
+                gem_attn_map[is_rgb] = gem_rgb_attn_map
             if penultimate_patch_rgb is not None:
                 penultimate_patch_emb[is_rgb] = penultimate_patch_rgb
             if sela_local_rgb is not None and sela_local_emb is not None:
                 sela_local_emb[is_rgb] = sela_local_rgb
 
         if (~is_rgb).any():
-            global_emb, patch_thermal, recon_losses, mask, masked_patch_thermal, cls_thermal_attn_map, penultimate_patch_thermal, sela_local_thermal = self.forward_model(x[~is_rgb], modality='thermal', paired_rgb=paired_rgb, return_masked_patch=return_masked_patch)
+            global_emb, patch_thermal, recon_losses, mask, masked_patch_thermal, cls_thermal_attn_map, penultimate_patch_thermal, sela_local_thermal, gem_thermal_attn_map = self.forward_model(x[~is_rgb], modality='thermal', paired_rgb=paired_rgb, return_masked_patch=return_masked_patch)
             if global_emb is not None:
                 final_emb[~is_rgb] = global_emb
             if patch_thermal is not None:
@@ -834,18 +852,19 @@ class CrossModalVPR_Net(nn.Module):
                 masks[~is_rgb] = mask
             if return_masked_patch:
                 masked_patch_emb = masked_patch_thermal # torch.Size([4, 256, 768])
-            if cls_attn_map is not None:
+            if cls_thermal_attn_map is not None:
                 cls_attn_map[~is_rgb] = cls_thermal_attn_map
+            if gem_thermal_attn_map is not None:
+                gem_attn_map[~is_rgb] = gem_thermal_attn_map
             if penultimate_patch_thermal is not None:
                 penultimate_patch_emb[~is_rgb] = penultimate_patch_thermal
             if sela_local_thermal is not None and sela_local_emb is not None:
                 sela_local_emb[~is_rgb] = sela_local_thermal
 
-        # Always return sela_local_emb at index [6] for compatibility with inference.py and train_wandb.py
         if return_masked_patch:
-            return final_emb, patch_emb, recon_losses, masks, cls_attn_map, penultimate_patch_emb, sela_local_emb, masked_patch_emb
+            return final_emb, patch_emb, recon_losses, masks, cls_attn_map, penultimate_patch_emb, sela_local_emb, gem_attn_map, masked_patch_emb
         else:
-            return final_emb, patch_emb, recon_losses, masks, cls_attn_map, penultimate_patch_emb, sela_local_emb
+            return final_emb, patch_emb, recon_losses, masks, cls_attn_map, penultimate_patch_emb, sela_local_emb, gem_attn_map
 
     def calculate_recon_loss(self, pred, mask, target, confidence_map=None):
         recon_loss = self.reconstruction_criterion(

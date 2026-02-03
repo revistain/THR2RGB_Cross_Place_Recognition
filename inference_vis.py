@@ -201,7 +201,7 @@ def visualize_single_pair(
         rgb_vis = (rgb_denorm * 255).astype(np.uint8)
 
         # Check if selaVPR is available
-        has_sela = args.use_selaVPR_loss or args.use_reranking == 'selaVPR'
+        has_sela = args.use_reranking == 'selaVPR'
 
         if has_sela and hasattr(model.module, 'local_adapt'):
             # Compute selaVPR local features
@@ -427,7 +427,7 @@ def main():
 
     print(f"Output directory: {output_dir}")
     print(f"Checkpoint: {vis_args.checkpoint_path}")
-    print(f"selaVPR enabled: {args.use_selaVPR_loss or args.use_reranking == 'selaVPR'}")
+    print(f"selaVPR enabled: {args.use_reranking == 'selaVPR'}")
 
     # Load model
     print(f"Loading model...")

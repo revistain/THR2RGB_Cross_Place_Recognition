@@ -29,7 +29,6 @@ from info_nce import InfoNCE, info_nce
 import network
 import network_only_GeM
 from local_matching import LocalFeatureLoss
-from match_conf_module import MatchConfidenceLoss
 from pathlib import Path
 
 def set_seed(seed=42):
@@ -72,14 +71,16 @@ if __name__ == "__main__":
     args.sequences = ['KAIST']
     triplets_ds = datasets_T2R.TripletsSTheReODual(args, DATASET_FOLDER, use_align_rgb=True)
     train_ds = datasets_T2R.BaseSTheReODual(args, DATASET_FOLDER, split='train')
+    logging.info(f"[Train - KAIST] Database: {train_ds.database_num}, Queries: {train_ds.queries_num}, Total: {len(train_ds)}")
 
-    args.sequences = ['SNU', 'Valley']
+    args.sequences = ['KAIST', 'SNU', 'Valley']
     test_sequences = args.sequences
     test_ds_list = []
     for seq in test_sequences:
         args.sequences = [seq]
         test_ds = datasets_T2R.BaseSTheReODual(args, DATASET_FOLDER, split='test')
         test_ds_list.append(test_ds)
+        logging.info(f"[Test - {seq}] Database: {test_ds.database_num}, Queries: {test_ds.queries_num}, Total: {len(test_ds)}")
 
     '''Resume from checkpoint'''
     if args.resume:
@@ -135,14 +136,6 @@ if __name__ == "__main__":
     '''Loss Function - Initialize early for optimizer'''
     GlobalTriplet = nn.TripletMarginLoss(margin=args.margin, p=2, reduction="sum")
     MNNLocalFeatureLoss = LocalFeatureLoss().to(args.device)
-    if args.use_selaVPR_loss:
-        MatchConfLoss = MatchConfidenceLoss(
-            embed_dim=args.match_conf_embed_dim,
-            top_k=args.match_conf_top_k
-        ).to(args.device)
-        logging.info(f"Using Match Confidence Loss with top_k={args.match_conf_top_k}, embed_dim={args.match_conf_embed_dim}")
-        # Attach to model for inference access
-        model.module.match_conf = MatchConfLoss
 
     if args.use_sepearte_backbone_lr:
         backbone_params = []
@@ -159,10 +152,6 @@ if __name__ == "__main__":
                     backbone_params.append(param)
                 else: other_params.append(param)
 
-        # Add MatchConfLoss params to other_params
-        if args.use_selaVPR_loss:
-            other_params += list(MatchConfLoss.parameters())
-
         '''Seperate Learning Rate'''
         if args.optim == "adam":
             optimizer = torch.optim.Adam([
@@ -176,10 +165,7 @@ if __name__ == "__main__":
             ])
     else:
         '''Optimizer'''
-        # Collect all trainable parameters
         all_params = list(model.parameters())
-        if args.use_selaVPR_loss:
-            all_params += list(MatchConfLoss.parameters())
 
         if args.optim == "adam":
             optimizer = torch.optim.Adam(all_params, lr=args.lr)
@@ -238,13 +224,14 @@ if __name__ == "__main__":
                     
                     pos_rgbs = [images[idx] for idx in range(1, images.size(0), size_of_batch)]
                     pos_rgbs = torch.stack(pos_rgbs)
+                    pos_rgbs = triplets_ds.transform(pos_rgbs)
                     aligned_rgbs = pos_rgbs
 
                 recon_loss = None
                 if args.use_recon_loss:
                     global_features, patch_embedding, \
                     recon_loss, masks, cls_attn_map, \
-                    penultimate_patch_embedding, sela_local_embedding, masked_patch_embedding = model(
+                    penultimate_patch_embedding, local_embedding, _, masked_patch_embedding = model(
                         images.to(args.device),
                         flags=flags,
                         paired_rgb=aligned_rgbs.to(args.device),
@@ -262,8 +249,7 @@ if __name__ == "__main__":
                     global_features = outputs[0]
                     patch_embedding = outputs[1]
                     cls_attn_map = outputs[4]
-                    if args.use_selaVPR_loss:
-                        sela_local_embedding = outputs[6]
+                    local_embedding = outputs[6]
 
                 # triplets_local_indexes = (batch, 3, neg_num) => [[[0, 1, 2], [0, 1, 3] ... [0, 1, neg_num+2]] * batch]
                 triplets_local_indexes = torch.transpose(
@@ -273,7 +259,6 @@ if __name__ == "__main__":
                 triplet_loss_sum = 0
                 rerank_loss_sum = 0
                 local_loss_sum = 0
-                match_conf_loss_sum = 0
                 # 각 triplet에 대해 triplet loss 계산
                 for triplets in triplets_local_indexes:
                     queries_indexes, positives_indexes, negatives_indexes = triplets.T
@@ -305,25 +290,15 @@ if __name__ == "__main__":
                                             query_features.detach(), positive_features.detach(), negative_features.detach())
                         overall_loss += rerank_loss
                         rerank_loss_sum += rerank_loss
-                        
-                    if args.use_selaVPR_loss:
-                        # selaVPR_weight = args.selaVPR_weight
-                        # local_loss = MNNLocalFeatureLoss([
-                        #             sela_local_embedding[queries_indexes],
-                        #             sela_local_embedding[positives_indexes],
-                        #             sela_local_embedding[negatives_indexes]])
-                        # local_loss_sum += local_loss
-                        # overall_loss += (local_loss * selaVPR_weight)
-                        # sela_local_embedding: [B, 61, 61, 128]
-                        match_conf_loss = MatchConfLoss(
-                            [sela_local_embedding[queries_indexes],
-                             sela_local_embedding[positives_indexes],
-                             sela_local_embedding[negatives_indexes]],
-                            grid_size=(61, 61)
-                        )
-                        match_conf_loss_sum += match_conf_loss
-                        overall_loss += (match_conf_loss * args.match_conf_weight)
-                        
+
+                    if args.use_sela_local_loss:
+                        local_loss = MNNLocalFeatureLoss([
+                                    local_embedding[queries_indexes],
+                                    local_embedding[positives_indexes],
+                                    local_embedding[negatives_indexes]])
+                        local_loss_sum += local_loss
+                        overall_loss += local_loss
+
                 # train_batch_size: 4, arg.negs_num_per_query: 10
                 if args.use_recon_loss:
                     recon_weight = args.recon_weight
@@ -339,12 +314,7 @@ if __name__ == "__main__":
                         "train/recon_loss(Rgb)": rgb_recon_loss.mean().item()
                             * recon_weight / (args.train_batch_size * args.negs_num_per_query),
                     }, step=global_step)
-                    
-                if args.use_selaVPR_loss:
-                    wandb.log({
-                        "train/match_conf_loss": match_conf_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query),
-                    }, step=global_step)
-                    
+
                 overall_loss /= (args.train_batch_size * args.negs_num_per_query)
 
                 del global_features, query_features, positive_features, negative_features
@@ -362,6 +332,7 @@ if __name__ == "__main__":
                     "train/triplet_loss(scaled)": triplet_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query),
                     "train/reranking_loss(scaled)": rerank_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query)
                         if isinstance(rerank_loss_sum, torch.Tensor) else 0,
+                    "train/local_loss(scaled)": local_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query),
                 }, step=global_step)
                 
                 global_step += 1
@@ -397,19 +368,6 @@ if __name__ == "__main__":
             comment=args.comment
         )
 
-        # Visualize MNN matches (only if selaVPR is enabled)
-        if args.use_selaVPR_loss or args.use_reranking == 'selaVPR':
-            visualize_mnn_matches(
-                args,
-                model,
-                triplets_dl,
-                args.device,
-                epoch_num,
-                num_samples=4,
-                save_dir=os.path.join(args.save_dir, 'mnn_matches'),
-                comment=args.comment,
-                max_matches=50
-            )
 
         # wandb 로깅 (epoch 단위)
         wandb.log({"train/epoch_avg_loss": epoch_losses.mean(), "epoch": epoch_num}, step=global_step)

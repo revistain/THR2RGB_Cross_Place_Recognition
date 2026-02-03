@@ -16,7 +16,7 @@ class Parser():
         self.parser.add_argument("--optim", type=str, default='adam', help="_", choices=['adam', 'sgd'])
         self.parser.add_argument("--margin", type=float, default=0.1, help="_")
         self.parser.add_argument("--lr", type=float, default=0.00001, help="_")
-        self.parser.add_argument("--epochs_num", type=int, default=50, help="number of epochs to train for")
+        self.parser.add_argument("--epochs_num", type=int, default=100, help="number of epochs to train for")
         self.parser.add_argument("--train_batch_size", type=int, default=4,
                             help="Batch size for train")
         self.parser.add_argument("--patience", type=int, default=5)
@@ -51,7 +51,7 @@ class Parser():
         self.parser.add_argument("--foundation_model_path", type=str, default=None, help="_")
 
         ### Dataset parameters
-        self.parser.add_argument("--img_time", type=str, default="allday", choices=["allday", "daytime", "nighttime"])
+        self.parser.add_argument("--img_time", type=str, default="allday", choices=["allday", "daytime", "nighttime", "latetime"])
         self.parser.add_argument("--sequences", type=str, default=['KAIST', 'SNU', 'Valley'], nargs="+",
                                  help="List of sequences to load from the dataset. Default: ['KAIST', 'SNU', 'Valley']")
         self.parser.add_argument("--test_seq", type=str, default=None, help="path of the dataset")
@@ -101,15 +101,12 @@ class Parser():
         self.parser.add_argument("--r2_add_random_patch", action='store_true', default=False)
         self.parser.add_argument("--use_cls_for_vpr", action='store_true', default=False)
         self.parser.add_argument("--use_recon_loss", action='store_true', default=False)
-        self.parser.add_argument("--use_selaVPR_loss", action='store_true', default=False)
-        self.parser.add_argument("--selaVPR_weight", type=float, default=1, help="_")
-        self.parser.add_argument("--match_conf_weight", type=float, default=1.0, help="Weight for match confidence loss")
-        self.parser.add_argument("--match_conf_top_k", type=int, default=500, help="Top-K MNN matches to use")
-        self.parser.add_argument("--match_conf_embed_dim", type=int, default=32, help="Embedding dim for match conf transformer")
-        self.parser.add_argument("--decoder_dim", type=int, default=128)
-        self.parser.add_argument("--use_reranking", type=str, default="none", choices=['none', 'recon', 'r2former', 'selaVPR', 'reconSelaVPR'])
+        self.parser.add_argument("--use_reranking", type=str, default="none",
+                                 choices=['none', 'recon', 'r2former', 'selaVPR', 'reconSelaVPR', 'GeM_KL'])
         self.parser.add_argument("--features_dim", type=int, default=768)
         self.parser.add_argument("--selaVPR_rerank_score_type", type=str, default="none", choices=['none', 'quantile_attn', 'mul_cossim'])
+        self.parser.add_argument("--visualize_attention", action='store_true', default=False, help="Visualize CLS and GeM attention maps during inference")
+        self.parser.add_argument("--use_sela_local_loss", action='store_true', default=False)
 
 
     def parse_arguments(self):

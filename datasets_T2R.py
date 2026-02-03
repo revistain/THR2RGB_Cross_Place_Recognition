@@ -3,7 +3,8 @@ import torch
 import torch.utils.data as data
 from torch.utils.data import DataLoader
 from torch.utils.data.dataset import Subset
-import torchvision.transforms as transforms
+from torchvision.transforms import v2
+from torchvision import tv_tensors
 from scipy.io import loadmat
 import numpy as np
 from sklearn.neighbors import NearestNeighbors
@@ -15,8 +16,8 @@ import faiss
 faiss.omp_set_num_threads(4)
 from tqdm import tqdm
 import logging
+import random
 
-# ===== 저장 =====
 from PIL import Image
 
 # Denormalize 함수
@@ -34,9 +35,10 @@ def denormalize(tensor):
     return tensor
 ###
 
-base_transform = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+base_transform = v2.Compose([
+    v2.ToImage(),
+    v2.ToDtype(torch.float32, scale=True),
+    v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
 
 def collate_fn(batch):
@@ -76,7 +78,7 @@ class BaseSTheReODual(data.Dataset):
         super().__init__()
         self.dataset_folder = dataset_folder
         self.img_time = args.img_time
-        self.matStruct = [loadmat(os.path.join(self.dataset_folder, seq, f'sthereo_{split}.mat'))['dbStruct'] for seq in
+        self.matStruct = [loadmat(os.path.join(self.dataset_folder, split, seq, f'sthereo_{split}.mat'))['dbStruct'] for seq in
                           args.sequences]
         for seq in args.sequences:
             print("load dataset:", seq)
@@ -106,6 +108,13 @@ class BaseSTheReODual(data.Dataset):
         elif self.img_time == 'nighttime':
             self.queries_utms = np.concatenate([
                 mat['q_pose_evening'][0, 0] for mat in self.matStruct
+            ])
+        elif self.img_time == 'latetime':
+            self.queries_utms = np.concatenate([
+                np.concatenate((
+                    mat['q_pose_afternoon'][0, 0],
+                    mat['q_pose_evening'][0, 0],
+                )) for mat in self.matStruct
             ])
 
         knn = NearestNeighbors(n_jobs=4)
@@ -137,6 +146,13 @@ class BaseSTheReODual(data.Dataset):
             self.rgb_queries_paths = np.concatenate([
                 mat['q_rgb_evening'][0, 0] for mat in self.matStruct
             ])
+        elif self.img_time == 'latetime':
+            self.rgb_queries_paths = np.concatenate([
+                np.concatenate((
+                    mat['q_rgb_afternoon'][0, 0],
+                    mat['q_rgb_evening'][0, 0],
+                )) for mat in self.matStruct
+            ])
 
         self.t_database_paths = np.concatenate(
             [mat['db_t'][0, 0] for mat in self.matStruct]
@@ -160,6 +176,13 @@ class BaseSTheReODual(data.Dataset):
         elif self.img_time == 'nighttime':
             self.t_queries_paths = np.concatenate([
                 mat['q_t_evening'][0, 0] for mat in self.matStruct
+            ])
+        elif self.img_time == 'latetime':
+            self.t_queries_paths = np.concatenate([
+                np.concatenate((
+                    mat['q_t_afternoon'][0, 0],
+                    mat['q_t_evening'][0, 0],
+                )) for mat in self.matStruct
             ])
 
         assert (self.t_database_paths.shape) == (self.rgb_database_paths.shape) and (self.t_queries_paths.shape) == (self.rgb_queries_paths.shape)
@@ -190,7 +213,7 @@ class BaseSTheReODual(data.Dataset):
             img = base_transform(img)
             flag = 'thermal'
         if self.test_method == "hard_resize" or self.test_method == "single_query":
-            img = transforms.functional.resize(img, self.resize)
+            img = v2.functional.resize(img, self.resize)
         else:
             img = self.__test_query_transform(img)
         return img, index, flag
@@ -211,12 +234,12 @@ class BaseSTheReODual(data.Dataset):
             # NOTE: Scale before cropping
             scale = max(self.resize[0]/H, self.resize[1]/W)
             processed_img = torch.nn.functional.interpolate(img.unsqueeze(0), scale_factor=scale).squeeze(0)
-            processed_img = transforms.functional.center_crop(processed_img, self.resize)
+            processed_img = v2.functional.center_crop(processed_img, self.resize)
             assert processed_img.shape[1:] == torch.Size(self.resize), f"{processed_img.shape[1:]} {self.resize}"
         elif self.test_method == "five_crops" or self.test_method == "nearest_crop" or self.test_method == "maj_voting":
             shorter_side = min(self.resize)
-            processed_img = transforms.functional.resize(img, shorter_side)
-            processed_img = torch.stack(transforms.functional.five_crop(processed_img, shorter_side))
+            processed_img = v2.functional.resize(img, shorter_side)
+            processed_img = torch.stack(v2.functional.five_crop(processed_img, shorter_side))
             assert processed_img.shape == torch.Size([5, 3, shorter_side, shorter_side]), \
                 f"{processed_img.shape} {torch.Size([5, 3, shorter_side, shorter_side])}"
 
@@ -231,7 +254,8 @@ class TripletsSTheReODual(BaseSTheReODual):
 
     def __init__(self, args, datasets_folder, use_align_rgb=False):
         super().__init__(args, datasets_folder, split='train')
-
+        
+        self.args = args
         self.mining = args.mining
         self.neg_samples_num = args.neg_samples_num
         self.negs_num_per_query = args.negs_num_per_query
@@ -240,25 +264,10 @@ class TripletsSTheReODual(BaseSTheReODual):
         self.is_inference = False
 
         # data augmentation
-        identity_transform = transforms.Lambda(lambda x: x)
-        self.resized_transform = transforms.Compose([
+        self.identity_transform = v2.Lambda(lambda x: x)
+        self.resized_transform = v2.Compose([
             base_transform,
-            transforms.Resize(self.resize) if self.resize is not None else identity_transform,
-            # base_transform
-        ])
-        self.query_transform = transforms.Compose([
-            self.resized_transform,
-            transforms.ColorJitter(brightness=args.brightness) if args.brightness != None else identity_transform,
-            transforms.ColorJitter(contrast=args.contrast) if args.contrast != None else identity_transform,
-            transforms.ColorJitter(saturation=args.saturation) if args.saturation != None else identity_transform,
-            transforms.ColorJitter(hue=args.hue) if args.hue != None else identity_transform,
-            transforms.RandomPerspective(
-                args.rand_perspective) if args.rand_perspective != None else identity_transform,
-            transforms.RandomResizedCrop(size=self.resize, scale=(1 - args.random_resized_crop, 1)) \
-                if args.random_resized_crop != None else identity_transform,
-            transforms.RandomRotation(
-                degrees=args.random_rotation) if args.random_rotation != None else identity_transform,
-            # self.resized_transform,
+            v2.Resize(self.resize) if self.resize is not None else self.identity_transform,
         ])
 
         knn = NearestNeighbors(n_jobs=4)
@@ -282,6 +291,30 @@ class TripletsSTheReODual(BaseSTheReODual):
         self.queries_num = len(self.rgb_queries_paths)
         self.use_align_rgb = use_align_rgb
 
+    def transform(self, query_img):
+        transform_list = [
+            v2.ToImage(),
+            v2.ToDtype(torch.float32, scale=True),
+        ]
+
+        # Resize first (faster to apply ColorJitter on smaller image)
+        if self.resize is not None:
+            transform_list.append(v2.Resize(self.resize))
+
+        # ColorJitter on resized image (still [0,1] range, before normalization)
+        if any([self.args.brightness, self.args.contrast, self.args.saturation, self.args.hue]):
+            transform_list.append(v2.ColorJitter(
+                brightness=self.args.brightness or 0,
+                contrast=self.args.contrast or 0,
+                saturation=self.args.saturation or 0,
+                hue=self.args.hue or 0,
+            ))
+
+        # Normalize
+        transform_list.append(v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]))
+
+        return v2.Compose(transform_list)(query_img)
+
     def __getitem__(self, index):
         if self.is_inference:
             return super().__getitem__(index)
@@ -292,19 +325,16 @@ class TripletsSTheReODual(BaseSTheReODual):
         )
         
         if self.use_align_rgb:
-            seed = np.random.randint(2147483647)
-            
-            torch.manual_seed(seed)
-            query = self.query_transform(self.get_thermal_img(self.t_queries_paths[query_index]))
-            
-            torch.manual_seed(seed)
-            aligned_rgb = self.query_transform(self.get_rgb_img(self.rgb_queries_paths[query_index]))
+            query = self.transform(self.get_thermal_img(self.t_queries_paths[query_index]))
+            # query = self.resized_transform(self.get_thermal_img(self.t_queries_paths[query_index]))
+            aligned_rgb = self.transform(self.get_rgb_img(self.rgb_queries_paths[query_index]))
         else:
-            query = self.query_transform(self.get_thermal_img(self.t_queries_paths[query_index]))
+            query = self.transform(self.get_thermal_img(self.t_queries_paths[query_index]))
+            # query = self.resized_transform(self.get_thermal_img(self.t_queries_paths[query_index]))
             aligned_rgb = None
         
-        positive = self.resized_transform(self.get_rgb_img(self.rgb_database_paths[best_positive_index]))
-        negatives = [self.resized_transform(self.get_rgb_img(self.rgb_database_paths[i])) for i in neg_indexes]
+        positive = self.transform(self.get_rgb_img(self.rgb_database_paths[best_positive_index]))
+        negatives = [self.transform(self.get_rgb_img(self.rgb_database_paths[i])) for i in neg_indexes]
 
         images = torch.stack((query, positive, *negatives), 0)
         triplets_local_indexes = torch.tensor([[0, 1, neg_num + 2] for neg_num in range(len(neg_indexes))])

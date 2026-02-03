@@ -611,6 +611,268 @@ def get_mnn_matches(fm1, fm2):
     return idx1, idx2
 
 
+def visualize_cls_gem_attention(
+    model,
+    images,
+    device,
+    save_path,
+    modality='thermal'
+):
+    """
+    Visualize CLS token attention and GeM pooling attention maps with PCA visualization.
+    - CLS: PCA across attention heads -> RGB
+    - GeM: PCA across feature dimensions (patch_tokens * global_desc) -> RGB
+
+    Args:
+        model: the model (already in eval mode)
+        images: [B, 3, H, W] input images tensor
+        device: cuda/cpu device
+        save_path: path to save the visualization
+        modality: 'thermal' or 'rgb'
+    """
+    model.eval()
+
+    with torch.no_grad():
+        images = images.to(device)
+        B = images.shape[0]
+        H, W = images.shape[2], images.shape[3]
+        grid_h, grid_w = H // 14, W // 14
+
+        # Forward pass through model
+        flags = torch.zeros(B, dtype=torch.long, device=device) if modality == 'thermal' else torch.ones(B, dtype=torch.long, device=device)
+        outputs = model(images, flags)
+
+        global_desc = outputs[0]   # [B, D]
+        patch_tokens = outputs[1]  # [B, N, D]
+
+        # Get multi-head attention from backbone
+        backbone_out = model.module.shared_backbone(images, return_attention=True)
+        cls_attn_multihead = backbone_out.get("cls_attention", None)  # [B, num_heads, N]
+
+        # Create figure: 5 columns (Original, CLS PCA, CLS overlay, GeM PCA, GeM overlay)
+        num_samples = min(B, 4)
+        fig, axes = plt.subplots(num_samples, 5, figsize=(25, 5 * num_samples))
+
+        if num_samples == 1:
+            axes = axes.reshape(1, -1)
+
+        for i in range(num_samples):
+            img_denorm = denormalize(images[i:i+1], images.device).cpu()[0].permute(1, 2, 0).numpy()
+
+            # Col 0: Original image
+            axes[i, 0].imshow(img_denorm)
+            axes[i, 0].set_title(f'Original ({modality.capitalize()})', fontsize=12, fontweight='bold')
+            axes[i, 0].axis('off')
+
+            # CLS PCA: [num_heads, N] -> PCA -> [N, 3] -> RGB
+            if cls_attn_multihead is not None:
+                cls_heads = cls_attn_multihead[i].cpu().numpy().T  # [N, num_heads]
+                pca = PCA(n_components=3)
+                cls_pca = pca.fit_transform(cls_heads)  # [N, 3]
+                cls_pca_norm = normalize_for_vis(cls_pca)
+                cls_pca_vis = cls_pca_norm.reshape(grid_h, grid_w, 3)
+                cls_pca_resized = np.kron(cls_pca_vis, np.ones((14, 14, 1)))
+
+                axes[i, 1].imshow(cls_pca_resized)
+                axes[i, 1].set_title('CLS Attention PCA', fontsize=12)
+                axes[i, 1].axis('off')
+
+                # CLS heatmap overlay (sum over heads)
+                cls_attn_sum = cls_attn_multihead[i].sum(dim=0).cpu().numpy().reshape(grid_h, grid_w)
+                cls_attn_resized = np.kron(cls_attn_sum, np.ones((14, 14)))
+                cls_attn_norm = normalize_for_vis(cls_attn_resized)
+                heatmap_cls = plt.cm.hot(cls_attn_norm)[:, :, :3]
+                cls_overlay = 0.5 * img_denorm + 0.5 * heatmap_cls
+                cls_overlay = np.clip(cls_overlay, 0, 1)
+                axes[i, 2].imshow(cls_overlay)
+                axes[i, 2].set_title('CLS Overlay', fontsize=12)
+                axes[i, 2].axis('off')
+            else:
+                axes[i, 1].axis('off')
+                axes[i, 2].axis('off')
+
+            # GeM PCA: patch_tokens * global_desc -> [N, D] -> PCA -> [N, 3] -> RGB
+            pt = patch_tokens[i].cpu().numpy()  # [N, D]
+            gd = global_desc[i].cpu().numpy()   # [D]
+            gem_contrib = pt * gd[np.newaxis, :]  # [N, D] element-wise contribution
+
+            pca = PCA(n_components=3)
+            gem_pca = pca.fit_transform(gem_contrib)  # [N, 3]
+            gem_pca_norm = normalize_for_vis(gem_pca)
+            gem_pca_vis = gem_pca_norm.reshape(grid_h, grid_w, 3)
+            gem_pca_resized = np.kron(gem_pca_vis, np.ones((14, 14, 1)))
+
+            axes[i, 3].imshow(gem_pca_resized)
+            axes[i, 3].set_title('GeM Attention PCA', fontsize=12)
+            axes[i, 3].axis('off')
+
+            # GeM heatmap overlay (dot product)
+            gem_attn = (pt * gd[np.newaxis, :]).sum(axis=1).reshape(grid_h, grid_w)  # [N] -> [H, W]
+            gem_attn_resized = np.kron(gem_attn, np.ones((14, 14)))
+            gem_attn_norm = normalize_for_vis(gem_attn_resized)
+            heatmap_gem = plt.cm.hot(gem_attn_norm)[:, :, :3]
+            gem_overlay = 0.5 * img_denorm + 0.5 * heatmap_gem
+            gem_overlay = np.clip(gem_overlay, 0, 1)
+            axes[i, 4].imshow(gem_overlay)
+            axes[i, 4].set_title('GeM Overlay', fontsize=12)
+            axes[i, 4].axis('off')
+
+        fig.suptitle('CLS Token PCA vs GeM Pooling PCA', fontsize=16, fontweight='bold')
+        plt.tight_layout(rect=[0, 0, 1, 0.97])
+
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+
+        print(f"Saved attention visualization: {save_path}")
+
+
+def visualize_cls_gem_attention_from_outputs(
+    images,
+    cls_attn_map,
+    gem_attn_map,
+    device,
+    save_path,
+    modality='thermal',
+    patch_tokens=None,
+    cls_attn_multihead=None,
+    global_desc=None
+):
+    """
+    Visualize CLS token attention and GeM pooling attention maps with PCA visualization.
+
+    Args:
+        images: [B, 3, H, W] input images tensor
+        cls_attn_map: [B, N] CLS attention map (sum over heads)
+        gem_attn_map: [B, N] GeM attention map
+        device: cuda/cpu device
+        save_path: path to save the visualization
+        modality: 'thermal' or 'rgb'
+        patch_tokens: [B, N, D] patch token embeddings for GeM PCA
+        cls_attn_multihead: [B, num_heads, N] multi-head CLS attention for PCA
+        global_desc: [B, D] global descriptor for GeM PCA
+    """
+    B = images.shape[0]
+    H, W = images.shape[2], images.shape[3]
+    grid_h, grid_w = H // 14, W // 14
+
+    # Create figure: 5 columns (Original, CLS PCA, CLS overlay, GeM PCA, GeM overlay)
+    num_samples = min(B, 4)
+    fig, axes = plt.subplots(num_samples, 5, figsize=(25, 5 * num_samples))
+
+    if num_samples == 1:
+        axes = axes.reshape(1, -1)
+
+    for i in range(num_samples):
+        # Denormalize image
+        img_denorm = denormalize(images[i:i+1], images.device).cpu()[0].permute(1, 2, 0).numpy()
+
+        # Col 0: Original image
+        axes[i, 0].imshow(img_denorm)
+        axes[i, 0].set_title(f'Original ({modality.capitalize()})', fontsize=12, fontweight='bold')
+        axes[i, 0].axis('off')
+
+        # CLS PCA visualization
+        if cls_attn_multihead is not None:
+            # cls_attn_multihead: [B, num_heads, N] -> [N, num_heads] for PCA
+            cls_heads = cls_attn_multihead[i].cpu().numpy().T  # [N, num_heads]
+            if cls_heads.shape[1] >= 3:
+                pca = PCA(n_components=3)
+                cls_pca = pca.fit_transform(cls_heads)  # [N, 3]
+            else:
+                cls_pca = np.zeros((cls_heads.shape[0], 3))
+                cls_pca[:, :cls_heads.shape[1]] = cls_heads
+            cls_pca_norm = normalize_for_vis(cls_pca)
+            cls_pca_vis = cls_pca_norm.reshape(grid_h, grid_w, 3)
+            cls_pca_resized = np.kron(cls_pca_vis, np.ones((14, 14, 1)))
+
+            axes[i, 1].imshow(cls_pca_resized)
+            axes[i, 1].set_title('CLS Attention PCA', fontsize=12)
+            axes[i, 1].axis('off')
+
+            # CLS heatmap overlay (sum over heads)
+            cls_attn_sum = cls_attn_multihead[i].sum(dim=0).cpu().numpy().reshape(grid_h, grid_w)
+            cls_attn_resized = np.kron(cls_attn_sum, np.ones((14, 14)))
+            cls_attn_norm = normalize_for_vis(cls_attn_resized)
+            heatmap_cls = plt.cm.hot(cls_attn_norm)[:, :, :3]
+            cls_overlay = 0.5 * img_denorm + 0.5 * heatmap_cls
+            cls_overlay = np.clip(cls_overlay, 0, 1)
+            axes[i, 2].imshow(cls_overlay)
+            axes[i, 2].set_title('CLS Overlay', fontsize=12)
+            axes[i, 2].axis('off')
+        else:
+            # Fallback to heatmap if multi-head not available
+            cls_attn = cls_attn_map[i].cpu().numpy().reshape(grid_h, grid_w)
+            cls_attn_resized = np.kron(cls_attn, np.ones((14, 14)))
+            cls_attn_norm = normalize_for_vis(cls_attn_resized)
+            axes[i, 1].imshow(cls_attn_norm, cmap='hot')
+            axes[i, 1].set_title('CLS Attention (no PCA)', fontsize=12)
+            axes[i, 1].axis('off')
+
+            heatmap_cls = plt.cm.hot(cls_attn_norm)[:, :, :3]
+            cls_overlay = 0.5 * img_denorm + 0.5 * heatmap_cls
+            cls_overlay = np.clip(cls_overlay, 0, 1)
+            axes[i, 2].imshow(cls_overlay)
+            axes[i, 2].set_title('CLS Overlay', fontsize=12)
+            axes[i, 2].axis('off')
+
+        # GeM PCA visualization
+        if patch_tokens is not None and global_desc is not None:
+            # Compute per-dimension contribution: patch_tokens * global_desc
+            # patch_tokens: [B, N, D], global_desc: [B, D]
+            pt = patch_tokens[i].cpu().numpy()  # [N, D]
+            gd = global_desc[i].cpu().numpy()   # [D]
+            # Element-wise contribution of each dimension for each patch
+            gem_contrib = pt * gd[np.newaxis, :]  # [N, D]
+
+            # Apply PCA to reduce D -> 3
+            pca = PCA(n_components=3)
+            gem_pca = pca.fit_transform(gem_contrib)  # [N, 3]
+            gem_pca_norm = normalize_for_vis(gem_pca)
+            gem_pca_vis = gem_pca_norm.reshape(grid_h, grid_w, 3)
+            gem_pca_resized = np.kron(gem_pca_vis, np.ones((14, 14, 1)))
+
+            axes[i, 3].imshow(gem_pca_resized)
+            axes[i, 3].set_title('GeM Attention PCA', fontsize=12)
+            axes[i, 3].axis('off')
+
+            # GeM heatmap overlay (dot product)
+            gem_attn = (pt * gd[np.newaxis, :]).sum(axis=1).reshape(grid_h, grid_w)  # [N] -> [H, W]
+            gem_attn_resized = np.kron(gem_attn, np.ones((14, 14)))
+            gem_attn_norm = normalize_for_vis(gem_attn_resized)
+            heatmap_gem = plt.cm.hot(gem_attn_norm)[:, :, :3]
+            gem_overlay = 0.5 * img_denorm + 0.5 * heatmap_gem
+            gem_overlay = np.clip(gem_overlay, 0, 1)
+            axes[i, 4].imshow(gem_overlay)
+            axes[i, 4].set_title('GeM Overlay', fontsize=12)
+            axes[i, 4].axis('off')
+        else:
+            # Fallback to heatmap if patch_tokens not available
+            gem_attn = gem_attn_map[i].cpu()
+            gem_attn_softmax = torch.softmax(gem_attn, dim=0).numpy().reshape(grid_h, grid_w)
+            gem_attn_resized = np.kron(gem_attn_softmax, np.ones((14, 14)))
+            gem_attn_norm = normalize_for_vis(gem_attn_resized)
+            axes[i, 3].imshow(gem_attn_norm, cmap='hot')
+            axes[i, 3].set_title('GeM Attention (no PCA)', fontsize=12)
+            axes[i, 3].axis('off')
+
+            heatmap_gem = plt.cm.hot(gem_attn_norm)[:, :, :3]
+            gem_overlay = 0.5 * img_denorm + 0.5 * heatmap_gem
+            gem_overlay = np.clip(gem_overlay, 0, 1)
+            axes[i, 4].imshow(gem_overlay)
+            axes[i, 4].set_title('GeM Overlay', fontsize=12)
+            axes[i, 4].axis('off')
+
+    fig.suptitle('CLS Token PCA vs GeM Pooling PCA', fontsize=16, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+    print(f"Saved attention visualization: {save_path}")
+
+
 def visualize_mnn_matches(
     args,
     model,
@@ -640,7 +902,7 @@ def visualize_mnn_matches(
     from utils import get_timestamp
 
     # Check if selaVPR features are available
-    if not (args.use_selaVPR_loss or args.use_reranking == 'selaVPR'):
+    if not (args.use_reranking == 'selaVPR'):
         print("MNN visualization requires use_selaVPR_loss or use_reranking='selaVPR'")
         return
 

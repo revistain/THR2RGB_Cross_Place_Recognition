@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=6
+CUDA_VISIBLE_DEVICES=5
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
@@ -11,7 +11,9 @@ python3 fast_inference.py \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
-    --comment "224x224-Croco-ViTs-numBlock0-selaVPRRerankingWithQuantileAttn(up3)" \
+    --soft_positives_dist_threshold 10 \
+    --hard_positives_dist_threshold 10 \
+    --comment "224x224-Croco-ViTs-numBlock0-selaVPRReranking" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
@@ -20,10 +22,12 @@ python3 fast_inference.py \
     --use_recon_loss \
     --recon_loss_type 'mse+ssim' \
     --num_decoder_depth 8 \
-    --selaVPR_rerank_score_type 'quantile_attn' \
-    --use_reranking 'reconSelaVPR' \
-    --resume /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/224x224-Croco-ViTs-numBlock0-selaVPRRerankingWithCosSimFixed/260129_054808/last_model.pth
+    --visualize_attention \
+    --use_reranking 'selaVPR' \
+    --resume /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/224x224-Croco-ViTs-numBlock0/260201_102409/best_model.pth
 
+    # --selaVPR_rerank_score_type 'none' \
+    # --use_reranking 'reconSelaVPR' \
     #### Croco
     # --croco_mask_ratio 0.8 \
     # --recon_weight 10 \
@@ -38,7 +42,6 @@ python3 fast_inference.py \
     # --use_cls_for_vpr \
 
     #### selaVPR
-    # --use_selaVPR_loss \
     # --use_reranking 'selaVPR' \
     # --match_conf_weight \
     # --match_conf_top_k \

@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=5
+CUDA_VISIBLE_DEVICES=0
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
@@ -9,9 +9,11 @@ python3 train_wandb.py \
     --cuda_device $CUDA_VISIBLE_DEVICES \
     --foundation_model_path /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/backbone/dinov2/pretrained/dinov2_vits14_pretrain.pth \
     --queries_per_epoch 2000 \
+    --soft_positives_dist_threshold 10 \
+    --hard_positives_dist_threshold 10 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
-    --comment "224x224-Croco-ViTs-numBlock0-selaVPRRerankingWithQuantileAttn(up10)" \
+    --comment "224x224-CroCo-ViTs-numBlock0-selaLocalLoss" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
@@ -19,9 +21,26 @@ python3 train_wandb.py \
     --recon_weight 10 \
     --use_recon_loss \
     --recon_loss_type 'mse+ssim' \
+    --use_sela_local_loss \
     --num_decoder_depth 8 \
-    --selaVPR_rerank_score_type 'quantile_attn' \
-    --use_reranking 'selaVPR'
+    --brightness 0.3 \
+    --contrast 0.3 \
+    --saturation 0.3 \
+    --hue 0.05
+
+    # --brightness 0.5 \
+    # --contrast 0.5 \
+    # --saturation 0.5 \
+    # --hue 0.1 \
+
+    # --use_pos_as_aligned_rgb \
+    # --num_decoder_depth 8 \
+    # --rand_perspective 0.1
+
+    # --use_pos_as_aligned_rgb \
+    # --img_time 'latetime'
+    # --selaVPR_rerank_score_type 'none' \
+    # --use_reranking 'selaVPR'
 
     #### Croco
     # --croco_mask_ratio 0.8 \
@@ -37,7 +56,6 @@ python3 train_wandb.py \
     # --use_cls_for_vpr \
 
     #### selaVPR
-    # --use_selaVPR_loss \
     # --use_reranking 'selaVPR' \
     # --match_conf_weight \
     # --match_conf_top_k \
