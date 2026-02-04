@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=2
+CUDA_VISIBLE_DEVICES=7
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
@@ -13,21 +13,17 @@ python3 train_wandb.py \
     --hard_positives_dist_threshold 10 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
-    --comment "224x224-CroCo-ViTs-numBlock0-sharedDecoder" \
+    --comment "224x224-CroCo-ViTs-numBlock0-sharedDecoder(withoutAugmentation)-ssim" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
     --croco_mask_ratio 0.8 \
     --recon_weight 10 \
     --use_recon_loss \
-    --recon_loss_type 'mse+ssim' \
-    --num_decoder_depth 8 \
-    --brightness 0.3 \
-    --contrast 0.3 \
-    --saturation 0.3 \
-    --hue 0.05
+    --recon_loss_type 'ssim' \
+    --num_decoder_depth 8
 
-    # --use_swin_decoder
+    # --recon_loss_type 'mse+ssim' \
     # --brightness 0.5 \
     # --contrast 0.5 \
     # --saturation 0.5 \
