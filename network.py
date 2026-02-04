@@ -377,18 +377,7 @@ class CrossModalVPR_Net(nn.Module):
             # Linearly increasing drop_path rate
             dpr = [x.item() for x in torch.linspace(0, drop_path_rate, dec_depth)]
 
-            self.decoder_thermal_blocks = nn.ModuleList([
-                SwinDecoderBlock(
-                    dim=self.output_dim,
-                    num_heads=dec_num_heads,
-                    drop_path=dpr[i],
-                    window_size=window_size,
-                    shift_size=0 if (i % 2 == 0) else window_size // 2,
-                    img_size=img_size,
-                )
-                for i in range(dec_depth)
-            ])
-            self.decoder_rgb_blocks = nn.ModuleList([
+            self.decoder_blocks = nn.ModuleList([
                 SwinDecoderBlock(
                     dim=self.output_dim,
                     num_heads=dec_num_heads,
@@ -401,15 +390,11 @@ class CrossModalVPR_Net(nn.Module):
             ])
             print(f"Using Swin Decoder: window_size={window_size}, drop_path_rate={drop_path_rate}")
         else:
-            self.decoder_thermal_blocks = nn.ModuleList([
+            self.decoder_blocks = nn.ModuleList([
                 CroCoDecoderBlock(self.output_dim, dec_num_heads)
                 for _ in range(dec_depth)
             ])
-            self.decoder_rgb_blocks = nn.ModuleList([
-                CroCoDecoderBlock(self.output_dim, dec_num_heads)
-                for _ in range(dec_depth)
-            ])
-        
+
         self.decoder_norm = nn.LayerNorm(self.output_dim)
         self.mask_token = None
         self.patch_count = int(args.resize[0]/14)*int(args.resize[1]/14)
@@ -451,12 +436,16 @@ class CrossModalVPR_Net(nn.Module):
         self.mask_generator = RandomMask(num_patches, mask_ratio)
 
     def _set_prediction_head(self, dec_embed_dim, image_H, image_W):
-        # FIXME: 이것도 같은거 써도됨...?
-        self.prediction_head = nn.Sequential(
+        self.prediction_thermal_head = nn.Sequential(
             nn.Linear(dec_embed_dim, 14 * 14 * 3), # 768 → 588
         )
-        nn.init.normal_(self.prediction_head[0].weight, std=0.02)
-        nn.init.zeros_(self.prediction_head[0].bias)
+        self.prediction_rgb_head = nn.Sequential(
+            nn.Linear(dec_embed_dim, 14 * 14 * 3), # 768 → 588
+        )
+        nn.init.normal_(self.prediction_thermal_head[0].weight, std=0.02)
+        nn.init.zeros_(self.prediction_thermal_head[0].bias)
+        nn.init.normal_(self.prediction_rgb_head[0].weight, std=0.02)
+        nn.init.zeros_(self.prediction_rgb_head[0].bias)
 
     def patchify(self, imgs):
         """
@@ -608,19 +597,19 @@ class CrossModalVPR_Net(nn.Module):
                 paired_rgb_dec = paired_rgb_full + self.decoder_pos_embed  # [B, 256, 768]
                 
                 # 8. decoder 통과시키기
-                for blk in self.decoder_thermal_blocks:
+                for blk in self.decoder_blocks:
                     thermal_full_dec = blk(thermal_full_dec, paired_rgb_dec)
                 thermal_full_dec = self.decoder_norm(thermal_full_dec)
 
-                for blk in self.decoder_rgb_blocks:
+                for blk in self.decoder_blocks:
                     rgb_full_dec = blk(rgb_full_dec, paired_thermal_dec)
                 rgb_full_dec = self.decoder_norm(rgb_full_dec)
 
                 recon_loss_fn = self.calculate_recon_loss
                 
                 # 9. Prediction Head
-                reconstructed_thermal_patches = self.prediction_head(thermal_full_dec)
-                reconstructed_rgb_patches = self.prediction_head(rgb_full_dec)
+                reconstructed_thermal_patches = self.prediction_thermal_head(thermal_full_dec)
+                reconstructed_rgb_patches = self.prediction_rgb_head(rgb_full_dec)
                 target_thermal_patches = self.patchify(x)
                 target_rgb_patches = self.patchify(paired_rgb)
 
@@ -711,7 +700,7 @@ class CrossModalVPR_Net(nn.Module):
 
         return global_desc
     
-    def forward_recon_sela_decode(self, thermal_feat, rgb_feat, return_layer=8):
+    def forward_recon_sela_decode(self, thermal_feat, rgb_feat, return_layer=-1):
         """
         Bidirectional CroCo decoding for reconSelaVPR reranking.
 
@@ -730,7 +719,7 @@ class CrossModalVPR_Net(nn.Module):
         # Direction 1: Thermal decoded with RGB as context
         layer_thermal_decoded = None
         thermal_decoded = thermal_dec.clone()
-        for idx, blk in enumerate(self.decoder_thermal_blocks):
+        for idx, blk in enumerate(self.decoder_blocks):
             thermal_decoded = blk(thermal_decoded, rgb_dec)
             if idx == RETURN_LAYER_NUM - 1:
                 layer_thermal_decoded = thermal_decoded.clone()
@@ -741,7 +730,7 @@ class CrossModalVPR_Net(nn.Module):
         # Direction 2: RGB decoded with Thermal as context
         layer_rgb_decoded = None
         rgb_decoded = rgb_dec.clone()
-        for idx, blk in enumerate(self.decoder_rgb_blocks):
+        for idx, blk in enumerate(self.decoder_blocks):
             rgb_decoded = blk(rgb_decoded, thermal_dec)
             if idx == RETURN_LAYER_NUM - 1:
                 layer_rgb_decoded = rgb_decoded.clone()

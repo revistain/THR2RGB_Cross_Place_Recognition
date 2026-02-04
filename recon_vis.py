@@ -55,18 +55,18 @@ def visualize_reconstruction(model, args, thermal_img, paired_rgb, device='cuda'
 
         # ========== Decoder pass (cross-attention) ==========
         # Thermal decoder: masked thermal attends to full RGB
-        for blk in net.decoder_thermal_blocks:
+        for blk in net.decoder_blocks:
             thermal_full_dec = blk(thermal_full_dec, paired_rgb_dec)
         thermal_full_dec = net.decoder_norm(thermal_full_dec)
 
         # RGB decoder: masked RGB attends to full thermal
-        for blk in net.decoder_rgb_blocks:
+        for blk in net.decoder_blocks:
             rgb_full_dec = blk(rgb_full_dec, paired_thermal_dec)
         rgb_full_dec = net.decoder_norm(rgb_full_dec)
 
         # ========== Prediction head ==========
-        reconstructed_thermal_pixels = net.prediction_head(thermal_full_dec)  # [1, 256, 588]
-        reconstructed_rgb_pixels = net.prediction_head(rgb_full_dec)  # [1, 256, 588]
+        reconstructed_thermal_pixels = net.prediction_thermal_head(thermal_full_dec)  # [1, 256, 588]
+        reconstructed_rgb_pixels = net.prediction_rgb_head(rgb_full_dec)  # [1, 256, 588]
 
     # Restore training mode
     if not was_training:
