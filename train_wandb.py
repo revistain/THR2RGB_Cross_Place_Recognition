@@ -332,7 +332,8 @@ if __name__ == "__main__":
                     "train/triplet_loss(scaled)": triplet_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query),
                     "train/reranking_loss(scaled)": rerank_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query)
                         if isinstance(rerank_loss_sum, torch.Tensor) else 0,
-                    "train/local_loss(scaled)": local_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query),
+                    "train/local_loss(scaled)": local_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query)
+                        if isinstance(local_loss_sum, torch.Tensor) else 0,
                 }, step=global_step)
                 
                 global_step += 1

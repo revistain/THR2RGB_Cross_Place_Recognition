@@ -166,14 +166,3 @@ def local_sim(features_1, features_2, trainflag=False, query_attn_map=None, db_a
         scores = match_batch_tensor(query, preds, trainflag, grid_size=(H, W),
                     query_attn_map=query_attn_map, db_attn_map=db_attn_map, method_type=method_type)
         return scores
-
-class LocalFeatureLoss(torch.nn.Module):
-    def __init__(self):
-        super(LocalFeatureLoss,self).__init__()
-        return
-    def forward(self, feature_data):
-        anchor, positive, negative = feature_data[0], feature_data[1], feature_data[2]
-        simP = local_sim(anchor,positive,trainflag=True)
-        simN = local_sim(anchor,negative,trainflag=True)
-        loss = torch.sum(torch.clamp(-simP+simN+0., min=0.))
-        return loss

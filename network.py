@@ -16,80 +16,7 @@ from timm.models.layers import trunc_normal_
 from croco.models.masking import RandomMask
 from croco.models.criterion import MaskedMSE
 from pathlib import Path
-
-class CroCoDecoderBlock(nn.Module):
-    def __init__(self, dim=768, num_heads=12, mlp_ratio=4.0, drop_path=0.0):
-        super().__init__()
-        
-        # Self-Attention components
-        self.norm1 = nn.LayerNorm(dim)
-        self.self_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
-        
-        # Cross-Attention components
-        self.norm2 = nn.LayerNorm(dim)
-        self.norm_cross = nn.LayerNorm(dim)
-        self.cross_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
-        
-        # MLP components
-        self.norm3 = nn.LayerNorm(dim)
-        mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, mlp_hidden_dim),
-            nn.GELU(),
-            nn.Linear(mlp_hidden_dim, dim)
-        )
-        
-        # ========== Attention 저장용 ==========
-        self.self_attn_weights = None
-        self.cross_attn_weights = None
-        # ======================================
-        
-    def forward(self, x, y, return_attention=False):
-        """
-        Args:
-            x: [B, N, D] - decoder input (RGB masked)
-            y: [B, M, D] - encoder output (Thermal reference)
-            return_attention: bool - attention map 반환 여부
-        Returns:
-            x: [B, N, D] - updated decoder features
-        """
-        # Step 1: Self-Attention
-        x_norm = self.norm1(x)
-        if return_attention:
-            self_out, self_attn_weights = self.self_attn(
-                x_norm, x_norm, x_norm, 
-                need_weights=True, 
-                average_attn_weights=True  # [B, N, N]
-            )
-            self.self_attn_weights = self_attn_weights
-        else:
-            self_out = self.self_attn(x_norm, x_norm, x_norm)[0]
-        x = x + self_out
-        
-        # Step 2: Cross-Attention
-        x_norm = self.norm2(x)
-        encoder_norm = self.norm_cross(y)
-        if return_attention:
-            cross_out, cross_attn_weights = self.cross_attn(
-                query=x_norm,
-                key=encoder_norm,
-                value=encoder_norm,
-                need_weights=True,
-                average_attn_weights=True  # [B, N, M]
-            )
-            self.cross_attn_weights = cross_attn_weights
-        else:
-            cross_out = self.cross_attn(
-                query=x_norm,
-                key=encoder_norm,
-                value=encoder_norm
-            )[0]
-        x = x + cross_out
-        
-        # Step 3: MLP
-        x = x + self.mlp(self.norm3(x))
-        
-        return x
+from swin_transformer import *
      
 class GeM(nn.Module):
     def __init__(self, p=3, eps=1e-6, work_with_tokens=False):
@@ -430,20 +357,58 @@ class CrossModalVPR_Net(nn.Module):
         self.use_masked_inference = False
         self.use_only_cross_decdoer = args.use_only_cross_decoder
         self.recon_loss_type = args.recon_loss_type
-        if args.use_sela_local_loss or args.use_reranking == 'selaVPR':
+        if args.use_sela_local_loss or args.use_reranking in ['selaVPR', 'reconSelaVPR']:
             self.local_adapt = LocalAdapt(self.output_dim)
                
-        # Croco settings
+        # Decoder settings
         dec_depth = args.num_decoder_depth
         dec_num_heads = 16
-        self.decoder_thermal_blocks = nn.ModuleList([
-            CroCoDecoderBlock(self.output_dim, dec_num_heads) 
-            for _ in range(dec_depth)
-        ])
-        self.decoder_rgb_blocks = nn.ModuleList([
-            CroCoDecoderBlock(self.output_dim, dec_num_heads) 
-            for _ in range(dec_depth)
-        ])
+        self.patch_count = 256
+
+        # Compute feature map size from patch count (assuming square images)
+        img_size = int(math.sqrt(self.patch_count))  # e.g., 16 for 256 patches
+
+        # Use Swin decoder if enabled, otherwise use CroCo decoder
+        use_swin = getattr(args, 'use_swin_decoder', False)
+        if use_swin:
+            window_size = getattr(args, 'swin_window_size', 4)
+            drop_path_rate = getattr(args, 'drop_path_rate', 0.1)
+
+            # Linearly increasing drop_path rate
+            dpr = [x.item() for x in torch.linspace(0, drop_path_rate, dec_depth)]
+
+            self.decoder_thermal_blocks = nn.ModuleList([
+                SwinDecoderBlock(
+                    dim=self.output_dim,
+                    num_heads=dec_num_heads,
+                    drop_path=dpr[i],
+                    window_size=window_size,
+                    shift_size=0 if (i % 2 == 0) else window_size // 2,
+                    img_size=img_size,
+                )
+                for i in range(dec_depth)
+            ])
+            self.decoder_rgb_blocks = nn.ModuleList([
+                SwinDecoderBlock(
+                    dim=self.output_dim,
+                    num_heads=dec_num_heads,
+                    drop_path=dpr[i],
+                    window_size=window_size,
+                    shift_size=0 if (i % 2 == 0) else window_size // 2,
+                    img_size=img_size,
+                )
+                for i in range(dec_depth)
+            ])
+            print(f"Using Swin Decoder: window_size={window_size}, drop_path_rate={drop_path_rate}")
+        else:
+            self.decoder_thermal_blocks = nn.ModuleList([
+                CroCoDecoderBlock(self.output_dim, dec_num_heads)
+                for _ in range(dec_depth)
+            ])
+            self.decoder_rgb_blocks = nn.ModuleList([
+                CroCoDecoderBlock(self.output_dim, dec_num_heads)
+                for _ in range(dec_depth)
+            ])
         
         self.decoder_norm = nn.LayerNorm(self.output_dim)
         self.mask_token = None
@@ -712,7 +677,7 @@ class CrossModalVPR_Net(nn.Module):
             gem_attn_map = torch.einsum('bd,bnd->bn', global_desc, patch_tokens)
 
             # selaVPR local feature computation using interpolation
-            if self.args.use_sela_local_loss or (not self.training and (self.args.use_reranking == 'selaVPR' or self.args.use_reranking == 'match_conf')):
+            if self.args.use_sela_local_loss or (not self.training and (self.args.use_reranking in ['selaVPR', 'reconSelaVPR'])):
                 x0 = patch_tokens.view(-1, H_feat, W_feat, self.output_dim).permute(0, 3, 1, 2)
                 x0 = self.local_adapt(x0)
                 x0 = x0.permute(0, 2, 3, 1)
@@ -746,7 +711,7 @@ class CrossModalVPR_Net(nn.Module):
 
         return global_desc
     
-    def forward_recon_sela_decode(self, thermal_feat, rgb_feat):
+    def forward_recon_sela_decode(self, thermal_feat, rgb_feat, return_layer=8):
         """
         Bidirectional CroCo decoding for reconSelaVPR reranking.
 
@@ -761,14 +726,16 @@ class CrossModalVPR_Net(nn.Module):
         thermal_dec = thermal_feat + self.decoder_pos_embed
         rgb_dec = rgb_feat + self.decoder_pos_embed
 
-        RETURN_LAYER_NUM = 2
+        RETURN_LAYER_NUM = return_layer
         # Direction 1: Thermal decoded with RGB as context
         layer_thermal_decoded = None
         thermal_decoded = thermal_dec.clone()
         for idx, blk in enumerate(self.decoder_thermal_blocks):
             thermal_decoded = blk(thermal_decoded, rgb_dec)
             if idx == RETURN_LAYER_NUM - 1:
-                layer_thermal_decoded = thermal_decoded.clone
+                layer_thermal_decoded = thermal_decoded.clone()
+                break
+        thermal_decoded = layer_thermal_decoded
         thermal_decoded = self.decoder_norm(thermal_decoded)
 
         # Direction 2: RGB decoded with Thermal as context
@@ -777,7 +744,9 @@ class CrossModalVPR_Net(nn.Module):
         for idx, blk in enumerate(self.decoder_rgb_blocks):
             rgb_decoded = blk(rgb_decoded, thermal_dec)
             if idx == RETURN_LAYER_NUM - 1:
-                layer_rgb_decoded = rgb_decoded.clone
+                layer_rgb_decoded = rgb_decoded.clone()
+                break
+        rgb_decoded = layer_rgb_decoded
         rgb_decoded = self.decoder_norm(rgb_decoded)
 
         # Reshape to spatial format: [B, N, C] -> [B, C, H, W]
@@ -790,13 +759,10 @@ class CrossModalVPR_Net(nn.Module):
         # Bilinear interpolation: [B, 768, 16, 16] -> [B, 768, 61, 61]
         # thermal_local = F.interpolate(thermal_spatial, size=(61, 61), mode='bilinear', align_corners=False)
         # rgb_local = F.interpolate(rgb_spatial, size=(61, 61), mode='bilinear', align_corners=False)
-
-        x0 = thermal_spatial.view(-1, H, W, self.output_dim).permute(0, 3, 1, 2)
-        thermal_local = self.local_adapt(x0)
+        thermal_local = self.local_adapt(thermal_spatial)
         thermal_local = thermal_local.permute(0, 2, 3, 1)  # [B, 61, 61, 768]
 
-        x0 = rgb_spatial.view(-1, H, W, self.output_dim).permute(0, 3, 1, 2)
-        rgb_local = self.local_adapt(x0)
+        rgb_local = self.local_adapt(rgb_spatial)
         rgb_local = rgb_local.permute(0, 2, 3, 1)          # [B, 61, 61, 768]
                 
         # Permute to [B, H, W, C] and L2 normalize
@@ -824,7 +790,7 @@ class CrossModalVPR_Net(nn.Module):
 
         # selaVPR local embedding initialization (768-dim with interpolation)
         sela_local_emb = None
-        if self.args.use_sela_local_loss or self.args.use_reranking == 'selaVPR':
+        if self.args.use_sela_local_loss or self.args.use_reranking in ['selaVPR', 'reconSelaVPR']:
             sela_local_emb = torch.zeros((x.size(0), 61, 61, 128), device=x.device)
 
         if is_rgb.any():

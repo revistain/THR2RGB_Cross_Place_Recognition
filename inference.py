@@ -146,7 +146,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
             database_features = np.empty((eval_ds.database_num, args.features_dim), dtype="float32")
             database_attn_map = np.empty((eval_ds.database_num, patch_count), dtype="float32")
             
-            use_selaVPR = args.use_reranking in ['selaVPR', 'match_conf']
+            use_selaVPR = args.use_reranking in ['selaVPR', 'reconSelaVPR']
             use_penultimate = args.r2_penultimate_layer
             print(f"Using SelaVPR features: {use_selaVPR}")
             print(f"Using penultimate: {use_penultimate}")
@@ -442,6 +442,8 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 rerank_scores_dict = {}
                 candidates_features = torch.zeros(RERANKING_TOP_K, patch_count, args.features_dim, device='cuda')
 
+                RETURN_DECODER_LAYER = 5
+                print("Return Layer: ", RETURN_DECODER_LAYER)
                 with torch.no_grad():
                     for query_index, pred in enumerate(tqdm(prev_predictions, desc="ReconSelaVPR Reranking")):
                         # Load query encoder features: [256, 768]
@@ -461,7 +463,8 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                         # Bidirectional decoding
                         thermal_decoded_local, rgb_decoded_local = model.module.forward_recon_sela_decode(
                             query_batch,         # thermal [K, 256, 768]
-                            candidates_features  # RGB [K, 256, 768]
+                            candidates_features,  # RGB [K, 256, 768]
+                            return_layer=RETURN_DECODER_LAYER
                         )
                         # thermal_decoded_local: [K, 61, 61, 768] - thermal refined with RGB context
                         # rgb_decoded_local: [K, 61, 61, 768] - RGB refined with thermal context

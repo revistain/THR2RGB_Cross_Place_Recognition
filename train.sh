@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=0
+CUDA_VISIBLE_DEVICES=6
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
@@ -13,7 +13,7 @@ python3 train_wandb.py \
     --hard_positives_dist_threshold 10 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
-    --comment "224x224-CroCo-ViTs-numBlock0-selaLocalLoss" \
+    --comment "224x224-CroCo-ViTs-numBlock0-seleVPRLoss" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
@@ -21,12 +21,13 @@ python3 train_wandb.py \
     --recon_weight 10 \
     --use_recon_loss \
     --recon_loss_type 'mse+ssim' \
-    --use_sela_local_loss \
     --num_decoder_depth 8 \
     --brightness 0.3 \
     --contrast 0.3 \
     --saturation 0.3 \
-    --hue 0.05
+    --hue 0.05 \
+    --use_sela_local_loss \
+    --use_swin_decoder
 
     # --brightness 0.5 \
     # --contrast 0.5 \

@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=5
+CUDA_VISIBLE_DEVICES=4
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
@@ -23,7 +23,7 @@ python3 fast_inference.py \
     --recon_loss_type 'mse+ssim' \
     --num_decoder_depth 8 \
     --visualize_attention \
-    --use_reranking 'selaVPR' \
+    --use_reranking 'reconSelaVPR' \
     --resume /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/224x224-Croco-ViTs-numBlock0/260201_102409/best_model.pth
 
     # --selaVPR_rerank_score_type 'none' \

@@ -108,6 +108,14 @@ class Parser():
         self.parser.add_argument("--visualize_attention", action='store_true', default=False, help="Visualize CLS and GeM attention maps during inference")
         self.parser.add_argument("--use_sela_local_loss", action='store_true', default=False)
 
+        # Swin Decoder settings
+        self.parser.add_argument("--use_swin_decoder", action='store_true', default=False,
+                                 help="Use Swin V2 decoder blocks instead of CroCo decoder blocks")
+        self.parser.add_argument("--swin_window_size", type=int, default=4,
+                                 help="Window size for Swin V2 windowed self-attention")
+        self.parser.add_argument("--drop_path_rate", type=float, default=0.1,
+                                 help="Stochastic depth rate for Swin decoder blocks")
+
 
     def parse_arguments(self):
         args = self.parser.parse_args()
