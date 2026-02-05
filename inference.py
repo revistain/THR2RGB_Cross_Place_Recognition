@@ -363,7 +363,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 print(f"use_GEM_attn: {use_GeM_attn}")
                 predictions = []
                 rerank_scores_dict = {}  # For visualization
-                candidates_local_features = torch.zeros(RERANKING_TOP_K, 61, 61, args.features_dim, device='cuda')
+                candidates_local_features = torch.zeros(RERANKING_TOP_K, 61, 61, 128, device='cuda')
                 candidates_db_attn_map = torch.zeros(RERANKING_TOP_K, 256, device='cuda')
                 for query_index, pred in enumerate(tqdm(prev_predictions)):
                     # Load query local features: [61, 61, features_dim]
@@ -442,7 +442,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 rerank_scores_dict = {}
                 candidates_features = torch.zeros(RERANKING_TOP_K, patch_count, args.features_dim, device='cuda')
 
-                RETURN_DECODER_LAYER = 5
+                RETURN_DECODER_LAYER = 1
                 print("Return Layer: ", RETURN_DECODER_LAYER)
                 with torch.no_grad():
                     for query_index, pred in enumerate(tqdm(prev_predictions, desc="ReconSelaVPR Reranking")):
@@ -468,15 +468,13 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                         )
                         # thermal_decoded_local: [K, 61, 61, 768] - thermal refined with RGB context
                         # rgb_decoded_local: [K, 61, 61, 768] - RGB refined with thermal context
-
                         # MNN matching between decoded features
-                        query_local = thermal_decoded_local[0]  # [61, 61, 768]
+                        query_local = thermal_decoded_local  # [K, 61, 61, 768]
                         db_local = rgb_decoded_local            # [K, 61, 61, 768]
 
-                        rerank_scores = local_sim(
+                        rerank_scores = local_sim_batch(
                             query_local, db_local,
                             trainflag=False,
-                            method_type=args.selaVPR_rerank_score_type
                         )
 
                         # Sort and reorder
@@ -567,6 +565,175 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                             predictions.append(pred[rerank_query_index])
                         else:
                             predictions.append(pred[:RERANKING_TOP_K])
+
+                predictions = np.array(predictions)
+            elif args.use_reranking == 'diffGeM':
+                # DiffGeM reranking using trained DiffLoss module
+                logging.info("Using diffGeM reranking (differential attention with GeM)")
+
+                # Verify saved patch features exist
+                saved_files = os.listdir(NPY_ROOTPATH)
+                db_files = [f for f in saved_files if f.startswith(f"Db_{seq_name}_")
+                            and "sela" not in f and "penultimate" not in f]
+                query_files = [f for f in saved_files if f.startswith(f"Query_{seq_name}_")
+                               and "sela" not in f and "penultimate" not in f]
+
+                assert len(db_files) == eval_ds.database_num, \
+                    f"DB files mismatch: {len(db_files)} vs {eval_ds.database_num}"
+                assert len(query_files) == eval_ds.queries_num, \
+                    f"Query files mismatch: {len(query_files)} vs {eval_ds.queries_num}"
+                logging.info(f"✓ Verified: {len(db_files)} DB + {len(query_files)} Query patch files")
+
+                predictions = []
+                rerank_scores_dict = {}
+                candidates_features = torch.zeros(RERANKING_TOP_K, patch_count, args.features_dim, device='cuda')
+                candidates_GeMs = torch.zeros(RERANKING_TOP_K, args.features_dim, device='cuda')
+
+                # Select 5 random queries for visualization
+                import random
+                num_vis_queries = 5
+                vis_query_indices = random.sample(range(eval_ds.queries_num), min(num_vis_queries, eval_ds.queries_num))
+                vis_save_dir = os.path.join(args.save_dir, f'diffGeM_attn_vis_{seq_name}')
+                logging.info(f"Will visualize attention maps for queries: {vis_query_indices}")
+
+                with torch.no_grad():
+                    for query_index, pred in enumerate(tqdm(prev_predictions, desc="DiffGeM Reranking")):
+                        # Load query encoder features: [256, features_dim]
+                        query_enc_features = torch.from_numpy(
+                            load_npy(f"Query_{seq_name}_{query_index}")
+                        ).float().cuda().unsqueeze(0)  # [1, 256, D]
+
+                        # Load query GeM descriptor
+                        query_GeM = torch.from_numpy(
+                            queries_features[query_index]
+                        ).float().cuda().unsqueeze(0)  # [1, D]
+
+                        # Load top-K candidate encoder features and GeMs
+                        top_k_indices = pred[:RERANKING_TOP_K]
+                        for cnt, candidate_idx in enumerate(top_k_indices):
+                            candidates_features[cnt] = torch.from_numpy(
+                                load_npy(f"Db_{seq_name}_{candidate_idx}")
+                            ).float().cuda()
+                            candidates_GeMs[cnt] = torch.from_numpy(
+                                database_features[candidate_idx]
+                            ).float().cuda()
+
+                        # Get reranking scores using DiffLoss inference
+                        rerank_scores = model.module.DiffGeMLoss.inference(
+                            model.module,
+                            query_enc_features,      # [1, N, D]
+                            query_GeM,               # [1, D]
+                            candidates_features,     # [K, N, D]
+                            candidates_GeMs          # [K, D]
+                        )
+
+                        # Visualize attention maps for selected queries
+                        if query_index in vis_query_indices:
+                            # Load images for visualization
+                            try:
+                                query_img = eval_ds.get_thermal_img(eval_ds.t_queries_paths[query_index])
+                                query_img = cv2.cvtColor(cv2.resize(query_img, (224, 224)), cv2.COLOR_BGR2RGB)
+                                candidate_imgs = []
+                                for candidate_idx in top_k_indices:
+                                    cand_img = eval_ds.get_rgb_img(eval_ds.rgb_database_paths[candidate_idx])
+                                    cand_img = cv2.cvtColor(cv2.resize(cand_img, (224, 224)), cv2.COLOR_BGR2RGB)
+                                    candidate_imgs.append(cand_img)
+                            except Exception as e:
+                                logging.warning(f"Could not load images for visualization: {e}")
+                                query_img = None
+                                candidate_imgs = None
+
+                            model.module.DiffGeMLoss.visualize_attention_maps(
+                                model.module,
+                                query_enc_features,
+                                query_GeM,
+                                candidates_features,
+                                candidates_GeMs,
+                                query_idx=query_index,
+                                save_dir=vis_save_dir,
+                                query_image=query_img,
+                                candidate_images=candidate_imgs
+                            )
+                            logging.info(f"Saved attention visualization for query {query_index}")
+
+                        # Sort and reorder (higher score = better match)
+                        rerank_scores_np = rerank_scores.cpu().numpy()
+                        rerank_index = rerank_scores_np.argsort()[::-1]
+                        rerank_scores_dict[query_index] = rerank_scores_np[rerank_index].tolist()
+                        predictions.append(pred[rerank_index])
+
+                predictions = np.array(predictions)
+                logging.info(f"Attention visualizations saved to: {vis_save_dir}")
+
+            elif args.use_reranking == 'reconDiffVPR':
+                # ReconSelaVPR: CroCo bidirectional decoder + SelaVPR-style local matching
+                logging.info("Using reconDiffVPR reranking (bidirectional decoder + local matching)")
+
+                # Verify saved patch features exist
+                saved_files = os.listdir(NPY_ROOTPATH)
+                db_files = [f for f in saved_files if f.startswith(f"Db_{seq_name}_")
+                            and "sela" not in f and "penultimate" not in f]
+                query_files = [f for f in saved_files if f.startswith(f"Query_{seq_name}_")
+                               and "sela" not in f and "penultimate" not in f]
+
+                assert len(db_files) == eval_ds.database_num, \
+                    f"DB files mismatch: {len(db_files)} vs {eval_ds.database_num}"
+                assert len(query_files) == eval_ds.queries_num, \
+                    f"Query files mismatch: {len(query_files)} vs {eval_ds.queries_num}"
+                logging.info(f"✓ Verified: {len(db_files)} DB + {len(query_files)} Query patch files")
+
+                predictions = []
+                rerank_scores_dict = {}
+                candidates_features = torch.zeros(RERANKING_TOP_K, patch_count, args.features_dim, device='cuda')
+
+                RETURN_DECODER_LAYER = 5
+                print("Return Layer: ", RETURN_DECODER_LAYER)
+                with torch.no_grad():
+                    for query_index, pred in enumerate(tqdm(prev_predictions, desc="ReconDiffVPR Reranking")):
+                        # Load query encoder features: [256, 768]
+                        query_enc_features = torch.from_numpy(
+                            load_npy(f"Query_{seq_name}_{query_index}")
+                        ).float().cuda()
+
+                        query_GeM = torch.from_numpy(queries_features[query_index]).float().cuda()
+                        database_GeMs = torch.zeros(RERANKING_TOP_K, args.features_dim, device='cuda')
+                        # Load top-K candidate encoder features
+                        for cnt, candidate_idx in enumerate(pred[:RERANKING_TOP_K]):
+                            candidates_features[cnt] = torch.from_numpy(
+                                load_npy(f"Db_{seq_name}_{candidate_idx}")
+                            ).float().cuda()
+                            database_GeMs[cnt] = torch.from_numpy(
+                                database_features[candidate_idx]
+                            ).float().cuda()
+
+                        # Expand query to batch: [K, 256, 768]
+                        query_batch = query_enc_features.unsqueeze(0).expand(RERANKING_TOP_K, -1, -1)
+
+                        # Bidirectional decoding
+                        thermal_decoded, rgb_decoded = model.module.forward_recon_diff_decode(
+                            query_batch,         # thermal [K, 256, 384]
+                            candidates_features,  # RGB [K, 256, 384]
+                            return_layer=RETURN_DECODER_LAYER
+                        ) # output.shape = [K, 256, 384] (intra-normalized)
+                        
+                        query_GeM_attn_maps = torch.zeros(RERANKING_TOP_K, patch_count, device='cuda')
+                        db_GeM_attn_maps = torch.zeros(RERANKING_TOP_K, patch_count, device='cuda')
+                        for cnt in range(RERANKING_TOP_K):
+                            query_GeM_attn_maps[cnt] = query_GeM @ thermal_decoded[cnt].transpose(-2, -1)
+                            db_GeM_attn_maps[cnt] = database_GeMs[cnt] @ rgb_decoded[cnt].transpose(-2, -1)
+                            
+                            sqrt_d = math.sqrt(args.features_dim)
+                            query_GeM_attn_maps[cnt] = F.softmax(query_GeM_attn_maps[cnt] / sqrt_d, dim=-1)
+                            db_GeM_attn_maps[cnt] = F.softmax(db_GeM_attn_maps[cnt] / sqrt_d, dim=-1)
+                            
+
+                        
+
+                        # Sort and reorder
+                        rerank_scores_np = rerank_scores.cpu().numpy()
+                        rerank_index = rerank_scores_np.argsort()[::-1]
+                        rerank_scores_dict[query_index] = rerank_scores_np[rerank_index].tolist()
+                        predictions.append(pred[rerank_index])
 
                 predictions = np.array(predictions)
 

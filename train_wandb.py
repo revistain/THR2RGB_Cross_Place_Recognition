@@ -30,6 +30,7 @@ import network
 import network_only_GeM
 from local_matching import LocalFeatureLoss
 from pathlib import Path
+from diff_loss import DiffLoss
 
 def set_seed(seed=42):
     torch.manual_seed(seed)
@@ -73,7 +74,7 @@ if __name__ == "__main__":
     train_ds = datasets_T2R.BaseSTheReODual(args, DATASET_FOLDER, split='train')
     logging.info(f"[Train - KAIST] Database: {train_ds.database_num}, Queries: {train_ds.queries_num}, Total: {len(train_ds)}")
 
-    args.sequences = ['KAIST', 'SNU', 'Valley']
+    args.sequences = ['SNU', 'Valley']
     test_sequences = args.sequences
     test_ds_list = []
     for seq in test_sequences:
@@ -132,45 +133,41 @@ if __name__ == "__main__":
                     if isinstance(m2, nn.Conv2d):
                         nn.init.constant_(m2.weight, 0.00001)
                         nn.init.constant_(m2.bias, 0.00001)
-
+    
     '''Loss Function - Initialize early for optimizer'''
     GlobalTriplet = nn.TripletMarginLoss(margin=args.margin, p=2, reduction="sum")
-    MNNLocalFeatureLoss = LocalFeatureLoss().to(args.device)
 
-    if args.use_sepearte_backbone_lr:
-        backbone_params = []
-        other_params = []
-        print("="*30)
-        print(f"Using seperate LR !!!")
-        print(f"- backbone LR: \t{args.backbone_lr}")
-        print(f"- other LR: \t{args.lr}")
-        print("="*30)
+    backbone_params = []
+    other_params = []
+    diff_params = []
+    print("="*30)
+    print(f"Using seperate LR !!!")
+    print(f"- backbone LR: \t{args.backbone_lr}")
+    print(f"- other LR: \t{args.lr}")
+    print("="*30)
 
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                if 'shared_backbone' in name:
-                    backbone_params.append(param)
-                else: other_params.append(param)
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            if 'shared_backbone' in name:
+                backbone_params.append(param)
+            elif 'DiffGeMLoss' in name:
+                diff_params.append(param)
+                print(name)
+            else: other_params.append(param)
 
-        '''Seperate Learning Rate'''
-        if args.optim == "adam":
-            optimizer = torch.optim.Adam([
-                {'params': backbone_params, 'lr': args.backbone_lr},
-                {'params': other_params, 'lr': args.lr}
-            ])
-        elif args.optim == "sgd":
-            optimizer = torch.optim.SGD([
-                {'params': backbone_params, 'lr': args.backbone_lr, 'momentum': 0.9, 'weight_decay': 0.001},
-                {'params': other_params, 'lr': args.lr, 'momentum': 0.9, 'weight_decay': 0.001}
-            ])
-    else:
-        '''Optimizer'''
-        all_params = list(model.parameters())
 
-        if args.optim == "adam":
-            optimizer = torch.optim.Adam(all_params, lr=args.lr)
-        elif args.optim == "sgd":
-            optimizer = torch.optim.SGD(all_params, lr=args.lr, momentum=0.9, weight_decay=0.001)
+    if args.optim == "adam":
+        optimizer = torch.optim.Adam([
+            {'params': backbone_params, 'lr': args.lr},
+            {'params': other_params, 'lr': args.lr},
+            {'params': diff_params, 'lr': args.lr},
+        ])
+    elif args.optim == "sgd":
+        optimizer = torch.optim.SGD([
+            {'params': backbone_params, 'lr': args.lr, 'momentum': 0.9, 'weight_decay': 0.001},
+            {'params': other_params, 'lr': args.lr, 'momentum': 0.9, 'weight_decay': 0.001},
+            {'params': diff_params, 'lr': args.lr, 'momentum': 0.9, 'weight_decay': 0.001},
+        ])
 
     thermal_flag = torch.zeros(1, dtype=torch.long)
     rgb_flags = torch.ones(1 + args.negs_num_per_query, dtype=torch.long)
@@ -259,6 +256,7 @@ if __name__ == "__main__":
                 triplet_loss_sum = 0
                 rerank_loss_sum = 0
                 local_loss_sum = 0
+                diff_loss_sum = 0
                 # 각 triplet에 대해 triplet loss 계산
                 for triplets in triplets_local_indexes:
                     queries_indexes, positives_indexes, negatives_indexes = triplets.T
@@ -270,9 +268,9 @@ if __name__ == "__main__":
 
                     # Triplet Loss
                     triplet_loss = GlobalTriplet(query_features, positive_features, negative_features)
-                    triplet_loss_sum += triplet_loss
                     overall_loss += triplet_loss
-                    
+                    triplet_loss_sum += triplet_loss
+
                     ## GeM / CLS cosine sim 구하기
                     # cls_desc = out["x_norm_clstoken"]
                     # cosine_sim = (global_desc * cls_desc) / (np.norm(global_desc) * np.norm(cls_desc))
@@ -292,12 +290,21 @@ if __name__ == "__main__":
                         rerank_loss_sum += rerank_loss
 
                     if args.use_sela_local_loss:
-                        local_loss = MNNLocalFeatureLoss([
+                        local_loss = model.module.MNNLocalFeatureLoss([
                                     local_embedding[queries_indexes],
                                     local_embedding[positives_indexes],
                                     local_embedding[negatives_indexes]])
-                        local_loss_sum += local_loss
                         overall_loss += local_loss
+                        local_loss_sum += local_loss
+                        
+                    # new reranking loss
+                    if args.use_diff_loss:
+                        diff_loss = model.module.DiffGeMLoss(
+                            model.module, queries_indexes, positives_indexes, negatives_indexes,
+                            global_features.detach(), patch_embedding.detach()
+                        )
+                        overall_loss += diff_loss
+                        diff_loss_sum += diff_loss
 
                 # train_batch_size: 4, arg.negs_num_per_query: 10
                 if args.use_recon_loss:
@@ -334,6 +341,8 @@ if __name__ == "__main__":
                         if isinstance(rerank_loss_sum, torch.Tensor) else 0,
                     "train/local_loss(scaled)": local_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query)
                         if isinstance(local_loss_sum, torch.Tensor) else 0,
+                    "train/diff_loss(scaled)": diff_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query)
+                        if isinstance(diff_loss_sum, torch.Tensor) else 0,
                 }, step=global_step)
                 
                 global_step += 1

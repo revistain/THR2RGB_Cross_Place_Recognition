@@ -1,9 +1,10 @@
-CUDA_VISIBLE_DEVICES=7
+CUDA_VISIBLE_DEVICES=1
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
 python3 train_wandb.py \
+    --train_batch_size 4 \
     --save_dir './logs' \
     --sequences KAIST \
     --cuda_device $CUDA_VISIBLE_DEVICES \
@@ -13,16 +14,18 @@ python3 train_wandb.py \
     --hard_positives_dist_threshold 10 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
-    --comment "224x224-CroCo-ViTs-numBlock0-sharedDecoder(withoutAugmentation)-ssim" \
+    --comment "224x224-CroCo-ViTs-numBlock0-sharedDecoder-diffLoss" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
     --croco_mask_ratio 0.8 \
     --recon_weight 10 \
     --use_recon_loss \
-    --recon_loss_type 'ssim' \
+    --recon_loss_type 'mse+ssim' \
+    --use_diff_loss \
     --num_decoder_depth 8
 
+    # --use_diff_loss \
     # --recon_loss_type 'mse+ssim' \
     # --brightness 0.5 \
     # --contrast 0.5 \

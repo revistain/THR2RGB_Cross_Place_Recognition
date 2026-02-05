@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=4
+CUDA_VISIBLE_DEVICES=3
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
@@ -13,7 +13,7 @@ python3 fast_inference.py \
     --num_trainable_blocks_THERMAL 0 \
     --soft_positives_dist_threshold 10 \
     --hard_positives_dist_threshold 10 \
-    --comment "224x224-Croco-ViTs-numBlock0-selaVPRReranking" \
+    --comment "224x224-Croco-ViTs-numBlock0-localLoss" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
@@ -23,8 +23,9 @@ python3 fast_inference.py \
     --recon_loss_type 'mse+ssim' \
     --num_decoder_depth 8 \
     --visualize_attention \
-    --use_reranking 'reconSelaVPR' \
-    --resume /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/224x224-Croco-ViTs-numBlock0/260201_102409/best_model.pth
+    --use_reranking 'diffGeM' \
+    --use_diff_loss \
+    --resume "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/224x224-CroCo-ViTs-numBlock0-sharedDecoder-diffLoss/260204_125126/best_model.pth"
 
     # --selaVPR_rerank_score_type 'none' \
     # --use_reranking 'reconSelaVPR' \

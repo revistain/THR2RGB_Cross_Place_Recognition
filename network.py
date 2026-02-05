@@ -17,6 +17,8 @@ from croco.models.masking import RandomMask
 from croco.models.criterion import MaskedMSE
 from pathlib import Path
 from swin_transformer import *
+from local_matching import LocalFeatureLoss
+from diff_loss import DiffLoss
      
 class GeM(nn.Module):
     def __init__(self, p=3, eps=1e-6, work_with_tokens=False):
@@ -353,6 +355,12 @@ class CrossModalVPR_Net(nn.Module):
 
         self.args = args
         self.shared_backbone = get_backbone(pretrained_foundation, foundation_model_path, args=args)
+        
+        if args.use_sela_local_loss:
+            self.MNNLocalFeatureLoss = LocalFeatureLoss().to(args.device)
+        if args.use_diff_loss:
+            self.DiffGeMLoss = DiffLoss(args).to(args.device)
+    
         self.output_dim = args.features_dim
         self.use_masked_inference = False
         self.use_only_cross_decdoer = args.use_only_cross_decoder
@@ -596,26 +604,27 @@ class CrossModalVPR_Net(nn.Module):
                 paired_thermal_dec = paired_thermal_full + self.decoder_pos_embed  # [B, 256, 768]
                 paired_rgb_dec = paired_rgb_full + self.decoder_pos_embed  # [B, 256, 768]
                 
+                target_full_dec = torch.cat([thermal_full_dec, rgb_full_dec], dim=0)
+                ref_full_dec = torch.cat([paired_rgb_dec, paired_thermal_dec], dim=0)
+                
                 # 8. decoder 통과시키기
                 for blk in self.decoder_blocks:
-                    thermal_full_dec = blk(thermal_full_dec, paired_rgb_dec)
-                thermal_full_dec = self.decoder_norm(thermal_full_dec)
-
-                for blk in self.decoder_blocks:
-                    rgb_full_dec = blk(rgb_full_dec, paired_thermal_dec)
-                rgb_full_dec = self.decoder_norm(rgb_full_dec)
-
+                    target_full_dec = blk(target_full_dec, ref_full_dec)
+                target_full_dec = self.decoder_norm(target_full_dec)
+                
+                thermal_reconed_dec = target_full_dec[:thermal_full_dec.shape[0],:,:]
+    
                 recon_loss_fn = self.calculate_recon_loss
                 
                 # 9. Prediction Head
-                reconstructed_thermal_patches = self.prediction_thermal_head(thermal_full_dec)
+                reconstructed_thermal_patches = self.prediction_thermal_head(thermal_reconed_dec)
                 reconstructed_rgb_patches = self.prediction_rgb_head(rgb_full_dec)
                 target_thermal_patches = self.patchify(x)
                 target_rgb_patches = self.patchify(paired_rgb)
 
                 # 10. Reconstruction loss 계산
                 recon_loss_thermal = recon_loss_fn(reconstructed_thermal_patches, mask_thermal, target_thermal_patches)
-                recon_loss_rgb = recon_loss_fn(reconstructed_rgb_patches, mask_rgb, target_rgb_patches)
+                recon_loss_rgb = recon_loss_fn(reconstructed_rgb_patches, mask_rgb, target_rgb_patches)    
             else:
                 # when inference
                 # NOTE: 부르는 곳에 no_grad 호출하기
@@ -714,51 +723,76 @@ class CrossModalVPR_Net(nn.Module):
         # Add positional embedding
         thermal_dec = thermal_feat + self.decoder_pos_embed
         rgb_dec = rgb_feat + self.decoder_pos_embed
+        target_dec = torch.cat([thermal_dec, rgb_dec], dim=0)
+        ref_dec = torch.cat([rgb_dec, thermal_dec], dim=0)
 
         RETURN_LAYER_NUM = return_layer
         # Direction 1: Thermal decoded with RGB as context
-        layer_thermal_decoded = None
-        thermal_decoded = thermal_dec.clone()
+        layer_target_decoded = None
+        target_decoded = target_dec.clone()
         for idx, blk in enumerate(self.decoder_blocks):
-            thermal_decoded = blk(thermal_decoded, rgb_dec)
+            target_decoded = blk(target_decoded, ref_dec)
             if idx == RETURN_LAYER_NUM - 1:
-                layer_thermal_decoded = thermal_decoded.clone()
+                layer_target_decoded = target_decoded.clone()
                 break
-        thermal_decoded = layer_thermal_decoded
-        thermal_decoded = self.decoder_norm(thermal_decoded)
-
-        # Direction 2: RGB decoded with Thermal as context
-        layer_rgb_decoded = None
-        rgb_decoded = rgb_dec.clone()
-        for idx, blk in enumerate(self.decoder_blocks):
-            rgb_decoded = blk(rgb_decoded, thermal_dec)
-            if idx == RETURN_LAYER_NUM - 1:
-                layer_rgb_decoded = rgb_decoded.clone()
-                break
-        rgb_decoded = layer_rgb_decoded
-        rgb_decoded = self.decoder_norm(rgb_decoded)
+        target_decoded = layer_target_decoded
+        target_decoded = self.decoder_norm(target_decoded)
 
         # Reshape to spatial format: [B, N, C] -> [B, C, H, W]
-        B = thermal_decoded.shape[0]
-        H = W = int(math.sqrt(thermal_decoded.shape[1]))  # 16
+        B = target_decoded.shape[0]
+        H = W = int(math.sqrt(target_decoded.shape[1]))  # 16
 
-        thermal_spatial = thermal_decoded.permute(0, 2, 1).view(B, -1, H, W)  # [B, 768, 16, 16]
-        rgb_spatial = rgb_decoded.permute(0, 2, 1).view(B, -1, H, W)          # [B, 768, 16, 16]
+        target_spatial = target_decoded.permute(0, 2, 1).view(B, -1, H, W)  # [B, 768, 16, 16]
 
         # Bilinear interpolation: [B, 768, 16, 16] -> [B, 768, 61, 61]
         # thermal_local = F.interpolate(thermal_spatial, size=(61, 61), mode='bilinear', align_corners=False)
         # rgb_local = F.interpolate(rgb_spatial, size=(61, 61), mode='bilinear', align_corners=False)
-        thermal_local = self.local_adapt(thermal_spatial)
-        thermal_local = thermal_local.permute(0, 2, 3, 1)  # [B, 61, 61, 768]
-
-        rgb_local = self.local_adapt(rgb_spatial)
-        rgb_local = rgb_local.permute(0, 2, 3, 1)          # [B, 61, 61, 768]
+        target_local = self.local_adapt(target_spatial)
+        target_local = target_local.permute(0, 2, 3, 1)  # [B, 61, 61, 768]
                 
         # Permute to [B, H, W, C] and L2 normalize
-        thermal_decoded_local = F.normalize(thermal_local, p=2, dim=-1)
-        rgb_decoded_local = F.normalize(rgb_local, p=2, dim=-1)
+        target_decoded_local = F.normalize(target_local, p=2, dim=-1)
+        return target_decoded_local[:B//2,:,:,:], target_decoded_local[B//2:,:,:,:]
 
-        return thermal_decoded_local, rgb_decoded_local
+    def forward_recon_diff_decode(self, thermal_feat, rgb_feat, return_layer=-1):
+        """
+        Bidirectional CroCo decoding for reconSelaVPR reranking.
+
+        Args:
+            thermal_feat: [B, 256, 384] encoder patch features from thermal
+            rgb_feat: [B, 256, 384] encoder patch features from RGB
+        Returns:
+            thermal_decoded_local: [B, 61, 61, 384] thermal decoded with RGB context
+            rgb_decoded_local: [B, 61, 61, 384] RGB decoded with thermal context
+        """
+        # Add positional embedding
+        # feature / positional 따로 interpolation
+        # FIXME: 일단 size up 안하고 실험해보기
+        thermal_dec = thermal_feat + self.decoder_pos_embed
+        rgb_dec = rgb_feat + self.decoder_pos_embed
+        target_dec = torch.cat([thermal_dec, rgb_dec], dim=0)
+        ref_dec = torch.cat([rgb_dec, thermal_dec], dim=0)
+
+        RETURN_LAYER_NUM = return_layer
+        # Direction 1: Thermal decoded with RGB as context
+        layer_target_decoded = None
+        target_decoded = target_dec.clone()
+        for idx, blk in enumerate(self.decoder_blocks):
+            target_decoded = blk(target_decoded, ref_dec)
+            if idx == RETURN_LAYER_NUM - 1:
+                layer_target_decoded = target_decoded.clone()
+                break
+        target_decoded = layer_target_decoded
+        target_decoded = self.decoder_norm(target_decoded)
+
+        # Reshape to spatial format: [B, N, C] -> [B, C, H, W]
+        B = target_decoded.shape[0]
+        H = W = int(math.sqrt(target_decoded.shape[1]))  # 16
+
+        target_spatial = target_decoded.permute(0, 1, 2)
+        target_decoded = F.normalize(target_spatial, p=2, dim=-1)
+        return target_decoded[:B//2,:,:], target_decoded[B//2:,:,:]
+
 
     def forward(self, x, flags, paired_rgb=None, return_mask=False, return_masked_patch=False):
         if not isinstance(flags, torch.Tensor):

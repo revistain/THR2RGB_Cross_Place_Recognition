@@ -102,11 +102,12 @@ class Parser():
         self.parser.add_argument("--use_cls_for_vpr", action='store_true', default=False)
         self.parser.add_argument("--use_recon_loss", action='store_true', default=False)
         self.parser.add_argument("--use_reranking", type=str, default="none",
-                                 choices=['none', 'recon', 'r2former', 'selaVPR', 'reconSelaVPR', 'GeM_KL'])
+                                 choices=['none', 'recon', 'r2former', 'selaVPR', 'reconSelaVPR', 'GeM_KL', 'reconDiffVPR', 'diffGeM'])
         self.parser.add_argument("--features_dim", type=int, default=768)
         self.parser.add_argument("--selaVPR_rerank_score_type", type=str, default="none", choices=['none', 'quantile_attn', 'mul_cossim'])
         self.parser.add_argument("--visualize_attention", action='store_true', default=False, help="Visualize CLS and GeM attention maps during inference")
         self.parser.add_argument("--use_sela_local_loss", action='store_true', default=False)
+        self.parser.add_argument("--use_diff_loss", action='store_true', default=False)
 
         # Swin Decoder settings
         self.parser.add_argument("--use_swin_decoder", action='store_true', default=False,

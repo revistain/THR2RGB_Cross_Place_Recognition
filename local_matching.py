@@ -18,8 +18,8 @@ class LocalFeatureLoss(torch.nn.Module):
         anchor, positive, negative = feature_data[0], feature_data[1], feature_data[2]
         simP = local_sim(anchor,positive,trainflag=True)
         simN = local_sim(anchor,negative,trainflag=True)
-        # loss = torch.sum(torch.clamp(-simP+simN+0., min=0.))
-        loss = torch.sum(-simP+simN+0.)
+        loss = torch.sum(torch.clamp(-simP+simN+0., min=0.))
+        # loss = torch.sum(-simP+simN+0.)
         return loss
     
 def plot_attention_1d(attn_map):
@@ -73,7 +73,7 @@ def get_keypoints(img_size):
                                          dtype=int), N_w)
     return np.transpose(keypoints)
 
-def match_batch_tensor(fm1, fm2, trainflag, grid_size, query_attn_map=None, db_attn_map=None, method_type='none'):
+def match_tensor(fm1, fm2, trainflag, grid_size, query_attn_map=None, db_attn_map=None, method_type='none'):
     '''
     fm1: (l,D)
     fm2: (N,l,D)
@@ -148,7 +148,7 @@ def local_sim(features_1, features_2, trainflag=False, query_attn_map=None, db_a
         similarity = torch.zeros(B).cuda()
         for i in range(B):
             query, pred = queries[i], preds[i].unsqueeze(0)
-            similarity[i] = match_batch_tensor(query, pred, trainflag, grid_size=(H, W), method_type=method_type)
+            similarity[i] = match_tensor(query, pred, trainflag, grid_size=(H, W), method_type=method_type)
         return similarity
     else:
         query = features_1
@@ -163,6 +163,62 @@ def local_sim(features_1, features_2, trainflag=False, query_attn_map=None, db_a
             query_attn_map = F.interpolate(query_attn_map, size=(H, W), mode='bilinear', align_corners=False).squeeze(0).squeeze(0)
             db_attn_map = F.interpolate(db_attn_map, size=(H, W), mode='bilinear', align_corners=False).squeeze(1)
         
-        scores = match_batch_tensor(query, preds, trainflag, grid_size=(H, W),
+        scores = match_tensor(query, preds, trainflag, grid_size=(H, W),
+                    query_attn_map=query_attn_map, db_attn_map=db_attn_map, method_type=method_type)
+        return scores
+
+def match_tensor_batch(fm1, fm2, trainflag, grid_size, query_attn_map=None, db_attn_map=None, method_type='none'):
+    '''
+    fm1: (N,l,D)
+    fm2: (N,l,D)
+    '''
+    M = fm2 @ fm1.transpose(-2, -1) # (N,l,l) # Similarity Matrix # dot product로만으로도 cosine 유사도 가능 (if L2 normed)
+    # M.shape: [5, 3721, 3721]
+    
+    max1 = torch.argmax(M, dim=1) # (N,l) # fm1이 보는 fm2에서 제일 유사한 index들
+    max2 = torch.argmax(M, dim=2) # (N,l) # fm2이 보는 fm1에서 제일 유사한 index들
+    # M은 (Batch, DB_Row, Query_Col)
+    m = max2[torch.arange(M.shape[0]).reshape((-1,1)), max1] # (N, l) # MNN
+    valid = torch.arange(M.shape[-1]).repeat((M.shape[0],1)).cuda() == m # (N, l) bool # MNN matched?
+    scores = torch.zeros(fm2.shape[0]).cuda()
+        
+    for i in range(fm2.shape[0]):
+        idx1 = torch.nonzero(valid[i,:]).squeeze() # matching된 fm1 index들
+        idx2 = max1[i,:][idx1] # matching된 fm2 index들
+        assert idx1.shape==idx2.shape
+
+        if trainflag:
+            if len(idx1.shape)>0:      
+                similarity = torch.mean(torch.sum(fm1[i][idx1] * fm2[i][idx2],dim=1),dim=0)
+            else:
+                print("No mutual nearest neighbors!")
+                similarity = torch.mean(torch.sum(fm1[i] * fm2[i],dim=1),dim=0)
+            return similarity
+        else:
+            if len(idx1.shape)<1:
+                scores[i] = 0
+            else:
+                scores[i] = len(idx1)
+    return scores
+
+def local_sim_batch(features_1, features_2, trainflag=False, query_attn_map=None, db_attn_map=None, method_type='none'):
+    B, H, W, C = features_2.shape
+    if trainflag:
+        queries = features_1
+        preds = features_2
+        queries,preds = queries.view(B, H*W, C),preds.view(B, H*W, C)
+        similarity = torch.zeros(B).cuda()
+        for i in range(B):
+            query, pred = queries[i], preds[i].unsqueeze(0)
+            similarity[i] = match_tensor(query, pred, trainflag, grid_size=(H, W), method_type=method_type)
+        return similarity
+    else:
+        query = features_1
+        preds = features_2
+        query, preds = query.view(B, H*W, C),preds.view(B, H*W, C)
+        # query: [5, 3721, 128]
+        # preds: [5, 3721, 128]
+        
+        scores = match_tensor_batch(query, preds, trainflag, grid_size=(H, W),
                     query_attn_map=query_attn_map, db_attn_map=db_attn_map, method_type=method_type)
         return scores
