@@ -591,7 +591,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
 
                 # Select 5 random queries for visualization
                 import random
-                num_vis_queries = 5
+                num_vis_queries = 2
                 vis_query_indices = random.sample(range(eval_ds.queries_num), min(num_vis_queries, eval_ds.queries_num))
                 vis_save_dir = os.path.join(args.save_dir, f'diffGeM_attn_vis_{seq_name}')
                 logging.info(f"Will visualize attention maps for queries: {vis_query_indices}")

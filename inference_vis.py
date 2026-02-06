@@ -1,18 +1,3 @@
-#!/usr/bin/env python3
-"""
-Inference Visualization Script
-
-Load a pretrained checkpoint and visualize:
-1. Attention maps (last and penultimate layers)
-2. MNN (Mutual Nearest Neighbor) matches (if selaVPR is enabled)
-
-Usage:
-python inference_vis.py --checkpoint_path /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/224x224-GeM-ViTs/260127_135254/best_model.pth --num_samples 4
-
-
-The script automatically loads config.yaml from the checkpoint directory.
-"""
-
 import os
 import sys
 import argparse

@@ -30,7 +30,6 @@ import network
 import network_only_GeM
 from local_matching import LocalFeatureLoss
 from pathlib import Path
-from diff_loss import DiffLoss
 
 def set_seed(seed=42):
     torch.manual_seed(seed)
@@ -74,7 +73,7 @@ if __name__ == "__main__":
     train_ds = datasets_T2R.BaseSTheReODual(args, DATASET_FOLDER, split='train')
     logging.info(f"[Train - KAIST] Database: {train_ds.database_num}, Queries: {train_ds.queries_num}, Total: {len(train_ds)}")
 
-    args.sequences = ['SNU', 'Valley']
+    args.sequences = ['Valley', 'SNU']
     test_sequences = args.sequences
     test_ds_list = []
     for seq in test_sequences:
@@ -83,6 +82,20 @@ if __name__ == "__main__":
         test_ds_list.append(test_ds)
         logging.info(f"[Test - {seq}] Database: {test_ds.database_num}, Queries: {test_ds.queries_num}, Total: {len(test_ds)}")
 
+    '''Model'''
+    if args.use_recon_loss:
+        model = network.CrossModalVPR_Net(
+            args,
+            pretrained_foundation = True,
+            foundation_model_path = args.foundation_model_path,
+        )
+    else:
+        model = network_only_GeM.CrossModalVPR_Net(
+            args,
+            pretrained_foundation = True,
+            foundation_model_path = args.foundation_model_path,
+        )
+
     '''Resume from checkpoint'''
     if args.resume:
         model, _, best_r1, start_epoch_num, not_improved_num = utils.resume_train(args, model, strict=False)
@@ -90,82 +103,29 @@ if __name__ == "__main__":
         logging.info(f"Resuming from epoch {start_epoch_num}")
     else:
         best_r1 = start_epoch_num = not_improved_num = 0
-        
-        '''Model'''
-        if args.use_recon_loss:
-            model = network.CrossModalVPR_Net(
-                args,
-                pretrained_foundation = True,
-                foundation_model_path = args.foundation_model_path,
-            )
-        else:
-            model = network_only_GeM.CrossModalVPR_Net(
-                args,
-                pretrained_foundation = True,
-                foundation_model_path = args.foundation_model_path,
-            )
+    
             
     model = model.to(args.device)
     model = torch.nn.DataParallel(model)
 
-    backbone_params = []
-    other_params    = []
-    print("="*30)
-    print("- Tuning RGB backbone layers: ", args.num_trainable_blocks_RGB)
-    print("- Tuning THERMAL backbone layers: ", args.num_trainable_blocks_THERMAL)
-    print("="*30)
-    for name, param in model.module.shared_backbone.named_parameters():
-        if "adapter" not in name:
-            param.requires_grad = False
-        for i in range(args.num_trainable_blocks_RGB):
-            num_blocks = len(model.module.shared_backbone.blocks)
-            model.module.shared_backbone.blocks[num_blocks - i - 1].requires_grad_(True)
-
-    for n, m in model.named_modules():
-        if 'adapter' in n:
-            for n2, m2 in m.named_modules():
-                if 'D_fc2' in n2:
-                    if isinstance(m2, nn.Linear):
-                        nn.init.constant_(m2.weight, 0.)
-                        nn.init.constant_(m2.bias, 0.)
-            for n2, m2 in m.named_modules():
-                if 'conv' in n2:
-                    if isinstance(m2, nn.Conv2d):
-                        nn.init.constant_(m2.weight, 0.00001)
-                        nn.init.constant_(m2.bias, 0.00001)
-    
     '''Loss Function - Initialize early for optimizer'''
     GlobalTriplet = nn.TripletMarginLoss(margin=args.margin, p=2, reduction="sum")
 
-    backbone_params = []
-    other_params = []
     diff_params = []
-    print("="*30)
-    print(f"Using seperate LR !!!")
-    print(f"- backbone LR: \t{args.backbone_lr}")
-    print(f"- other LR: \t{args.lr}")
-    print("="*30)
-
     for name, param in model.named_parameters():
         if param.requires_grad:
-            if 'shared_backbone' in name:
-                backbone_params.append(param)
-            elif 'DiffGeMLoss' in name:
+            param.requires_grad = False
+            if 'DiffGeMLoss' in name or 'decoder_blocks' in name:
                 diff_params.append(param)
-                print(name)
-            else: other_params.append(param)
-
+                param.requires_grad = True
+                print(f" -> Unfrozen: {name}")
 
     if args.optim == "adam":
         optimizer = torch.optim.Adam([
-            {'params': backbone_params, 'lr': args.lr},
-            {'params': other_params, 'lr': args.lr},
             {'params': diff_params, 'lr': args.lr},
         ])
     elif args.optim == "sgd":
         optimizer = torch.optim.SGD([
-            {'params': backbone_params, 'lr': args.lr, 'momentum': 0.9, 'weight_decay': 0.001},
-            {'params': other_params, 'lr': args.lr, 'momentum': 0.9, 'weight_decay': 0.001},
             {'params': diff_params, 'lr': args.lr, 'momentum': 0.9, 'weight_decay': 0.001},
         ])
 
@@ -252,28 +212,22 @@ if __name__ == "__main__":
                 triplets_local_indexes = torch.transpose(
                     triplets_local_indexes.view(args.train_batch_size, args.negs_num_per_query, 3), 1, 0)
                 
-                overall_loss = 0
                 triplet_loss_sum = 0
                 rerank_loss_sum = 0
                 local_loss_sum = 0
                 diff_loss_sum = 0
+                lambdas = []
+                optimizer.zero_grad()
+                num_steps = len(triplets_local_indexes)
                 # 각 triplet에 대해 triplet loss 계산
                 for triplets in triplets_local_indexes:
+                    overall_triplet_loss = 0
                     queries_indexes, positives_indexes, negatives_indexes = triplets.T
                     
                     # 각각에 해당하는 descriptor 추출
                     query_features = global_features[queries_indexes]
                     positive_features = global_features[positives_indexes]
                     negative_features = global_features[negatives_indexes]
-
-                    # Triplet Loss
-                    triplet_loss = GlobalTriplet(query_features, positive_features, negative_features)
-                    overall_loss += triplet_loss
-                    triplet_loss_sum += triplet_loss
-
-                    ## GeM / CLS cosine sim 구하기
-                    # cls_desc = out["x_norm_clstoken"]
-                    # cosine_sim = (global_desc * cls_desc) / (np.norm(global_desc) * np.norm(cls_desc))
                     
                     # Reranking loss
                     if args.use_recon_loss and args.r2_penultimate_layer:
@@ -286,7 +240,7 @@ if __name__ == "__main__":
                         rerank_loss = reranker(rerank_patch_embedding.detach(), cls_attn_map.detach(),
                                             queries_indexes, positives_indexes, negatives_indexes,
                                             query_features.detach(), positive_features.detach(), negative_features.detach())
-                        overall_loss += rerank_loss
+                        overall_triplet_loss += rerank_loss
                         rerank_loss_sum += rerank_loss
 
                     if args.use_sela_local_loss:
@@ -294,50 +248,34 @@ if __name__ == "__main__":
                                     local_embedding[queries_indexes],
                                     local_embedding[positives_indexes],
                                     local_embedding[negatives_indexes]])
-                        local_loss = local_loss / 10
-                        overall_loss += local_loss
+                        overall_triplet_loss += local_loss
                         local_loss_sum += local_loss
                         
                     # new reranking loss
                     if args.use_diff_loss:
-                        diff_loss = model.module.DiffGeMLoss(
+                        diff_loss, lambda_ = model.module.DiffGeMLoss(
                             model.module, queries_indexes, positives_indexes, negatives_indexes,
-                            global_features.detach(), patch_embedding.detach()
+                            global_features.detach(), patch_embedding.detach(),
+                            use_train=True, return_lambda=True
                         )
-                        overall_loss += diff_loss
+                        lambdas.append(lambda_.item())
+                        overall_triplet_loss += diff_loss
                         diff_loss_sum += diff_loss
-
-                # train_batch_size: 4, arg.negs_num_per_query: 10
-                if args.use_recon_loss:
-                    recon_weight = args.recon_weight
-                    thermal_recon_loss = recon_loss[0]
-                    rgb_recon_loss = recon_loss[1]
-                    recon_loss = (thermal_recon_loss + rgb_recon_loss) / 2
-                    recon_loss = recon_loss.mean()
-                    overall_loss += (recon_loss * recon_weight)
                 
-                    wandb.log({
-                        "train/recon_loss(Thermal)": thermal_recon_loss.mean().item()
-                            * recon_weight / (args.train_batch_size * args.negs_num_per_query),
-                        "train/recon_loss(Rgb)": rgb_recon_loss.mean().item()
-                            * recon_weight / (args.train_batch_size * args.negs_num_per_query),
-                    }, step=global_step)
-
-                overall_loss /= (args.train_batch_size * args.negs_num_per_query)
-
+                    overall_triplet_loss /= (args.train_batch_size * args.negs_num_per_query)
+                    overall_triplet_loss.backward()
+                    
                 del global_features, query_features, positive_features, negative_features
-
-                optimizer.zero_grad()
-                overall_loss.backward()
                 optimizer.step()
 
-                batch_loss = overall_loss.item()
+                batch_loss = overall_triplet_loss.item()
                 epoch_losses = np.append(epoch_losses, batch_loss)
 
                 # wandb logging
                 wandb.log({
-                    "train/overall_loss": overall_loss.item(),
-                    "train/triplet_loss(scaled)": triplet_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query),
+                    "train/overall_loss": overall_triplet_loss.item(),
+                    "train/triplet_loss(scaled)": triplet_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query)
+                        if isinstance(triplet_loss_sum, torch.Tensor) else 0,
                     "train/reranking_loss(scaled)": rerank_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query)
                         if isinstance(rerank_loss_sum, torch.Tensor) else 0,
                     "train/local_loss(scaled)": local_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query)
@@ -351,7 +289,7 @@ if __name__ == "__main__":
                 # del patch_embedding, masks, cls_attn_map, penultimate_patch_embedding, masked_patch_embedding
                 # del overall_loss, triplet_loss, recon_loss
                 if args.use_fast_track: break
-            
+            print("Mean of Lambda: ", sum(lambdas) / len(lambdas))
             logging.info(f"Epoch[{epoch_num:02d}]({loop_num + 1}/{loops_num}): " +
                         f"current batch triplet loss = {batch_loss:.8f}, " +
                         f"average epoch triplet loss = {epoch_losses.mean():.8f}")
@@ -378,7 +316,6 @@ if __name__ == "__main__":
             save_dir=os.path.join(args.save_dir, 'attention_maps'),
             comment=args.comment
         )
-
 
         # wandb 로깅 (epoch 단위)
         wandb.log({"train/epoch_avg_loss": epoch_losses.mean(), "epoch": epoch_num}, step=global_step)
@@ -418,8 +355,7 @@ if __name__ == "__main__":
                 f"Not improved: {not_improved_num} / {args.patience}: best R@1 = {best_r1:.1f}, current R@1 = {(current_avg_r1):.1f}")
             if not_improved_num >= args.patience:
                 print(f"Performance did not improve for {not_improved_num} epochs.")
-                logging.info(f"Performance did not improve for {not_improved_num} epochs. Stop training.")
-                # break # 굳이 멈출 필요까지야
+                logging.info(f"Performance did not improve for {not_improved_num} epochs.")
         
         print(f"Comment: {args.comment} :: Epoch {epoch_num:02d}")
         import gc

@@ -37,14 +37,24 @@ def resume_train(args, model, optimizer=None, strict=False):
     if type(args.resume) is list and len(args.resume) != 0:
         args.resume = args.resume[0]
     checkpoint = torch.load(args.resume)
+    state_dict = checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        name = k.replace("module.", "") 
+        new_state_dict[name] = v
+        
     start_epoch_num = checkpoint["epoch_num"]
-    model.load_state_dict(checkpoint["model_state_dict"], strict=strict)
+    missing, unexpected = model.load_state_dict(new_state_dict, strict=strict)
+    
+    print(f"Weights loaded.")
+    print(f"- Missing keys (should be DiffLoss only): {len(missing)}")
+    print(f"- Unexpected keys (should be 0): {len(unexpected)}")
+    
     if optimizer:
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-    # best_r5 = checkpoint["best_r5"]
-    not_improved_num = checkpoint["not_improved_num"]
+        optimizer.load_state_dict(new_state_dict)
     if args.resume.endswith("last_model.pth"):  # Copy best model to current save_dir
         shutil.copy(args.resume.replace("last_model.pth", "best_model.pth"), args.save_dir)
+    not_improved_num = checkpoint["not_improved_num"]
     return model, optimizer, None, start_epoch_num, not_improved_num
 
 cached_timestamp = None

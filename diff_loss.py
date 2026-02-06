@@ -8,27 +8,31 @@ class DiffLoss(torch.nn.Module):
         super().__init__()
         self.input_dim = args.features_dim
         self.patch_count = int(args.resize[0]/14)*int(args.resize[1]/14)
-        self.lambda_q1 = nn.Parameter(torch.zeros(self.input_dim, dtype=torch.float32).normal_(mean=0,std=0.1))
-        self.lambda_q2 = nn.Parameter(torch.zeros(self.input_dim, dtype=torch.float32).normal_(mean=0,std=0.1))
-        self.lambda_k1 = nn.Parameter(torch.zeros(self.input_dim, dtype=torch.float32).normal_(mean=0,std=0.1))
-        self.lambda_k2 = nn.Parameter(torch.zeros(self.input_dim, dtype=torch.float32).normal_(mean=0,std=0.1))
+
+        # Lambda parameters for differential attention
+        self.lambda_q1 = nn.Parameter(torch.zeros(self.input_dim, dtype=torch.float32).normal_(mean=0, std=0.1))
+        self.lambda_k1 = nn.Parameter(torch.zeros(self.input_dim, dtype=torch.float32).normal_(mean=0, std=0.1))
+
+        # GeM projection layers
         self.GeM_linear1 = nn.Linear(self.input_dim, self.input_dim)
         self.GeM_linear2 = nn.Linear(self.input_dim, self.input_dim)
+
+        # Score prediction network
+        # Input: [B, N, 2*input_dim] -> Output: [B, 1]
         self.score_linear = nn.Sequential(
-            nn.Linear(self.patch_count*2, self.patch_count),
+            nn.Linear(self.input_dim * 2, self.input_dim),
             nn.ReLU(),
-            nn.Linear(self.patch_count, 1),
-        )        
+            nn.Linear(self.input_dim, 32),
+            nn.Flatten(),
+            nn.Linear(self.patch_count * 32, 1)
+        )
         self.BCE = torch.nn.BCEWithLogitsLoss().cuda()
-        
+
         self.depth = depth
         self.args = args
-        
-    def lambda_init_fn(self, depth):
-        return 0.8 - 0.6 * math.exp(-0.3 * depth)
 
     def forward(self, model, queries_indexes, positives_indexes, negatives_indexes, \
-                      global_features, patch_embedding):
+                      global_features, patch_embedding, use_train=False, return_lambda=False):
         # GeM pooling
         query_GeM, pos_GeM, neg_GeM = \
                 global_features[queries_indexes], \
@@ -48,14 +52,23 @@ class DiffLoss(torch.nn.Module):
         neg_patches = neg_patches + positional_embedding
         
         # Make it to batch for fast decode
-        target_batch = torch.cat([query_patches, query_patches, pos_patches, neg_patches], dim=0)
-        ref_batch = torch.cat([pos_patches, neg_patches, query_patches, query_patches], dim=0)
 
         # Pass it through decoder (no_grad to prevent gradients flowing to decoder)
-        with torch.no_grad():
+        if use_train == True:
+            target_batch = torch.cat([query_patches, query_patches, pos_patches, neg_patches], dim=0)
+            ref_batch = torch.cat([pos_patches, neg_patches, query_patches, query_patches], dim=0)
+            
             for blk in model.decoder_blocks:
                 target_batch = blk(target_batch, ref_batch)
             target_batch = model.decoder_norm(target_batch)
+        else:
+            target_batch = torch.cat([query_patches, query_patches, pos_patches, neg_patches], dim=0)
+            ref_batch = torch.cat([pos_patches, neg_patches, query_patches, query_patches], dim=0)
+            
+            with torch.no_grad():
+                for blk in model.decoder_blocks:
+                    target_batch = blk(target_batch, ref_batch)
+                target_batch = model.decoder_norm(target_batch)
 
         # split the decoded result
         chunks = torch.chunk(target_batch, 4, dim=0)
@@ -84,26 +97,23 @@ class DiffLoss(torch.nn.Module):
         neg_query_GeM1_attn_map = F.softmax((neg_GeM1 @ neg_query_recon.transpose(-2, -1)) / sqrt_d, dim=-1).squeeze(1)
         neg_query_GeM2_attn_map = F.softmax((neg_GeM2 @ neg_query_recon.transpose(-2, -1)) / sqrt_d, dim=-1).squeeze(1)
         
-        # calculate differential map
-        lambda_init = self.lambda_init_fn(self.depth)
-        lambda_1 = torch.exp(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float())
-        lambda_2 = torch.exp(torch.sum(self.lambda_q2 * self.lambda_k2, dim=-1).float())
-        lambda_ = lambda_1 - lambda_2 + lambda_init
+        # calculate differential map (simplified to avoid gradient vanishing)
+        lambda_ = torch.sigmoid(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float())
         
         query_pos_diff_attn_map = query_pos_GeM1_attn_map - lambda_ * query_pos_GeM2_attn_map
         pos_query_diff_attn_map = pos_query_GeM1_attn_map - lambda_ * pos_query_GeM2_attn_map
         query_neg_diff_attn_map = query_neg_GeM1_attn_map - lambda_ * query_neg_GeM2_attn_map
         neg_query_diff_attn_map = neg_query_GeM1_attn_map - lambda_ * neg_query_GeM2_attn_map
-        
-        # 아래의 shape: [4, 256]
-        query_pos_diff_attn_map_flat = query_pos_diff_attn_map.reshape(self.args.train_batch_size, -1)
-        pos_query_diff_attn_map_flat = pos_query_diff_attn_map.reshape(self.args.train_batch_size, -1)
-        query_neg_diff_attn_map_flat = query_neg_diff_attn_map.reshape(self.args.train_batch_size, -1)
-        neg_query_diff_attn_map_flat = neg_query_diff_attn_map.reshape(self.args.train_batch_size, -1)
-        
-        # before fc layer
-        query_pos_concated = torch.cat([query_pos_diff_attn_map_flat, pos_query_diff_attn_map_flat], dim=-1)
-        neg_query_concated = torch.cat([query_neg_diff_attn_map_flat, neg_query_diff_attn_map_flat], dim=-1)
+
+        # Multiply attention with features (element-wise)
+        query_pos_attention = (query_pos_diff_attn_map.unsqueeze(2) * query_pos_recon)
+        pos_query_attention = (pos_query_diff_attn_map.unsqueeze(2) * pos_query_recon)
+        query_neg_attention = (query_neg_diff_attn_map.unsqueeze(2) * query_neg_recon)
+        neg_query_attention = (neg_query_diff_attn_map.unsqueeze(2) * neg_query_recon)
+
+        # Concatenate bidirectional attention-weighted features
+        query_pos_concated = torch.cat([query_pos_attention, pos_query_attention], dim=-1)
+        neg_query_concated = torch.cat([query_neg_attention, neg_query_attention], dim=-1)
         
         # pass through fc layer (BC가 내부적으로 sigmoid 적용)
         pos_scores = self.score_linear(query_pos_concated)
@@ -114,6 +124,10 @@ class DiffLoss(torch.nn.Module):
         target[:pos_scores.shape[0]] = 1
         rerank_loss = self.BCE(torch.cat([pos_scores, neg_scores], dim=0).squeeze(1), target)
 
+        if return_lambda:
+            print(f"sig lambda: {lambda_}")
+            return rerank_loss, lambda_
+        
         return rerank_loss
 
     def inference(self, model, query_patches, query_GeM, candidate_patches, candidate_GeMs):
@@ -172,23 +186,21 @@ class DiffLoss(torch.nn.Module):
         cand_query_GeM1_attn = F.softmax((candidate_GeM1 @ candidate_recon.transpose(-2, -1)) / sqrt_d, dim=-1).squeeze(1)
         cand_query_GeM2_attn = F.softmax((candidate_GeM2 @ candidate_recon.transpose(-2, -1)) / sqrt_d, dim=-1).squeeze(1)
 
-        # Differential attention
-        lambda_init = self.lambda_init_fn(self.depth)
-        lambda_1 = torch.exp(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float())
-        lambda_2 = torch.exp(torch.sum(self.lambda_q2 * self.lambda_k2, dim=-1).float())
-        lambda_ = lambda_1 - lambda_2 + lambda_init
+        # Differential attention (simplified to avoid gradient vanishing)
+        lambda_ = torch.sigmoid(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float())
 
         query_cand_diff_attn = query_cand_GeM1_attn - lambda_ * query_cand_GeM2_attn  # [K, N]
         cand_query_diff_attn = cand_query_GeM1_attn - lambda_ * cand_query_GeM2_attn  # [K, N]
 
-        # Concatenate bidirectional attention maps
-        concat_attn = torch.cat([query_cand_diff_attn, cand_query_diff_attn], dim=-1)  # [K, 2N]
+        # Multiply attention with features (element-wise)
+        query_cand_attention = (query_cand_diff_attn.unsqueeze(2) * query_recon)  # [K, N, D]
+        cand_query_attention = (cand_query_diff_attn.unsqueeze(2) * candidate_recon)  # [K, N, D]
 
-        # Score prediction
-        scores = self.score_linear(concat_attn).squeeze(-1)  # [K]
+        # Concatenate bidirectional attention-weighted features
+        concat_attn = torch.cat([query_cand_attention, cand_query_attention], dim=-1)  # [K, N, 2D]
 
-        # Apply sigmoid to get probability-like scores
-        scores = torch.sigmoid(scores)
+        # Score prediction (sigmoid applied since BCEWithLogitsLoss used in training)
+        scores = torch.sigmoid(self.score_linear(concat_attn)).squeeze(-1)  # [K]
 
         return scores
 
@@ -257,11 +269,8 @@ class DiffLoss(torch.nn.Module):
         cand_query_GeM1_attn = F.softmax((candidate_GeM1 @ candidate_recon.transpose(-2, -1)) / sqrt_d, dim=-1).squeeze(1)
         cand_query_GeM2_attn = F.softmax((candidate_GeM2 @ candidate_recon.transpose(-2, -1)) / sqrt_d, dim=-1).squeeze(1)
 
-        # Differential attention
-        lambda_init = self.lambda_init_fn(self.depth)
-        lambda_1 = torch.exp(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float())
-        lambda_2 = torch.exp(torch.sum(self.lambda_q2 * self.lambda_k2, dim=-1).float())
-        lambda_ = lambda_1 - lambda_2 + lambda_init
+        # Differential attention (simplified to avoid gradient vanishing)
+        lambda_ = torch.sigmoid(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float())
 
         query_cand_diff_attn = query_cand_GeM1_attn - lambda_ * query_cand_GeM2_attn
         cand_query_diff_attn = cand_query_GeM1_attn - lambda_ * cand_query_GeM2_attn
