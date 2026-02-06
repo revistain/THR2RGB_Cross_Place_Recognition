@@ -29,7 +29,7 @@ evening_pose_pd = pd.read_csv(pose_path[2], header=None)
 DB_DIS_TH = 5
 Query_DIS_TH = 1
 
-save_path = os.path.join('save_mat', seq)
+save_path = os.path.join('save_mat', 'train', seq)
 if not os.path.exists(save_path):
     os.makedirs(save_path)
     print(f"create {save_path} ")
