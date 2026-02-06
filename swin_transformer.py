@@ -381,5 +381,117 @@ class CroCoDecoderBlock(nn.Module):
         
         # Step 3: MLP
         x = x + self.mlp(self.norm3(x))
-        
+
+        return x
+
+
+class CroCoDecoderBlockSelfAttn(nn.Module):
+    """CroCoDecoderBlock with only Self-Attention (no Cross-Attention)"""
+    def __init__(self, dim=768, num_heads=12, mlp_ratio=4.0, drop_path=0.0):
+        super().__init__()
+
+        # Self-Attention components
+        self.norm1 = nn.LayerNorm(dim)
+        self.self_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
+
+        # MLP components
+        self.norm2 = nn.LayerNorm(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, mlp_hidden_dim),
+            nn.GELU(),
+            nn.Linear(mlp_hidden_dim, dim)
+        )
+
+        # DropPath for stochastic depth
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+        # Attention storage
+        self.self_attn_weights = None
+
+    def forward(self, x, y=None, return_attention=False):
+        """
+        Args:
+            x: [B, N, D] - decoder input
+            y: [B, M, D] - encoder output (ignored, kept for API compatibility)
+            return_attention: bool - attention map 반환 여부
+        Returns:
+            x: [B, N, D] - updated decoder features
+        """
+        # Step 1: Self-Attention
+        x_norm = self.norm1(x)
+        if return_attention:
+            self_out, self_attn_weights = self.self_attn(
+                x_norm, x_norm, x_norm,
+                need_weights=True,
+                average_attn_weights=True
+            )
+            self.self_attn_weights = self_attn_weights
+        else:
+            self_out = self.self_attn(x_norm, x_norm, x_norm)[0]
+        x = x + self.drop_path(self_out)
+
+        # Step 2: MLP
+        x = x + self.drop_path(self.mlp(self.norm2(x)))
+
+        return x
+
+
+class CroCoDecoderBlockCrossAttn(nn.Module):
+    """CroCoDecoderBlock with only Cross-Attention (no Self-Attention)"""
+    def __init__(self, dim=768, num_heads=12, mlp_ratio=4.0, drop_path=0.0):
+        super().__init__()
+
+        # Cross-Attention components
+        self.norm1 = nn.LayerNorm(dim)
+        self.norm_cross = nn.LayerNorm(dim)
+        self.cross_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
+
+        # MLP components
+        self.norm2 = nn.LayerNorm(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, mlp_hidden_dim),
+            nn.GELU(),
+            nn.Linear(mlp_hidden_dim, dim)
+        )
+
+        # DropPath for stochastic depth
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+        # Attention storage
+        self.cross_attn_weights = None
+
+    def forward(self, x, y, return_attention=False):
+        """
+        Args:
+            x: [B, N, D] - decoder input
+            y: [B, M, D] - encoder output (reference)
+            return_attention: bool - attention map 반환 여부
+        Returns:
+            x: [B, N, D] - updated decoder features
+        """
+        # Step 1: Cross-Attention
+        x_norm = self.norm1(x)
+        encoder_norm = self.norm_cross(y)
+        if return_attention:
+            cross_out, cross_attn_weights = self.cross_attn(
+                query=x_norm,
+                key=encoder_norm,
+                value=encoder_norm,
+                need_weights=True,
+                average_attn_weights=True
+            )
+            self.cross_attn_weights = cross_attn_weights
+        else:
+            cross_out = self.cross_attn(
+                query=x_norm,
+                key=encoder_norm,
+                value=encoder_norm
+            )[0]
+        x = x + self.drop_path(cross_out)
+
+        # Step 2: MLP
+        x = x + self.drop_path(self.mlp(self.norm2(x)))
+
         return x

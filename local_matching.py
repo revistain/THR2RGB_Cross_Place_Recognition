@@ -18,7 +18,7 @@ class LocalFeatureLoss(torch.nn.Module):
         anchor, positive, negative = feature_data[0], feature_data[1], feature_data[2]
         simP = local_sim(anchor,positive,trainflag=True)
         simN = local_sim(anchor,negative,trainflag=True)
-        loss = torch.sum(F.softplus(-simP + simN))
+        loss = torch.sum(F.softplus(-simP*0.95 + simN))
         # loss = torch.sum(torch.clamp(-simP+simN+0., min=0.))
         # loss = torch.sum(-simP+simN+0.)
         return loss

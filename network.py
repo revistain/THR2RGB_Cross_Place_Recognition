@@ -793,7 +793,6 @@ class CrossModalVPR_Net(nn.Module):
         target_decoded = F.normalize(target_spatial, p=2, dim=-1)
         return target_decoded[:B//2,:,:], target_decoded[B//2:,:,:]
 
-
     def forward(self, x, flags, paired_rgb=None, return_mask=False, return_masked_patch=False):
         if not isinstance(flags, torch.Tensor):
             flags = torch.tensor(flags, device=x.device)
@@ -862,7 +861,7 @@ class CrossModalVPR_Net(nn.Module):
             target=target,    # [B, 3, 256, 768]
         )
         return recon_loss
-    
+
 def get_backbone(pretrained_foundation, foundation_model_path, args=None):
     model_path = Path(foundation_model_path)
     model_name = model_path.parts[-1].lower()

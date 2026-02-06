@@ -9,8 +9,8 @@ from matplotlib import pyplot as plt
 from PIL import Image
 import cv2
 
+# rsync -avm -e 'ssh -p 20202' --include='*/' --include='pose/***' --exclude='*' /data/datasets/sthereo/ jwkim@211.180.114.160:/DATA2/datasets/PR/STheReO/
 np.random.seed(42)
-
 dataset_dir = '/data/datasets/sthereo'
 seq = 'KAIST'
 sequence_key = {'KAIST': ['sthereo_01_kaist_morning', 'sthereo_02_kaist_afternoon', 'sthereo_03_kaist_evening'], 
