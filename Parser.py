@@ -108,6 +108,13 @@ class Parser():
         self.parser.add_argument("--visualize_attention", action='store_true', default=False, help="Visualize CLS and GeM attention maps during inference")
         self.parser.add_argument("--use_sela_local_loss", action='store_true', default=False)
         self.parser.add_argument("--use_diff_loss", action='store_true', default=False)
+        
+        # Decoder DINO setting
+        self.parser.add_argument('--use_dino_decoder', action='store_true', default=False)
+        self.parser.add_argument('--dino_decoder_layer_start', type=int, default=6)
+        self.parser.add_argument('--dino_decoder_layer_end', type=int, default=12)
+        self.parser.add_argument('--unfreeze_dino_decoder', action='store_true', default=False,
+                                 help="Unfreeze DINO blocks in decoder (train self-attn + MLP, not just cross-attn)")   
 
         # Swin Decoder settings
         self.parser.add_argument("--use_swin_decoder", action='store_true', default=False,

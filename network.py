@@ -19,6 +19,7 @@ from pathlib import Path
 from swin_transformer import *
 from local_matching import LocalFeatureLoss
 from diff_loss import DiffLoss
+from backbone.dinov2.decoder import DINOv2Decoder
      
 class GeM(nn.Module):
     def __init__(self, p=3, eps=1e-6, work_with_tokens=False):
@@ -132,27 +133,25 @@ class RerankingModule(nn.Module):
         grid_W = int(np.ceil(W / patch_size))
         HW = max(H, W)
 
-        # --- [RGB] x_xy (좌표) 계산 ---
+        # x_xy (좌표) 계산
         rgb_col = (rgb_order % grid_W) * patch_size + (patch_size // 2)
         rgb_row = (rgb_order // grid_W) * patch_size + (patch_size // 2)
         x_xy_rgb = torch.stack([rgb_col / float(HW), rgb_row / float(HW)], dim=2)
 
-        # --- [Thermal] x_xy (좌표) 계산 ---
         thermal_col = (thermal_order % grid_W) * patch_size + (patch_size // 2)
         thermal_row = (thermal_order // grid_W) * patch_size + (patch_size // 2)
         x_xy_thermal = torch.stack([thermal_col / float(HW), thermal_row / float(HW)], dim=2)
 
-        # --- [RGB] x_attention (중요도) 계산 ---
+        # x_attention (중요도)
         rgb_att_val = torch.gather(current_target_cls_attn, axis=1, index=rgb_order)
         rgb_att_norm = rgb_att_val / torch.max(rgb_att_val, dim=1, keepdim=True)[0]
         rgb_att_norm = rgb_att_norm.unsqueeze(2)
-
-        # --- [Thermal] x_attention (중요도) 계산 ---
+        
         thermal_att_val = torch.gather(paired_thermal_cls_attn, axis=1, index=thermal_order)
         thermal_att_norm = thermal_att_val / torch.max(thermal_att_val, dim=1, keepdim=True)[0]
         thermal_att_norm = thermal_att_norm.unsqueeze(2)
 
-        # 4. Final Concatenation (Feature + Coord + Score)
+        # 4. Final Concatenation
         rgb_rerank_input = torch.cat([x_xy_rgb, rgb_att_norm, local_rgb_features], dim=2)
         thermal_rerank_input = torch.cat([x_xy_thermal, thermal_att_norm, local_thermal_features], dim=2)
         
@@ -182,10 +181,9 @@ class RerankingModule(nn.Module):
                 rgb_indices.expand(-1, TOP_PATCH_COUNT, -1)
             ]
         else:
-            # Fallback: 기존 cosine similarity 방식
+            # 기존 cosine similarity 방식
             correlation = torch.matmul(rgb_rerank_token, thermal_rerank_token.permute((0, 2, 1)))
         
-        # ========== 이하 동일 ==========
         xy_matrix = torch.cat(
             [rgb_coordinate.unsqueeze(2).repeat(1, 1, thermal_rerank_token.shape[1], 1),
             thermal_coordinate.unsqueeze(1).repeat(1, rgb_rerank_token.shape[1], 1, 1),
@@ -376,9 +374,43 @@ class CrossModalVPR_Net(nn.Module):
         # Compute feature map size from patch count (assuming square images)
         img_size = int(math.sqrt(self.patch_count))  # e.g., 16 for 256 patches
 
-        # Use Swin decoder if enabled, otherwise use CroCo decoder
+        # Check which decoder type to use
         use_swin = getattr(args, 'use_swin_decoder', False)
-        if use_swin:
+        use_dino_decoder = getattr(args, 'use_dino_decoder', False)
+
+        # Store decoder type for forward pass
+        self.use_dino_decoder = use_dino_decoder
+
+        if use_dino_decoder:
+            # DINOv2 Decoder: uses frozen DINO blocks 3-9 with trainable cross-attention adapters
+            dino_layer_start = getattr(args, 'dino_decoder_layer_start', 3)
+            dino_layer_end = getattr(args, 'dino_decoder_layer_end', 9)  # exclusive, so 10 means layers 3-9
+            drop_path_rate = getattr(args, 'drop_path_rate', 0.1)
+
+            self.dino_decoder = DINOv2Decoder.from_encoder(
+                encoder=self.shared_backbone,
+                layer_range=(dino_layer_start, dino_layer_end),
+                num_heads=self.shared_backbone.num_heads,
+                drop_path_rate=drop_path_rate,
+            )
+
+            # Conditionally freeze DINO blocks
+            if not getattr(args, 'unfreeze_dino_decoder', False):
+                self.dino_decoder.freeze_dino_blocks()
+                freeze_status = "frozen"
+            else:
+                freeze_status = "trainable"
+
+            # Store layer indices for intermediate feature extraction
+            self.dino_decoder_layers = list(range(dino_layer_start, dino_layer_end))
+
+            num_trainable = self.dino_decoder.get_num_trainable_params()
+            print(f"Using DINOv2 Decoder: layers {dino_layer_start}-{dino_layer_end-1}, "
+                  f"DINO blocks: {freeze_status}, trainable params: {num_trainable:,}")
+
+            # Create placeholder for compatibility (decoder_blocks not used with dino_decoder)
+            self.decoder_blocks = None
+        elif use_swin:
             window_size = getattr(args, 'swin_window_size', 4)
             drop_path_rate = getattr(args, 'drop_path_rate', 0.1)
 
@@ -444,16 +476,35 @@ class CrossModalVPR_Net(nn.Module):
         self.mask_generator = RandomMask(num_patches, mask_ratio)
 
     def _set_prediction_head(self, dec_embed_dim, image_H, image_W):
+        # 1. 차원 설정 (ViT Standard: 4x Expansion)
+        # Latent(384) -> Hidden(1536) -> Output(588)
+        hidden_dim = dec_embed_dim * 4  
+        output_dim = 14 * 14 * 3        
+        
+        # 2. Thermal Head 설계 (무겁게: Latent를 Thermal 특성으로 변환)
         self.prediction_thermal_head = nn.Sequential(
-            nn.Linear(dec_embed_dim, 14 * 14 * 3), # 768 → 588
+            nn.Linear(dec_embed_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, output_dim)
         )
+
+        # 3. RGB Head 설계 (무겁게: Latent를 RGB 특성으로 변환)
         self.prediction_rgb_head = nn.Sequential(
-            nn.Linear(dec_embed_dim, 14 * 14 * 3), # 768 → 588
+            nn.Linear(dec_embed_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, output_dim)
         )
+        
+        # 4. 가중치 초기화하기
         nn.init.normal_(self.prediction_thermal_head[0].weight, std=0.02)
         nn.init.zeros_(self.prediction_thermal_head[0].bias)
         nn.init.normal_(self.prediction_rgb_head[0].weight, std=0.02)
         nn.init.zeros_(self.prediction_rgb_head[0].bias)
+
+        nn.init.normal_(self.prediction_thermal_head[2].weight, std=0.02)
+        nn.init.zeros_(self.prediction_thermal_head[2].bias)
+        nn.init.normal_(self.prediction_rgb_head[2].weight, std=0.02)
+        nn.init.zeros_(self.prediction_rgb_head[2].bias)
 
     def patchify(self, imgs):
         """
@@ -487,7 +538,23 @@ class CrossModalVPR_Net(nn.Module):
         return imgs
     
     
-    def croco_like_encoder(self, x, modality='thermal'):
+    def croco_like_encoder(self, x, modality='thermal', collect_layers=None):
+        """
+        Masked encoder following CroCo style.
+
+        Args:
+            x: Input image [B, C, H, W]
+            modality: 'thermal' or 'rgb'
+            collect_layers: Optional list of layer indices to collect intermediate features
+                           e.g., [3, 4, 5, 6, 7, 8, 9] for DINO decoder
+
+        Returns:
+            If collect_layers is None:
+                patch_only_visible, mask, patch_B, patch_N, patch_D, cls_visible
+            If collect_layers is provided:
+                patch_only_visible, mask, patch_B, patch_N, patch_D, cls_visible, intermediate_features
+                where intermediate_features is dict {layer_idx: features} (visible patches only)
+        """
         current_backbone = self.shared_backbone
 
         image_patch = current_backbone.patch_embed(x)
@@ -526,9 +593,14 @@ class CrossModalVPR_Net(nn.Module):
 
         patch_visible = image_with_cls[~full_mask].reshape(patch_B, -1, patch_D)  # [B, ~(1+num_reg+visible_patches), 768]
 
-        # Encoder 통과
-        for blk in current_backbone.blocks:
+        # Encoder forward with optional intermediate collection
+        intermediate_features = {} if collect_layers else None
+        for i, blk in enumerate(current_backbone.blocks):
             patch_visible = blk(patch_visible)
+            if collect_layers and i in collect_layers:
+                # Store intermediate features (visible patches only, excluding CLS and registers)
+                intermediate_features[i] = patch_visible[:, 1 + num_register_tokens:, :].clone()
+
         patch_visible = current_backbone.norm(patch_visible)
 
         # ========== CLS 분리 (skip register tokens) ==========
@@ -536,6 +608,8 @@ class CrossModalVPR_Net(nn.Module):
         # Skip CLS and register tokens to get only patch tokens
         patch_only_visible = patch_visible[:, 1 + num_register_tokens:, :]  # [B, ~visible_patches, 768]
 
+        if collect_layers:
+            return patch_only_visible, mask, patch_B, patch_N, patch_D, cls_visible, intermediate_features
         return patch_only_visible, mask, patch_B, patch_N, patch_D, cls_visible
 
 
@@ -545,6 +619,28 @@ class CrossModalVPR_Net(nn.Module):
         thermal_full[~mask] = thermal_visible.flatten(0, 1)  # 이제 shape 맞음
         thermal_full = thermal_full.view(patch_B, patch_N, patch_D)
         return thermal_full
+
+    def expand_intermediate_features(self, intermediate_visible, mask, patch_B, patch_N, patch_D):
+        """
+        Expand intermediate features (visible patches only) to full sequence with mask tokens.
+
+        Args:
+            intermediate_visible: Dict {layer_idx: visible_features [B, num_visible, D]}
+            mask: Boolean mask [B, 256] where True = masked position
+            patch_B, patch_N, patch_D: batch size, num patches, feature dim
+
+        Returns:
+            Dict {layer_idx: full_features [B, 256, D]} with mask tokens at masked positions
+        """
+        expanded = {}
+        for layer_idx, visible_feat in intermediate_visible.items():
+            # Create full tensor filled with mask tokens
+            full_feat = self.mask_token.expand(patch_B, patch_N, -1).clone()  # [B, 256, D]
+            # Fill visible positions with actual features
+            full_feat[~mask] = visible_feat.flatten(0, 1)
+            full_feat = full_feat.view(patch_B, patch_N, patch_D)
+            expanded[layer_idx] = full_feat
+        return expanded
 
     def forward_model(self, x, paired_rgb=None, modality='rgb', return_masked_patch=False):
         """단일 모달리티에 대한 Forward"""
@@ -574,48 +670,127 @@ class CrossModalVPR_Net(nn.Module):
             agg_layer = self.rgb_aggregation
         elif modality == 'thermal':
             if self.training:
-                # 1-4. masked thermal encoder
-                thermal_visible, mask_thermal, patch_B, patch_N, patch_D, thermal_cls = self.croco_like_encoder(x, modality='thermal')
-                rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb, rgb_cls = self.croco_like_encoder(paired_rgb, modality='rgb')
+                if self.use_dino_decoder:
+                    # ========== DINO Decoder Path ==========
+                    # Use masked encoder with intermediate feature collection
 
-                # 5. paired RGB도 feature tokens 추출하기
-                paired_thermal = self.shared_backbone(x, return_attention=True)
-                paired_thermal_cls_attn_single_head = paired_thermal["cls_attention"].sum(dim=1) # [B, MHA, 256]
-                penultimate_patch = paired_thermal["penultimate_norm_patchtokens"]
-                paired_thermal_full = paired_thermal["x_norm_patchtokens"]
-                cls_attn_map = paired_thermal_cls_attn_single_head
-                
-                paired_rgb_emb = self.shared_backbone(paired_rgb, return_attention=True)
-                paired_rgb_full = paired_rgb_emb["x_norm_patchtokens"]
-                # paired_rgb_cls_attn = paired_rgb_emb["cls_attention"][:, :, 1:]
-                # paired_rgb_cls_attn_single_head = paired_rgb_cls_attn.sum(dim=1)
-            
-                # 6. Mask token expansion
-                thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
-                rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb)
-                
-                # out을 미리 저장
-                out = paired_thermal
-                if return_masked_patch: masked_patch_thermal = thermal_full # 이후로 안건들여서 clone안해도 됨
-                
-                # 7. Decoder Positional Encoding
-                thermal_full_dec = thermal_full + self.decoder_pos_embed  # [B, 256, 768]
-                rgb_full_dec = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
-                paired_thermal_dec = paired_thermal_full + self.decoder_pos_embed  # [B, 256, 768]
-                paired_rgb_dec = paired_rgb_full + self.decoder_pos_embed  # [B, 256, 768]
-                
-                target_full_dec = torch.cat([thermal_full_dec, rgb_full_dec], dim=0)
-                ref_full_dec = torch.cat([paired_rgb_dec, paired_thermal_dec], dim=0)
-                
-                # 8. decoder 통과시키기
-                for blk in self.decoder_blocks:
-                    target_full_dec = blk(target_full_dec, ref_full_dec)
-                target_full_dec = self.decoder_norm(target_full_dec)
-                
-                thermal_reconed_dec = target_full_dec[:thermal_full_dec.shape[0],:,:]
-    
+                    # 1. Masked encoder for TARGET modalities (collect intermediate features)
+                    thermal_visible, mask_thermal, patch_B, patch_N, patch_D, thermal_cls, thermal_inter_visible = \
+                        self.croco_like_encoder(x, modality='thermal', collect_layers=self.dino_decoder_layers)
+                    rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb, rgb_cls, rgb_inter_visible = \
+                        self.croco_like_encoder(paired_rgb, modality='rgb', collect_layers=self.dino_decoder_layers)
+
+                    # 2. Expand masked intermediate features with mask tokens
+                    thermal_masked_intermediates = self.expand_intermediate_features(
+                        thermal_inter_visible, mask_thermal, patch_B, patch_N, patch_D
+                    )
+                    rgb_masked_intermediates = self.expand_intermediate_features(
+                        rgb_inter_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb
+                    )
+
+                    # 3. Get FULL features for REFERENCE (cross-attention needs full context)
+                    thermal_full_out = self.shared_backbone.forward_with_intermediate(
+                        x, layers=self.dino_decoder_layers, return_attention=True
+                    )
+                    rgb_full_out = self.shared_backbone.forward_with_intermediate(
+                        paired_rgb, layers=self.dino_decoder_layers, return_attention=True
+                    )
+
+                    # Extract full reference features (for cross-attention)
+                    num_special_tokens = 1 + self.shared_backbone.num_register_tokens
+                    thermal_full_features = {
+                        layer: thermal_full_out[layer][:, num_special_tokens:, :]
+                        for layer in self.dino_decoder_layers
+                    }
+                    rgb_full_features = {
+                        layer: rgb_full_out[layer][:, num_special_tokens:, :]
+                        for layer in self.dino_decoder_layers
+                    }
+
+                    # For global descriptor & attention (use full encoder output)
+                    paired_thermal_cls_attn_single_head = thermal_full_out["cls_attention"].sum(dim=1)
+                    penultimate_patch = thermal_full_out["patch_tokens"]
+                    paired_thermal_full = thermal_full_out["patch_tokens"]
+                    paired_rgb_full = rgb_full_out["patch_tokens"]
+
+                    paired_thermal = {
+                        "x_norm_patchtokens": paired_thermal_full,
+                        "x_norm_clstoken": thermal_full_out["cls_token"],
+                        "cls_attention": thermal_full_out.get("attention", None),
+                    }
+                    cls_attn_map = paired_thermal_cls_attn_single_head
+
+                    # 4. Mask token expansion for final features (for compatibility)
+                    thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
+                    rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb)
+
+                    out = paired_thermal
+                    if return_masked_patch:
+                        masked_patch_thermal = thermal_full
+
+                    # 5. Decoder forward
+                    # Target: MASKED intermediate features (true masked - visible never saw masked)
+                    # Reference: FULL intermediate features (for cross-attention context)
+                    start_layer = self.dino_decoder_layers[0]
+                    thermal_input = thermal_masked_intermediates[start_layer]
+                    rgb_input = rgb_masked_intermediates[start_layer]
+
+                    # Bidirectional decoding:
+                    # - thermal (masked) decoded with RGB (full) cross-attention
+                    # - RGB (masked) decoded with thermal (full) cross-attention
+                    thermal_decoded, rgb_decoded, _, _ = self.dino_decoder.forward_bidirectional(
+                        x_target=thermal_input,                      # TRUE MASKED thermal
+                        x_ref=rgb_input,                             # TRUE MASKED RGB
+                        target_intermediates=thermal_full_features,  # FULL thermal (for RGB->thermal cross-attn)
+                        ref_intermediates=rgb_full_features,         # FULL RGB (for thermal->RGB cross-attn)
+                    )
+
+                    thermal_reconed_dec = thermal_decoded
+                    rgb_full_dec = rgb_decoded
+
+                else:
+                    # ========== Original CroCo/Swin Decoder Path ==========
+                    # 1-4. masked encoder
+                    thermal_visible, mask_thermal, patch_B, patch_N, patch_D, thermal_cls = self.croco_like_encoder(x, modality='thermal')
+                    rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb, rgb_cls = self.croco_like_encoder(paired_rgb, modality='rgb')
+
+                    # 5. Get full features for global descriptor
+                    paired_thermal = self.shared_backbone(x, return_attention=True)
+                    paired_thermal_cls_attn_single_head = paired_thermal["cls_attention"].sum(dim=1)
+                    penultimate_patch = paired_thermal["penultimate_norm_patchtokens"]
+                    paired_thermal_full = paired_thermal["x_norm_patchtokens"]
+
+                    paired_rgb_emb = self.shared_backbone(paired_rgb, return_attention=True)
+                    paired_rgb_full = paired_rgb_emb["x_norm_patchtokens"]
+
+                    cls_attn_map = paired_thermal_cls_attn_single_head
+
+                    # 6. Mask token expansion
+                    thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
+                    rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb)
+
+                    out = paired_thermal
+                    if return_masked_patch:
+                        masked_patch_thermal = thermal_full
+
+                    # 7. CroCo Decoder forward
+                    thermal_full_dec = thermal_full + self.decoder_pos_embed
+                    rgb_full_dec = rgb_full + self.decoder_pos_embed
+                    paired_thermal_dec = paired_thermal_full + self.decoder_pos_embed
+                    paired_rgb_dec = paired_rgb_full + self.decoder_pos_embed
+
+                    target_full_dec = torch.cat([thermal_full_dec, rgb_full_dec], dim=0)
+                    ref_full_dec = torch.cat([paired_rgb_dec, paired_thermal_dec], dim=0)
+
+                    for blk in self.decoder_blocks:
+                        target_full_dec = blk(target_full_dec, ref_full_dec)
+                    target_full_dec = self.decoder_norm(target_full_dec)
+
+                    thermal_reconed_dec = target_full_dec[:thermal_full_dec.shape[0], :, :]
+                    rgb_full_dec = target_full_dec[thermal_full_dec.shape[0]:, :, :]
+
                 recon_loss_fn = self.calculate_recon_loss
-                
+
                 # 9. Prediction Head
                 reconstructed_thermal_patches = self.prediction_thermal_head(thermal_reconed_dec)
                 reconstructed_rgb_patches = self.prediction_rgb_head(rgb_full_dec)

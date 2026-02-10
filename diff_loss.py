@@ -26,6 +26,13 @@ class DiffLoss(torch.nn.Module):
             nn.Flatten(),
             nn.Linear(self.patch_count * 32, 1)
         )
+        self.score_linear2 = nn.Sequential(
+            nn.Linear(self.input_dim * 2, self.input_dim),
+            nn.ReLU(),
+            nn.Linear(self.input_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1),
+        )
         self.BCE = torch.nn.BCEWithLogitsLoss().cuda()
 
         self.depth = depth
@@ -51,8 +58,6 @@ class DiffLoss(torch.nn.Module):
         pos_patches = pos_patches + positional_embedding
         neg_patches = neg_patches + positional_embedding
         
-        # Make it to batch for fast decode
-
         # Pass it through decoder (no_grad to prevent gradients flowing to decoder)
         if use_train == True:
             target_batch = torch.cat([query_patches, query_patches, pos_patches, neg_patches], dim=0)
@@ -91,33 +96,45 @@ class DiffLoss(torch.nn.Module):
         query_pos_GeM2_attn_map = F.softmax((query_GeM2 @ query_pos_recon.transpose(-2, -1)) / sqrt_d, dim=-1).squeeze(1)
         pos_query_GeM1_attn_map = F.softmax((pos_GeM1 @ pos_query_recon.transpose(-2, -1)) / sqrt_d, dim=-1).squeeze(1)
         pos_query_GeM2_attn_map = F.softmax((pos_GeM2 @ pos_query_recon.transpose(-2, -1)) / sqrt_d, dim=-1).squeeze(1)
-        
+
         query_neg_GeM1_attn_map = F.softmax((query_GeM1 @ query_neg_recon.transpose(-2, -1)) / sqrt_d, dim=-1).squeeze(1)
         query_neg_GeM2_attn_map = F.softmax((query_GeM2 @ query_neg_recon.transpose(-2, -1)) / sqrt_d, dim=-1).squeeze(1)
         neg_query_GeM1_attn_map = F.softmax((neg_GeM1 @ neg_query_recon.transpose(-2, -1)) / sqrt_d, dim=-1).squeeze(1)
         neg_query_GeM2_attn_map = F.softmax((neg_GeM2 @ neg_query_recon.transpose(-2, -1)) / sqrt_d, dim=-1).squeeze(1)
-        
+
         # calculate differential map (simplified to avoid gradient vanishing)
         lambda_ = torch.sigmoid(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float())
-        
+
         query_pos_diff_attn_map = query_pos_GeM1_attn_map - lambda_ * query_pos_GeM2_attn_map
         pos_query_diff_attn_map = pos_query_GeM1_attn_map - lambda_ * pos_query_GeM2_attn_map
         query_neg_diff_attn_map = query_neg_GeM1_attn_map - lambda_ * query_neg_GeM2_attn_map
         neg_query_diff_attn_map = neg_query_GeM1_attn_map - lambda_ * neg_query_GeM2_attn_map
-
+        
+        # # Multiply attention with features (element-wise)
+        # query_pos_attention = (query_pos_diff_attn_map.unsqueeze(2) * query_pos_recon)
+        # pos_query_attention = (pos_query_diff_attn_map.unsqueeze(2) * pos_query_recon)
+        # query_neg_attention = (query_neg_diff_attn_map.unsqueeze(2) * query_neg_recon)
+        # neg_query_attention = (neg_query_diff_attn_map.unsqueeze(2) * neg_query_recon)
+        
         # Multiply attention with features (element-wise)
-        query_pos_attention = (query_pos_diff_attn_map.unsqueeze(2) * query_pos_recon)
-        pos_query_attention = (pos_query_diff_attn_map.unsqueeze(2) * pos_query_recon)
-        query_neg_attention = (query_neg_diff_attn_map.unsqueeze(2) * query_neg_recon)
-        neg_query_attention = (neg_query_diff_attn_map.unsqueeze(2) * neg_query_recon)
+        # query_pos_attention.shape: [4, 384]
+        query_pos_attention = (query_pos_diff_attn_map.unsqueeze(1) @ query_pos_recon).squeeze(1)
+        pos_query_attention = (pos_query_diff_attn_map.unsqueeze(1) @ pos_query_recon).squeeze(1)
+        query_neg_attention = (query_neg_diff_attn_map.unsqueeze(1) @ query_neg_recon).squeeze(1)
+        neg_query_attention = (neg_query_diff_attn_map.unsqueeze(1) @ neg_query_recon).squeeze(1)
+
 
         # Concatenate bidirectional attention-weighted features
-        query_pos_concated = torch.cat([query_pos_attention, pos_query_attention], dim=-1)
-        neg_query_concated = torch.cat([query_neg_attention, neg_query_attention], dim=-1)
+        query_pos_concated = torch.cat([query_pos_attention, pos_query_attention], dim=-1) # [4, 768]
+        neg_query_concated = torch.cat([query_neg_attention, neg_query_attention], dim=-1) # [4, 768]
         
+        # # pass through fc layer (BC가 내부적으로 sigmoid 적용)
+        # pos_scores = self.score_linear(query_pos_concated)
+        # neg_scores = self.score_linear(neg_query_concated)
+
         # pass through fc layer (BC가 내부적으로 sigmoid 적용)
-        pos_scores = self.score_linear(query_pos_concated)
-        neg_scores = self.score_linear(neg_query_concated)
+        pos_scores = self.score_linear2(query_pos_concated)
+        neg_scores = self.score_linear2(neg_query_concated)
         
         # make loss using CE
         target = torch.zeros(pos_scores.shape[0] * 2, dtype=torch.float).cuda()
@@ -165,7 +182,7 @@ class DiffLoss(torch.nn.Module):
                 target_batch = blk(target_batch, ref_batch)
             target_batch = model.decoder_norm(target_batch)
 
-        # Split: query_recon (query decoded with candidate context), candidate_recon (vice versa)
+        # Split: query_recon, candidate_recon 
         query_recon = target_batch[:K]      # [K, N, D]
         candidate_recon = target_batch[K:]  # [K, N, D]
 
@@ -178,21 +195,21 @@ class DiffLoss(torch.nn.Module):
         # Compute attention maps
         sqrt_d = math.sqrt(self.input_dim)
 
-        # query GeM attending to query_recon (query decoded with candidate context)
+        # query GeM attending to query_recon
         query_cand_GeM1_attn = F.softmax((query_GeM1 @ query_recon.transpose(-2, -1)) / sqrt_d, dim=-1).squeeze(1)
         query_cand_GeM2_attn = F.softmax((query_GeM2 @ query_recon.transpose(-2, -1)) / sqrt_d, dim=-1).squeeze(1)
 
-        # candidate GeM attending to candidate_recon (candidate decoded with query context)
+        # candidate GeM attending to candidate_recon 
         cand_query_GeM1_attn = F.softmax((candidate_GeM1 @ candidate_recon.transpose(-2, -1)) / sqrt_d, dim=-1).squeeze(1)
         cand_query_GeM2_attn = F.softmax((candidate_GeM2 @ candidate_recon.transpose(-2, -1)) / sqrt_d, dim=-1).squeeze(1)
 
-        # Differential attention (simplified to avoid gradient vanishing)
+        # Differential attention
         lambda_ = torch.sigmoid(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float())
 
         query_cand_diff_attn = query_cand_GeM1_attn - lambda_ * query_cand_GeM2_attn  # [K, N]
         cand_query_diff_attn = cand_query_GeM1_attn - lambda_ * cand_query_GeM2_attn  # [K, N]
 
-        # Multiply attention with features (element-wise)
+        # Multiply attention with features
         query_cand_attention = (query_cand_diff_attn.unsqueeze(2) * query_recon)  # [K, N, D]
         cand_query_attention = (cand_query_diff_attn.unsqueeze(2) * candidate_recon)  # [K, N, D]
 

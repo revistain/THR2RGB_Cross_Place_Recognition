@@ -20,10 +20,7 @@ import torch.utils.checkpoint
 from torch.nn.init import trunc_normal_
 
 from backbone.dinov2 import Mlp, PatchEmbed, SwiGLUFFNFused, MemEffAttention, NestedTensorBlock as Block
-
-
 logger = logging.getLogger("dinov2")
-
 
 def named_apply(fn: Callable, module: nn.Module, name="", depth_first=True, include_root=False) -> nn.Module:
     if not depth_first and include_root:
@@ -387,7 +384,67 @@ class DinoVisionTransformer(nn.Module):
 
     def forward(self, *args, is_training=False, **kwargs):
         return self.forward_features(*args, **kwargs)
-        
+
+    def forward_with_intermediate(
+        self,
+        x: torch.Tensor,
+        layers: list = None,
+        masks=None,
+        return_attention: bool = False,
+    ) -> dict:
+        """
+        Forward pass that returns intermediate layer features.
+
+        Used for decoder cross-attention where each decoder layer needs
+        the corresponding encoder layer features as reference.
+
+        Args:
+            x: Input image tensor [B, C, H, W]
+            layers: List of layer indices to return (default: [3,4,5,6,7,8,9])
+            masks: Optional masks for masked image modeling
+            return_attention: Whether to return attention maps
+
+        Returns:
+            Dict with:
+                - layer indices as keys, features as values
+                - 'final': final normalized output
+                - 'cls_token': final CLS token
+                - 'patch_tokens': final patch tokens (without CLS/registers)
+                - 'attention' (optional): attention from last layer
+        """
+        if layers is None:
+            layers = [3, 4, 5, 6, 7, 8, 9]
+
+        x = self.prepare_tokens_with_masks(x, masks)
+
+        intermediate = {}
+        attn = None
+
+        for i, blk in enumerate(self.blocks):
+            # Check if we need attention from last layer
+            if return_attention and i == len(self.blocks) - 1:
+                x, attn = blk(x, return_attention=True)
+            else:
+                x = blk(x)
+
+            # Store intermediate features at requested layers
+            if i in layers:
+                intermediate[i] = x
+
+        # Final normalization
+        x_norm = self.norm(x)
+
+        # Store final outputs
+        intermediate['final'] = x_norm
+        intermediate['cls_token'] = x_norm[:, 0]
+        intermediate['patch_tokens'] = x_norm[:, self.num_register_tokens + 1:]
+
+        if return_attention and attn is not None:
+            intermediate['attention'] = attn
+            intermediate['cls_attention'] = attn[:, :, 0, self.num_register_tokens + 1:]
+
+        return intermediate
+
 def init_weights_vit_timm(module: nn.Module, name: str = ""):
     """ViT weight initialization, original timm impl (for reproducibility)"""
     if isinstance(module, nn.Linear):

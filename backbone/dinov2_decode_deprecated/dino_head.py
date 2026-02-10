@@ -9,7 +9,6 @@ import torch.nn as nn
 from torch.nn.init import trunc_normal_
 from torch.nn.utils import weight_norm
 
-
 class DINOHead(nn.Module):
     def __init__(
         self,

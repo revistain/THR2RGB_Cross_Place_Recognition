@@ -15,7 +15,6 @@ from torch import nn
 
 logger = logging.getLogger("dinov2")
 
-
 try:
     from xformers.ops import memory_efficient_attention, unbind, fmha
 

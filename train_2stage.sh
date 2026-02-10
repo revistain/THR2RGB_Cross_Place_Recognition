@@ -15,7 +15,7 @@ python3 train_wandb_2stage.py \
     --hard_positives_dist_threshold 10 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
-    --comment "224x224-CroCo-ViTs-numBlock0-sharedDecoder-diffLossValue(init0)" \
+    --comment "224x224-CroCo-ViTs-numBlock0-sharedDecoder-diffLossValue(@)" \
     --margin 0.1 \
     --epochs_num 200 \
     --negs_num_per_query 10 \

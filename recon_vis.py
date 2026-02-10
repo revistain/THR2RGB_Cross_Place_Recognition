@@ -55,14 +55,63 @@ def visualize_reconstruction(model, args, thermal_img, paired_rgb, device='cuda'
 
         # ========== Decoder pass (cross-attention) ==========
         # Thermal decoder: masked thermal attends to full RGB
-        for blk in net.decoder_blocks:
-            thermal_full_dec = blk(thermal_full_dec, paired_rgb_dec)
-        thermal_full_dec = net.decoder_norm(thermal_full_dec)
+        if args.use_dino_decoder:
+            # Get intermediate features from masked encoder
+            _, _, _, _, _, _, thermal_inter_visible = net.croco_like_encoder(
+                thermal_img, modality='thermal', collect_layers=net.dino_decoder_layers
+            )
+            _, _, _, _, _, _, rgb_inter_visible = net.croco_like_encoder(
+                paired_rgb, modality='rgb', collect_layers=net.dino_decoder_layers
+            )
 
-        # RGB decoder: masked RGB attends to full thermal
-        for blk in net.decoder_blocks:
-            rgb_full_dec = blk(rgb_full_dec, paired_thermal_dec)
-        rgb_full_dec = net.decoder_norm(rgb_full_dec)
+            # Expand masked intermediate features with mask tokens
+            thermal_masked_intermediates = net.expand_intermediate_features(
+                thermal_inter_visible, mask_thermal, patch_B, patch_N, patch_D
+            )
+            rgb_masked_intermediates = net.expand_intermediate_features(
+                rgb_inter_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb
+            )
+
+            # Get FULL features for cross-attention reference
+            thermal_full_out = net.shared_backbone.forward_with_intermediate(
+                thermal_img, layers=net.dino_decoder_layers, return_attention=False
+            )
+            rgb_full_out = net.shared_backbone.forward_with_intermediate(
+                paired_rgb, layers=net.dino_decoder_layers, return_attention=False
+            )
+
+            # Extract reference features (for cross-attention)
+            num_special_tokens = 1 + net.shared_backbone.num_register_tokens
+            thermal_full_features = {
+                layer: thermal_full_out[layer][:, num_special_tokens:, :]
+                for layer in net.dino_decoder_layers
+            }
+            rgb_full_features = {
+                layer: rgb_full_out[layer][:, num_special_tokens:, :]
+                for layer in net.dino_decoder_layers
+            }
+
+            # Decoder input: masked layer 3 features
+            start_layer = net.dino_decoder_layers[0]
+            thermal_input = thermal_masked_intermediates[start_layer]
+            rgb_input = rgb_masked_intermediates[start_layer]
+
+            # Bidirectional decoding
+            thermal_full_dec, rgb_full_dec, _, _ = net.dino_decoder.forward_bidirectional(
+                x_target=thermal_input,
+                x_ref=rgb_input,
+                target_intermediates=thermal_full_features,
+                ref_intermediates=rgb_full_features,
+            )
+        else:
+            for blk in net.decoder_blocks:
+                thermal_full_dec = blk(thermal_full_dec, paired_rgb_dec)
+            thermal_full_dec = net.decoder_norm(thermal_full_dec)
+
+            # RGB decoder: masked RGB attends to full thermal
+            for blk in net.decoder_blocks:
+                rgb_full_dec = blk(rgb_full_dec, paired_thermal_dec)
+            rgb_full_dec = net.decoder_norm(rgb_full_dec)
 
         # ========== Prediction head ==========
         reconstructed_thermal_pixels = net.prediction_thermal_head(thermal_full_dec)  # [1, 256, 588]
