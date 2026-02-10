@@ -791,32 +791,33 @@ class CrossModalVPR_Net(nn.Module):
                     recur_paired_rgb_full = self.recursive_rgb_head(paired_rgb_full)
                     recur_rgb_visible = self.recursive_rgb_head(rgb_visible)
 
-                    # From here (claude)
-                    
-                    # # 6. Mask token expansion
-                    # thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
-                    # rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb)
+                    # 6. Mask token expansion (after recursive MLP)
+                    thermal_full = self.croco_encoded_mask_expension(recur_thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
+                    rgb_full = self.croco_encoded_mask_expension(recur_rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb)
 
-                    # out = paired_thermal
-                    # if return_masked_patch:
-                    #     masked_patch_thermal = thermal_full
+                    out = paired_thermal
+                    if return_masked_patch:
+                        masked_patch_thermal = thermal_full
 
-                    # # 7. CroCo Decoder forward
-                    # thermal_full_dec = thermal_full + self.decoder_pos_embed
-                    # rgb_full_dec = rgb_full + self.decoder_pos_embed
-                    # paired_thermal_dec = paired_thermal_full + self.decoder_pos_embed
-                    # paired_rgb_dec = paired_rgb_full + self.decoder_pos_embed
+                    # 7. Prepare reference features for cross-attention
+                    # For each decoder layer, use the full recursive MLP output as reference
+                    thermal_ref_features = {layer: recur_paired_thermal_full for layer in self.dino_decoder_layers}
+                    rgb_ref_features = {layer: recur_paired_rgb_full for layer in self.dino_decoder_layers}
 
-                    # target_full_dec = torch.cat([thermal_full_dec, rgb_full_dec], dim=0)
-                    # ref_full_dec = torch.cat([paired_rgb_dec, paired_thermal_dec], dim=0)
+                    # 8. DINO Decoder forward (separate pathway from encoder)
+                    # Thermal: masked thermal decoded with full RGB reference
+                    # RGB: masked RGB decoded with full thermal reference
+                    thermal_decoded, _ = self.dino_decoder.forward(
+                        x=thermal_full + self.decoder_pos_embed,
+                        ref_features=rgb_ref_features,
+                    )
+                    rgb_decoded, _ = self.dino_decoder.forward(
+                        x=rgb_full + self.decoder_pos_embed,
+                        ref_features=thermal_ref_features,
+                    )
 
-                    # for blk in self.decoder_blocks:
-                    #     target_full_dec = blk(target_full_dec, ref_full_dec)
-                    # target_full_dec = self.decoder_norm(target_full_dec)
-
-                    # thermal_reconed_dec = target_full_dec[:thermal_full_dec.shape[0], :, :]
-                    # rgb_full_dec = target_full_dec[thermal_full_dec.shape[0]:, :, :]
-                    # breakpoint()
+                    thermal_reconed_dec = thermal_decoded
+                    rgb_full_dec = rgb_decoded
 
                 else:
                     # ========== Original CroCo/Swin Decoder Path ==========
