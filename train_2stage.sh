@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=5
+CUDA_VISIBLE_DEVICES=0
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
@@ -9,25 +9,27 @@ python3 train_wandb_2stage.py \
     --sequences KAIST \
     --cuda_device $CUDA_VISIBLE_DEVICES \
     --foundation_model_path /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/backbone/dinov2/pretrained/dinov2_vits14_pretrain.pth \
-    --resume "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/224x224-CroCo-ViTs-numBlock0-sharedDecoder/260204_020552/best_model.pth" \
+    --resume "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/224x224-ViTs-numBlock0-reconWeight2.5-sharedDecoder-recurDinoDecoder(6-12)-decAdapter-GELUlinear/260210_090650/best_model.pth" \
     --queries_per_epoch 2000 \
     --soft_positives_dist_threshold 10 \
     --hard_positives_dist_threshold 10 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
-    --comment "224x224-CroCo-ViTs-numBlock0-sharedDecoder-diffLossValue(@)" \
+    --comment "test-224x224-CroCo-ViTs-numBlock0-sharedDecoder-diffLossValue(@)" \
     --margin 0.1 \
     --epochs_num 200 \
     --negs_num_per_query 10 \
     --croco_mask_ratio 0.8 \
-    --recon_weight 10 \
+    --recon_weight 2.5 \
     --use_recon_loss \
     --recon_loss_type 'mse+ssim' \
-    --use_diff_loss \
-    --use_reranking 'diffGeM' \
-    --lr 1e-4 \
-    --num_decoder_depth 8
+    --lr 1e-5 \
+    --use_dino_decoder \
+    --dino_decoder_layer_start 6 \
+    --dino_decoder_layer_end 12 \
+    --is_dino_dec_stage2
 
+    # --use_reranking 'diffGeM' \
     # --use_diff_loss \
     # --recon_loss_type 'mse+ssim' \
     # --brightness 0.5 \

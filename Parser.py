@@ -115,6 +115,7 @@ class Parser():
         self.parser.add_argument('--dino_decoder_layer_end', type=int, default=12)
         self.parser.add_argument('--unfreeze_dino_decoder', action='store_true', default=False,
                                  help="Unfreeze DINO blocks in decoder (train self-attn + MLP, not just cross-attn)")   
+        self.parser.add_argument('--is_dino_dec_stage2', action='store_true', default=False)
 
         # Swin Decoder settings
         self.parser.add_argument("--use_swin_decoder", action='store_true', default=False,
@@ -123,6 +124,7 @@ class Parser():
                                  help="Window size for Swin V2 windowed self-attention")
         self.parser.add_argument("--drop_path_rate", type=float, default=0.1,
                                  help="Stochastic depth rate for Swin decoder blocks")
+        
 
 
     def parse_arguments(self):

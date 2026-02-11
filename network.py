@@ -341,11 +341,12 @@ class LocalAdapt(nn.Module):
         self.upconv1 = torch.nn.ConvTranspose2d(in_channels=feature_dim, out_channels=256, kernel_size=3, stride=2, padding=1)
         self.upconv2 = torch.nn.ConvTranspose2d(in_channels=256, out_channels=128, kernel_size=3, stride=2, padding=1)
         self.relu = nn.ReLU(inplace=True)
+
     def forward(self,x):
         x = self.upconv1(x)
         x = self.relu(x)
         x = self.upconv2(x)
-        return x    
+        return x
 
 class CrossModalVPR_Net(nn.Module):
     def __init__(self, args, pretrained_foundation=False, foundation_model_path=None):
@@ -383,6 +384,8 @@ class CrossModalVPR_Net(nn.Module):
 
         if use_dino_decoder:
             self._set_recursive_head(self.output_dim, 128)
+            self.BCEloss = torch.nn.BCEWithLogitsLoss().cuda()
+            self._set_vpr_similarity_score()
             # DINOv2 Decoder: uses frozen DINO blocks 3-9 with trainable cross-attention adapters
             dino_layer_start = getattr(args, 'dino_decoder_layer_start', 3)
             dino_layer_end = getattr(args, 'dino_decoder_layer_end', 9)  # exclusive, so 10 means layers 3-9
@@ -439,11 +442,13 @@ class CrossModalVPR_Net(nn.Module):
         self.decoder_norm = nn.LayerNorm(self.output_dim)
         self.mask_token = None
         self.patch_count = int(args.resize[0]/14)*int(args.resize[1]/14)
+        self._set_dino_decode_cls_tokens()
         self._set_mask_token(self.output_dim)
         self._set_decode_positional_embedding(self.output_dim)
         self._set_mask_generator(self.patch_count, args.croco_mask_ratio)
         self._set_prediction_head(self.output_dim, args.resize[0], args.resize[1])
-        self.reranker = RerankingModule(args)
+        if self.args.use_reranking == 'r2former':
+            self.reranker = RerankingModule(args)
         
         self.reconstruction_criterion = MaskedMSE(
             args,
@@ -463,6 +468,17 @@ class CrossModalVPR_Net(nn.Module):
             GeM(work_with_tokens=None), 
             Flatten()
         )
+
+    def _set_vpr_similarity_score(self):
+        self.similarity_score_head = nn.Sequential(
+            nn.Linear(self.args.features_dim, 256, bias=True),
+            nn.ReLU(),
+            nn.Linear(256, 1),
+        )
+    
+    def _set_dino_decode_cls_tokens(self):
+        self.dino_dec_cls_token = nn.Parameter(torch.zeros(1, 1, self.args.features_dim))
+        trunc_normal_(self.dino_dec_cls_token, std=.02)
     
     def _set_mask_token(self, dec_embed_dim):
         self.mask_token = nn.Parameter(torch.zeros(1, 1, dec_embed_dim))
@@ -679,6 +695,61 @@ class CrossModalVPR_Net(nn.Module):
             expanded[layer_idx] = full_feat
         return expanded
 
+    def stage2_forward(self, feature_embs, query_index, pos_index, neg_index):
+        query_feature = feature_embs[query_index] # [B, N, C]
+        pos_feature = feature_embs[pos_index]
+        neg_feature = feature_embs[neg_index]
+
+        # Pass Through Recursive MLP
+        recur_query_thermal = self.recursive_thermal_head(query_feature) + self.decoder_pos_embed
+        recur_pos_rgb = self.recursive_rgb_head(pos_feature) + self.decoder_pos_embed
+        recur_neg_rgb = self.recursive_rgb_head(neg_feature) + self.decoder_pos_embed
+
+        dino_dec_cls_token = self.dino_dec_cls_token.expand(query_feature.shape[0],-1,-1)
+        recur_query_thermal_withCLS = torch.cat([dino_dec_cls_token, recur_query_thermal], dim=1)
+        recur_pos_rgb_withCLS = torch.cat([dino_dec_cls_token, recur_pos_rgb], dim=1)
+        recur_neg_rgb_withCLS = torch.cat([dino_dec_cls_token, recur_neg_rgb], dim=1)
+
+        # Prepare reference features for cross-attention
+        thermal_ref_features = {layer: recur_query_thermal for layer in self.dino_decoder_layers}
+        pos_rgb_ref_features = {layer: recur_pos_rgb for layer in self.dino_decoder_layers}
+        neg_rgb_ref_features = {layer: recur_neg_rgb for layer in self.dino_decoder_layers}
+
+        # DINO Decoder forward (separate pathway from encoder)
+        # batch로 한번에 통과시키기
+        thermal_pos_decoded, _ = self.dino_decoder.forward(
+            x = recur_query_thermal_withCLS,
+            ref_features=pos_rgb_ref_features,
+        )
+        pos_thermal_decoded, _ = self.dino_decoder.forward(
+            x = recur_pos_rgb_withCLS,
+            ref_features=thermal_ref_features,
+        )
+        thermal_neg_decoded, _ = self.dino_decoder.forward(
+            x = recur_query_thermal_withCLS,
+            ref_features=neg_rgb_ref_features,
+        )
+        neg_thermal_decoded, _ = self.dino_decoder.forward(
+            x = recur_neg_rgb_withCLS,
+            ref_features=thermal_ref_features,
+        )
+
+        thermal_pos_cls = thermal_pos_decoded[:,0,:]
+        pos_thermal_cls = pos_thermal_decoded[:,0,:]
+        thermal_neg_cls = thermal_neg_decoded[:,0,:]
+        neg_thermal_cls = neg_thermal_decoded[:,0,:]
+
+        thermal_pos_score = self.similarity_score_head(thermal_pos_cls)
+        pos_thermal_score = self.similarity_score_head(pos_thermal_cls)
+        thermal_neg_score = self.similarity_score_head(thermal_neg_cls)
+        neg_thermal_score = self.similarity_score_head(neg_thermal_cls)
+
+        target = torch.zeros(thermal_pos_score.shape[0] * 4, dtype=torch.float).cuda()
+        target[:thermal_pos_score.shape[0]*2] = 1
+        rerank_loss = self.BCEloss(torch.cat([thermal_pos_score, pos_thermal_score, thermal_neg_score, neg_thermal_score], dim=0).squeeze(1), target)
+
+        return rerank_loss
+
     def forward_model(self, x, paired_rgb=None, modality='rgb', return_masked_patch=False):
         """단일 모달리티에 대한 Forward"""
         # self.use_masked_inference: rerank를 위해, decoder에 들어가기 바로 전 단계를 뱉는다
@@ -707,84 +778,6 @@ class CrossModalVPR_Net(nn.Module):
             agg_layer = self.rgb_aggregation
         elif modality == 'thermal':
             if self.training:
-                # if self.use_dino_decoder:
-                #     # ========== DINO Decoder Path ==========
-                #     # Use masked encoder with intermediate feature collection
-
-                #     # 1. Masked encoder for TARGET modalities (collect intermediate features)
-                #     thermal_visible, mask_thermal, patch_B, patch_N, patch_D, thermal_cls, thermal_inter_visible = \
-                #         self.croco_like_encoder(x, modality='thermal', collect_layers=self.dino_decoder_layers)
-                #     rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb, rgb_cls, rgb_inter_visible = \
-                #         self.croco_like_encoder(paired_rgb, modality='rgb', collect_layers=self.dino_decoder_layers)
-
-                #     # 2. Expand masked intermediate features with mask tokens
-                #     thermal_masked_intermediates = self.expand_intermediate_features(
-                #         thermal_inter_visible, mask_thermal, patch_B, patch_N, patch_D
-                #     )
-                #     rgb_masked_intermediates = self.expand_intermediate_features(
-                #         rgb_inter_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb
-                #     )
-
-                #     # 3. Get FULL features for REFERENCE (cross-attention needs full context)
-                #     thermal_full_out = self.shared_backbone.forward_with_intermediate(
-                #         x, layers=self.dino_decoder_layers, return_attention=True
-                #     )
-                #     rgb_full_out = self.shared_backbone.forward_with_intermediate(
-                #         paired_rgb, layers=self.dino_decoder_layers, return_attention=True
-                #     )
-
-                #     # Extract full reference features (for cross-attention)
-                #     num_special_tokens = 1 + self.shared_backbone.num_register_tokens
-                #     thermal_full_features = {
-                #         layer: thermal_full_out[layer][:, num_special_tokens:, :]
-                #         for layer in self.dino_decoder_layers
-                #     }
-                #     rgb_full_features = {
-                #         layer: rgb_full_out[layer][:, num_special_tokens:, :]
-                #         for layer in self.dino_decoder_layers
-                #     }
-
-                #     # For global descriptor & attention (use full encoder output)
-                #     paired_thermal_cls_attn_single_head = thermal_full_out["cls_attention"].sum(dim=1)
-                #     penultimate_patch = thermal_full_out["patch_tokens"]
-                #     paired_thermal_full = thermal_full_out["patch_tokens"]
-                #     paired_rgb_full = rgb_full_out["patch_tokens"]
-
-                #     paired_thermal = {
-                #         "x_norm_patchtokens": paired_thermal_full,
-                #         "x_norm_clstoken": thermal_full_out["cls_token"],
-                #         "cls_attention": thermal_full_out.get("attention", None),
-                #     }
-                #     cls_attn_map = paired_thermal_cls_attn_single_head
-
-                #     # 4. Mask token expansion for final features (for compatibility)
-                #     thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
-                #     rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb)
-
-                #     out = paired_thermal
-                #     if return_masked_patch:
-                #         masked_patch_thermal = thermal_full
-
-                #     # 5. Decoder forward
-                #     # Target: MASKED intermediate features (true masked - visible never saw masked)
-                #     # Reference: FULL intermediate features (for cross-attention context)
-                #     start_layer = self.dino_decoder_layers[0]
-                #     thermal_input = thermal_masked_intermediates[start_layer]
-                #     rgb_input = rgb_masked_intermediates[start_layer]
-
-                #     # Bidirectional decoding:
-                #     # - thermal (masked) decoded with RGB (full) cross-attention
-                #     # - RGB (masked) decoded with thermal (full) cross-attention
-                #     thermal_decoded, rgb_decoded, _, _ = self.dino_decoder.forward_bidirectional(
-                #         x_target=thermal_input,                      # TRUE MASKED thermal
-                #         x_ref=rgb_input,                             # TRUE MASKED RGB
-                #         target_intermediates=thermal_full_features,  # FULL thermal (for RGB->thermal cross-attn)
-                #         ref_intermediates=rgb_full_features,         # FULL RGB (for thermal->RGB cross-attn)
-                #     )
-
-                #     thermal_reconed_dec = thermal_decoded
-                #     rgb_full_dec = rgb_decoded
-
                 if self.use_dino_decoder:
                     # 1-4. masked encoder
                     thermal_visible, mask_thermal, patch_B, patch_N, patch_D, thermal_cls = self.croco_like_encoder(x, modality='thermal')

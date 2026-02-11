@@ -7,6 +7,7 @@ python3 train_wandb.py \
     --train_batch_size 4 \
     --save_dir './logs' \
     --sequences KAIST \
+    --lr 5e-5 \
     --cuda_device $CUDA_VISIBLE_DEVICES \
     --foundation_model_path /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/backbone/dinov2/pretrained/dinov2_vits14_pretrain.pth \
     --queries_per_epoch 2000 \
@@ -14,7 +15,7 @@ python3 train_wandb.py \
     --hard_positives_dist_threshold 10 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
-    --comment "224x224-ViTs-numBlock0-reconWeight2.5-sharedDecoder-unFreezedRecurDinoDecoder(9-12)-decAdapter-GELULinear" \
+    --comment "224x224-ViTs-numBlock0-reconWeight2.5-sharedDecoder-recurDinoDecoder(6-12)-decAdapter-GELULinear-lr5e-5" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
@@ -24,8 +25,7 @@ python3 train_wandb.py \
     --recon_loss_type 'mse+ssim' \
     --num_decoder_depth 8 \
     --use_dino_decoder \
-    --unfreeze_dino_decoder \
-    --dino_decoder_layer_start 9 \
+    --dino_decoder_layer_start 6 \
     --dino_decoder_layer_end 12
 
     # --unfreeze_dino_decoder \

@@ -111,18 +111,26 @@ if __name__ == "__main__":
     '''Loss Function - Initialize early for optimizer'''
     GlobalTriplet = nn.TripletMarginLoss(margin=args.margin, p=2, reduction="sum")
 
-    diff_params = []
+    train_params = []
     for name, param in model.named_parameters():
         if param.requires_grad:
             param.requires_grad = False
-            if 'DiffGeMLoss' in name or 'decoder_blocks' in name:
-                diff_params.append(param)
+            if 'similarity_score' in name or \
+                'recursive_' in name or \
+                'dino_dec_cls_token' in name or \
+                'dino_decoder' in name:
+                
                 param.requires_grad = True
-                print(f" -> Unfrozen: {name}")
+                train_params.append(param)
+                
+    model.module.dino_decoder.freeze_dino_blocks()
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print("Survived_params: ", name)
 
     if args.optim == "adam":
         optimizer = torch.optim.Adam([
-            {'params': diff_params, 'lr': args.lr},
+            {'params': train_params, 'lr': args.lr},
         ])
     elif args.optim == "sgd":
         optimizer = torch.optim.SGD([
@@ -212,6 +220,7 @@ if __name__ == "__main__":
                 triplets_local_indexes = torch.transpose(
                     triplets_local_indexes.view(args.train_batch_size, args.negs_num_per_query, 3), 1, 0)
                 
+                dino_dec_loss_sum = 0
                 triplet_loss_sum = 0
                 rerank_loss_sum = 0
                 local_loss_sum = 0
@@ -229,6 +238,11 @@ if __name__ == "__main__":
                     positive_features = global_features[positives_indexes]
                     negative_features = global_features[negatives_indexes]
                     
+                    ## 새로 추가한거
+                    dino_dec_loss = model.module.stage2_forward(patch_embedding, queries_indexes, positives_indexes, negatives_indexes)
+                    overall_triplet_loss += dino_dec_loss
+                    dino_dec_loss_sum += dino_dec_loss
+
                     # Reranking loss
                     if args.use_recon_loss and args.r2_penultimate_layer:
                         rerank_patch_embedding = penultimate_patch_embedding
