@@ -481,14 +481,30 @@ class CrossModalVPR_Net(nn.Module):
         hidden_dim = dec_embed_dim * 4  
         output_dim = 14 * 14 * 3        
         
-        # 2. Thermal Head 설계 (무겁게: Latent를 Thermal 특성으로 변환)
+        # # 2. Thermal Head 설계 
+        # self.prediction_thermal_head = nn.Sequential(
+        #     nn.Linear(dec_embed_dim, output_dim),
+        # )
+
+        # # 3. RGB Head 설계 
+        # self.prediction_rgb_head = nn.Sequential(
+        #     nn.Linear(dec_embed_dim, output_dim),
+        # )
+        
+        # # 4. 가중치 초기화하기
+        # nn.init.normal_(self.prediction_thermal_head[0].weight, std=0.02)
+        # nn.init.zeros_(self.prediction_thermal_head[0].bias)
+        # nn.init.normal_(self.prediction_rgb_head[0].weight, std=0.02)
+        # nn.init.zeros_(self.prediction_rgb_head[0].bias)
+
+        # 2. Thermal Head 설계
         self.prediction_thermal_head = nn.Sequential(
             nn.Linear(dec_embed_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, output_dim)
         )
 
-        # 3. RGB Head 설계 (무겁게: Latent를 RGB 특성으로 변환)
+        # 3. RGB Head 설계 
         self.prediction_rgb_head = nn.Sequential(
             nn.Linear(dec_embed_dim, hidden_dim),
             nn.GELU(),
