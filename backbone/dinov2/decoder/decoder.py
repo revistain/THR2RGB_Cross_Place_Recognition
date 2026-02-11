@@ -64,7 +64,6 @@ class CrossAttentionAdapter(nn.Module):
         dim: Feature dimension
         num_heads: Number of attention heads
         drop_path: Drop path rate for regularization
-        init_scale: Initial scale value (0 for stable training start)
     """
 
     def __init__(
@@ -72,7 +71,6 @@ class CrossAttentionAdapter(nn.Module):
         dim: int,
         num_heads: int = 12,
         drop_path: float = 0.0,
-        init_scale: float = 0.0,
     ) -> None:
         super().__init__()
 
@@ -89,10 +87,6 @@ class CrossAttentionAdapter(nn.Module):
             num_heads=num_heads,
             batch_first=True,
         )
-
-        # Learnable scale factor (initialized to init_scale for stable training)
-        # When init_scale=0, decoder starts as pure DINO, then gradually learns cross-modal
-        self.scale = nn.Parameter(torch.ones(1) * init_scale)
 
         # Drop path for regularization
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
@@ -136,8 +130,8 @@ class CrossAttentionAdapter(nn.Module):
             average_attn_weights=True,
         )
 
-        # Scale and residual connection with drop path
-        out = x + self.drop_path(self.scale * attn_out)
+        # Residual connection with drop path
+        out = x + self.drop_path(attn_out)
 
         if return_attention:
             return out, attn_weights
@@ -180,7 +174,6 @@ class DinoDecoderBlock(nn.Module):
             dim=dim,
             num_heads=num_heads,
             drop_path=drop_path,
-            init_scale=0.0,  # Start with no cross-modal influence
         )
 
         # ============ MLP components (frozen, from DINO) ============

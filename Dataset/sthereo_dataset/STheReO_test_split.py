@@ -9,7 +9,6 @@ from matplotlib import pyplot as plt
 from PIL import Image
 import cv2
 
-# rsync -avm -e 'ssh -p 20202' --include='*/' --include='pose/***' --exclude='*' /data/datasets/sthereo/ jwkim@211.180.114.160:/DATA2/datasets/PR/STheReO/
 np.random.seed(42)
 dataset_dir = '/data/datasets/sthereo'
 seq = 'KAIST'
@@ -83,6 +82,7 @@ morning_db_t = [thermal_path[0] + morning_t_list[i] + '.png' for i in morning_db
 
 print(len(morning_db_rgb), len(morning_db_t), morning_db.shape[0])
 assert len(morning_db_rgb) == len(morning_db_t) == morning_db.shape[0]
+
 # ## Visualization
 # random_index = np.random.randint(0, len(morning_db_t))
 

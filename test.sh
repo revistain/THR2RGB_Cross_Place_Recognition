@@ -8,12 +8,13 @@ python3 fast_inference.py \
     --sequences KAIST \
     --cuda_device $CUDA_VISIBLE_DEVICES \
     --foundation_model_path /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/backbone/dinov2/pretrained/dinov2_vits14_pretrain.pth \
+    --resume "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/test-224x224-CroCo-ViTs-numBlock0-sharedDecoder-diffLossValue(@)/260211_055822/last_model.pth" \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
     --soft_positives_dist_threshold 10 \
     --hard_positives_dist_threshold 10 \
-    --comment "224x224-Croco-ViTs-numBlock0-localLoss" \
+    --comment "224x224-Croco-ViTs-numBlock0-inference-pairVPR" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
@@ -22,10 +23,10 @@ python3 fast_inference.py \
     --use_recon_loss \
     --recon_loss_type 'mse+ssim' \
     --num_decoder_depth 8 \
-    --visualize_attention \
-    --use_reranking 'diffGeM' \
-    --use_diff_loss \
-    --resume "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/224x224-CroCo-ViTs-numBlock0-sharedDecoder/260204_020552/best_model.pth"
+    --use_reranking 'reconPairVPR' \
+    --use_dino_decoder \
+    --dino_decoder_layer_start 6 \
+    --dino_decoder_layer_end 12
 
     # --selaVPR_rerank_score_type 'none' \
     # --use_reranking 'reconSelaVPR' \

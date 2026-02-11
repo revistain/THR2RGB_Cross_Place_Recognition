@@ -119,14 +119,16 @@ if __name__ == "__main__":
                 'recursive_' in name or \
                 'dino_dec_cls_token' in name or \
                 'dino_decoder' in name:
-                
                 param.requires_grad = True
-                train_params.append(param)
-                
-    model.module.dino_decoder.freeze_dino_blocks()
+    
+    if args.unfreeze_dino_decoder:
+        model.module.dino_decoder.unfreeze_dino_blocks()
+    else:
+        model.module.dino_decoder.freeze_dino_blocks()
+        
     for name, param in model.named_parameters():
         if param.requires_grad:
-            print("Survived_params: ", name)
+            train_params.append(param)
 
     if args.optim == "adam":
         optimizer = torch.optim.Adam([
@@ -134,7 +136,7 @@ if __name__ == "__main__":
         ])
     elif args.optim == "sgd":
         optimizer = torch.optim.SGD([
-            {'params': diff_params, 'lr': args.lr, 'momentum': 0.9, 'weight_decay': 0.001},
+            {'params': train_params, 'lr': args.lr, 'momentum': 0.9, 'weight_decay': 0.001},
         ])
 
     thermal_flag = torch.zeros(1, dtype=torch.long)
@@ -225,7 +227,6 @@ if __name__ == "__main__":
                 rerank_loss_sum = 0
                 local_loss_sum = 0
                 diff_loss_sum = 0
-                lambdas = []
                 optimizer.zero_grad()
                 num_steps = len(triplets_local_indexes)
                 # 각 triplet에 대해 triplet loss 계산
@@ -272,7 +273,6 @@ if __name__ == "__main__":
                             global_features.detach(), patch_embedding.detach(),
                             use_train=True, return_lambda=True
                         )
-                        lambdas.append(lambda_.item())
                         overall_triplet_loss += diff_loss
                         diff_loss_sum += diff_loss
                 
@@ -303,7 +303,7 @@ if __name__ == "__main__":
                 # del patch_embedding, masks, cls_attn_map, penultimate_patch_embedding, masked_patch_embedding
                 # del overall_loss, triplet_loss, recon_loss
                 if args.use_fast_track: break
-            print("Mean of Lambda: ", sum(lambdas) / len(lambdas))
+                
             logging.info(f"Epoch[{epoch_num:02d}]({loop_num + 1}/{loops_num}): " +
                         f"current batch triplet loss = {batch_loss:.8f}, " +
                         f"average epoch triplet loss = {epoch_losses.mean():.8f}")

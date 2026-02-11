@@ -47,8 +47,10 @@ def resume_train(args, model, optimizer=None, strict=False):
     missing, unexpected = model.load_state_dict(new_state_dict, strict=strict)
     
     print(f"Weights loaded.")
-    print(f"- Missing keys (should be DiffLoss only): {len(missing)}")
+    print(f"- Missing keys: {len(missing)}")
+    print("    - Missing: ", missing)
     print(f"- Unexpected keys (should be 0): {len(unexpected)}")
+    print("    - unexpected: ", unexpected)
     
     if optimizer:
         optimizer.load_state_dict(new_state_dict)

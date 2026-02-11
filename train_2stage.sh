@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=0
+CUDA_VISIBLE_DEVICES=1
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
@@ -15,7 +15,7 @@ python3 train_wandb_2stage.py \
     --hard_positives_dist_threshold 10 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
-    --comment "test-224x224-CroCo-ViTs-numBlock0-sharedDecoder-diffLossValue(@)" \
+    --comment "224x224-twoStage-CroCo-ViTs-numBlock0-sharedDecoder-pairVPR-unfreezed" \
     --margin 0.1 \
     --epochs_num 200 \
     --negs_num_per_query 10 \
@@ -23,10 +23,12 @@ python3 train_wandb_2stage.py \
     --recon_weight 2.5 \
     --use_recon_loss \
     --recon_loss_type 'mse+ssim' \
-    --lr 1e-5 \
+    --lr 3e-5 \
+    --use_reranking 'reconPairVPR' \
     --use_dino_decoder \
     --dino_decoder_layer_start 6 \
     --dino_decoder_layer_end 12 \
+    --unfreeze_dino_decoder \
     --is_dino_dec_stage2
 
     # --use_reranking 'diffGeM' \

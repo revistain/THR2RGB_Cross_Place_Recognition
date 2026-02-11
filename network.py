@@ -700,56 +700,84 @@ class CrossModalVPR_Net(nn.Module):
         pos_feature = feature_embs[pos_index]
         neg_feature = feature_embs[neg_index]
 
-        # Pass Through Recursive MLP
-        recur_query_thermal = self.recursive_thermal_head(query_feature) + self.decoder_pos_embed
-        recur_pos_rgb = self.recursive_rgb_head(pos_feature) + self.decoder_pos_embed
-        recur_neg_rgb = self.recursive_rgb_head(neg_feature) + self.decoder_pos_embed
+        # positional embedding 더하기
+        recur_query = self.recursive_thermal_head(query_feature) + self.decoder_pos_embed
+        recur_pos = self.recursive_rgb_head(pos_feature) + self.decoder_pos_embed
+        recur_neg = self.recursive_rgb_head(neg_feature) + self.decoder_pos_embed
+        
+        # CLS 토큰 붙이기
+        B = query_feature.shape[0]
+        dino_dec_cls_token = self.dino_dec_cls_token.expand(B, -1, -1)
+        
+        q_thermal = torch.cat([dino_dec_cls_token, recur_query], dim=1) # [B, N+1, C]
+        q_pos = torch.cat([dino_dec_cls_token, recur_pos], dim=1)
+        q_neg = torch.cat([dino_dec_cls_token, recur_neg], dim=1)
 
-        dino_dec_cls_token = self.dino_dec_cls_token.expand(query_feature.shape[0],-1,-1)
-        recur_query_thermal_withCLS = torch.cat([dino_dec_cls_token, recur_query_thermal], dim=1)
-        recur_pos_rgb_withCLS = torch.cat([dino_dec_cls_token, recur_pos_rgb], dim=1)
-        recur_neg_rgb_withCLS = torch.cat([dino_dec_cls_token, recur_neg_rgb], dim=1)
+        # [Thermal(Q), Pos(Q), Thermal(Q), Neg(Q)]
+        batch_x = torch.cat([q_thermal, q_pos, q_thermal, q_neg], dim=0) # [4B, N+1, C]
 
-        # Prepare reference features for cross-attention
-        thermal_ref_features = {layer: recur_query_thermal for layer in self.dino_decoder_layers}
-        pos_rgb_ref_features = {layer: recur_pos_rgb for layer in self.dino_decoder_layers}
-        neg_rgb_ref_features = {layer: recur_neg_rgb for layer in self.dino_decoder_layers}
+        # [Pos(Ref), Thermal(Ref), Neg(Ref), Thermal(Ref)]
+        batch_ref_features = {}
+        for layer in self.dino_decoder_layers:
+            batch_ref_features[layer] = torch.cat([
+                recur_pos,
+                recur_query,
+                recur_neg,
+                recur_query
+            ], dim=0) # [4B, N, C]
 
-        # DINO Decoder forward (separate pathway from encoder)
-        # batch로 한번에 통과시키기
-        thermal_pos_decoded, _ = self.dino_decoder.forward(
-            x = recur_query_thermal_withCLS,
-            ref_features=pos_rgb_ref_features,
-        )
-        pos_thermal_decoded, _ = self.dino_decoder.forward(
-            x = recur_pos_rgb_withCLS,
-            ref_features=thermal_ref_features,
-        )
-        thermal_neg_decoded, _ = self.dino_decoder.forward(
-            x = recur_query_thermal_withCLS,
-            ref_features=neg_rgb_ref_features,
-        )
-        neg_thermal_decoded, _ = self.dino_decoder.forward(
-            x = recur_neg_rgb_withCLS,
-            ref_features=thermal_ref_features,
+        outputs, _ = self.dino_decoder.forward(
+            x=batch_x,
+            ref_features=batch_ref_features
         )
 
-        thermal_pos_cls = thermal_pos_decoded[:,0,:]
-        pos_thermal_cls = pos_thermal_decoded[:,0,:]
-        thermal_neg_cls = thermal_neg_decoded[:,0,:]
-        neg_thermal_cls = neg_thermal_decoded[:,0,:]
+        cls_tokens = outputs[:, 0, :]
+        all_scores = self.similarity_score_head(cls_tokens).squeeze(1)
 
-        thermal_pos_score = self.similarity_score_head(thermal_pos_cls)
-        pos_thermal_score = self.similarity_score_head(pos_thermal_cls)
-        thermal_neg_score = self.similarity_score_head(thermal_neg_cls)
-        neg_thermal_score = self.similarity_score_head(neg_thermal_cls)
-
-        target = torch.zeros(thermal_pos_score.shape[0] * 4, dtype=torch.float).cuda()
-        target[:thermal_pos_score.shape[0]*2] = 1
-        rerank_loss = self.BCEloss(torch.cat([thermal_pos_score, pos_thermal_score, thermal_neg_score, neg_thermal_score], dim=0).squeeze(1), target)
-
+        target = torch.zeros_like(all_scores)
+        target[:B*2] = 1.0
+        
+        rerank_loss = self.BCEloss(all_scores, target)
+        
         return rerank_loss
 
+    def stage2_inference(self, query_embedding, candidate_embedding):
+        TOP_K_SIZE = candidate_embedding.shape[0]
+        
+        # positional embedding 더하기
+        recur_query = self.recursive_thermal_head(query_embedding) + self.decoder_pos_embed
+        recur_candidate = self.recursive_rgb_head(candidate_embedding) + self.decoder_pos_embed
+        
+        # CLS 토큰 붙이기
+        B = query_embedding.shape[0]
+        dino_dec_cls_token = self.dino_dec_cls_token.expand(B, -1, -1)
+        
+        q_query = torch.cat([dino_dec_cls_token, recur_query], dim=1) # [B, N+1, C]
+        q_candidate = torch.cat([dino_dec_cls_token, recur_candidate], dim=1)
+
+        # [Thermal(Q), Candidate(Q)]
+        batch_x = torch.cat([q_query, q_candidate], dim=0) # [2B, N+1, C]
+
+        # [Pos(Ref), Thermal(Ref), Neg(Ref), Thermal(Ref)]
+        batch_ref_features = {}
+        for layer in self.dino_decoder_layers:
+            batch_ref_features[layer] = torch.cat([
+                recur_candidate,
+                recur_query,
+            ], dim=0) # [2B, N, C]
+
+        outputs, _ = self.dino_decoder.forward(
+            x=batch_x,
+            ref_features=batch_ref_features
+        )
+
+        cls_tokens = outputs[:, 0, :]
+        all_scores = F.sigmoid(self.similarity_score_head(cls_tokens).squeeze(1))
+        # print(all_scores.reshape(2, TOP_K_SIZE).t())
+        all_scores = all_scores.reshape(2, TOP_K_SIZE).t().mean(dim=1)
+        
+        return all_scores.reshape(-1)
+    
     def forward_model(self, x, paired_rgb=None, modality='rgb', return_masked_patch=False):
         """단일 모달리티에 대한 Forward"""
         # self.use_masked_inference: rerank를 위해, decoder에 들어가기 바로 전 단계를 뱉는다

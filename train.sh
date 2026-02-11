@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=6
+CUDA_VISIBLE_DEVICES=2
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
@@ -15,7 +15,7 @@ python3 train_wandb.py \
     --hard_positives_dist_threshold 10 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
-    --comment "224x224-ViTs-numBlock0-reconWeight2.5-sharedDecoder-recurDinoDecoder(6-12)-decAdapter-GELULinear-lr5e-5" \
+    --comment "224x224-ViTs-numBlock0-reconWeight2.5-sharedDecoder-recurDinoDecoder(6-12)-decAdapter-GELULinear-lr5e-5-withoutScale" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
