@@ -9,6 +9,10 @@ wandb/
 *_cache/
 npys/
 npys_agg/
+.claude/
+attention_visualizations/
+debug_alignment/
+ms2_videos*/
 
 *.pth
 *.png

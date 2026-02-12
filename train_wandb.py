@@ -54,7 +54,7 @@ if __name__ == "__main__":
         dinoblock.adapter_dim = args.features_dim
 
     # wandb 초기화
-    wandb.init(project="cross-modal-vpr-4", name=args.comment, config=vars(args))
+    wandb.init(project="cross-modal-vpr-ms2", name=args.comment, config=vars(args))
 
     args.save_dir = os.path.join(args.save_dir, args.comment, utils.get_timestamp())
     commons.setup_logging(args.save_dir)
@@ -69,13 +69,12 @@ if __name__ == "__main__":
     DATASET_FOLDER = "./Dataset/save_mat"
 
     '''Datasets'''
-    args.sequences = ['KAIST']
+    args.sequences = args.train_seq
     triplets_ds = datasets_T2R.TripletsSTheReODual(args, DATASET_FOLDER, use_align_rgb=True)
     train_ds = datasets_T2R.BaseSTheReODual(args, DATASET_FOLDER, split='train')
-    logging.info(f"[Train - KAIST] Database: {train_ds.database_num}, Queries: {train_ds.queries_num}, Total: {len(train_ds)}")
+    logging.info(f"[Train - {args.train_seq}] Database: {train_ds.database_num}, Queries: {train_ds.queries_num}, Total: {len(train_ds)}")
 
-    args.sequences = ['SNU', 'Valley']
-    test_sequences = args.sequences
+    test_sequences = args.test_seq
     test_ds_list = []
     for seq in test_sequences:
         args.sequences = [seq]
@@ -137,36 +136,23 @@ if __name__ == "__main__":
     '''Loss Function - Initialize early for optimizer'''
     GlobalTriplet = nn.TripletMarginLoss(margin=args.margin, p=2, reduction="sum")
 
-    backbone_params = []
-    other_params = []
-    diff_params = []
+    train_params = []
     print("="*30)
-    print(f"Using seperate LR !!!")
-    print(f"- backbone LR: \t{args.backbone_lr}")
-    print(f"- other LR: \t{args.lr}")
+    print(f"- Learning Rate: \t{args.lr}")
     print("="*30)
 
     for name, param in model.named_parameters():
         if param.requires_grad:
-            if 'shared_backbone' in name:
-                backbone_params.append(param)
-            elif 'DiffGeMLoss' in name:
-                diff_params.append(param)
-                print(name)
-            else: other_params.append(param)
-
+            train_params.append(param)
+            print("Training Param: ", name)
 
     if args.optim == "adam":
         optimizer = torch.optim.Adam([
-            {'params': backbone_params, 'lr': args.lr},
-            {'params': other_params, 'lr': args.lr},
-            {'params': diff_params, 'lr': args.lr},
+            {'params': train_params, 'lr': args.lr},
         ])
     elif args.optim == "sgd":
         optimizer = torch.optim.SGD([
-            {'params': backbone_params, 'lr': args.lr, 'momentum': 0.9, 'weight_decay': 0.001},
-            {'params': other_params, 'lr': args.lr, 'momentum': 0.9, 'weight_decay': 0.001},
-            {'params': diff_params, 'lr': args.lr, 'momentum': 0.9, 'weight_decay': 0.001},
+            {'params': train_params, 'lr': args.lr, 'momentum': 0.9, 'weight_decay': 0.001},
         ])
 
     thermal_flag = torch.zeros(1, dtype=torch.long)

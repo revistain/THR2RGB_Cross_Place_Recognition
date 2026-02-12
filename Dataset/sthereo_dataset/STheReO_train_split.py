@@ -66,7 +66,7 @@ for filename in os.listdir(thermal_path[0]):
     if filename.endswith('.png'):
         name_without_extension = os.path.splitext(filename)[0]
         morning_t_list.append(name_without_extension)
-
+        
 morning_rgb_list.sort()
 morning_t_list.sort()
 
@@ -367,6 +367,8 @@ dbStruct = {
     'posDistSqThr': posDistSqThr,
     'nonTrivPosDistSqThr': nonTrivPosDistSqThr
 }
+print("Debug Exit")
+exit()
 matfile = os.path.join(save_path,  'sthereo_train.mat')
 io.savemat(matfile, {'dbStruct': dbStruct})
 

@@ -52,9 +52,10 @@ class Parser():
 
         ### Dataset parameters
         self.parser.add_argument("--img_time", type=str, default="allday", choices=["allday", "daytime", "nighttime", "latetime"])
-        self.parser.add_argument("--sequences", type=str, default=['KAIST', 'SNU', 'Valley'], nargs="+",
-                                 help="List of sequences to load from the dataset. Default: ['KAIST', 'SNU', 'Valley']")
-        self.parser.add_argument("--test_seq", type=str, default=None, help="path of the dataset")
+        # self.parser.add_argument("--sequences", type=str, default=['KAIST', 'SNU', 'Valley'], nargs="+",
+        #                          help="List of sequences to load from the dataset. Default: ['KAIST', 'SNU', 'Valley']")
+        self.parser.add_argument("--train_seq", type=str, default=None, nargs='+', help="_")
+        self.parser.add_argument("--test_seq", type=str, default=None, nargs='+', help="_")
         
         # Data augmentation parameters, # applyed to the training set
         self.parser.add_argument("--brightness", type=float, default=None, help="_")

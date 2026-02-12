@@ -76,46 +76,88 @@ def collate_fn(batch):
 class BaseSTheReODual(data.Dataset):
     def __init__(self, args, dataset_folder, split='test'):
         super().__init__()
+        if all(i in ['Campus', 'Residential', 'Urban'] for i in args.sequences):
+            self.dataset_type = 'ms2'
+        elif all(i in ['KAIST', 'SNU', 'Valley'] for i in args.sequences):
+            self.dataset_type = 'sthereo'
+        else:
+            print("sequence typo i guess")
+            breakpoint()
+            raise Exception("sequence typo i guess")
+        
         self.dataset_folder = dataset_folder
         self.img_time = args.img_time
-        self.matStruct = [loadmat(os.path.join(self.dataset_folder, split, seq, f'sthereo_{split}.mat'))['dbStruct'] for seq in
-                          args.sequences]
+        self.matStruct = [
+            loadmat(os.path.join(self.dataset_folder, split, seq, f'{self.dataset_type}_{split}.mat'))['dbStruct']
+            for seq in args.sequences
+        ]
+        
         for seq in args.sequences:
-            print("load dataset:", seq)
+            print("loading dataset:", seq)
+            
         self.seq_num = len(self.matStruct)
         self.resize = args.resize
         self.test_method = args.test_method
-        # 这里是拿到所有databse的位置
+        
+        # 这里是拿到所有databse的位置(이 부분이 모든 DB의 위치(Pose) 정보를 확보하는 코드입니다)
         self.database_utms = np.concatenate(
             [mat['db_pose'][0, 0] for mat in self.matStruct]
         )
         if self.img_time == 'allday':
-            self.queries_utms = np.concatenate([
-                np.concatenate((
-                    mat['q_pose_morning'][0, 0],
-                    mat['q_pose_afternoon'][0, 0],
-                    mat['q_pose_evening'][0, 0]
-                )) for mat in self.matStruct
-            ])
+            if self.dataset_type == 'sthereo':
+                self.queries_utms = np.concatenate([
+                    np.concatenate((
+                        mat['q_pose_morning'][0, 0],
+                        mat['q_pose_afternoon'][0, 0],
+                        mat['q_pose_evening'][0, 0]
+                    )) for mat in self.matStruct
+                ])
+            else:
+                self.queries_utms = np.concatenate([
+                    np.concatenate((
+                        mat['q_pose_morning'][0, 0],
+                        mat['q_pose_clearsky'][0, 0],
+                        mat['q_pose_rainy'][0, 0],
+                        mat['q_pose_nighttime'][0, 0],
+                    )) for mat in self.matStruct
+                ])
         elif self.img_time == 'daytime':
-            self.queries_utms = np.concatenate([
-                np.concatenate((
-                    mat['q_pose_morning'][0, 0],
-                    mat['q_pose_afternoon'][0, 0]
-                )) for mat in self.matStruct
-            ])
-
+            if self.dataset_type == 'sthereo':
+                self.queries_utms = np.concatenate([
+                    np.concatenate((
+                        mat['q_pose_morning'][0, 0],
+                        mat['q_pose_afternoon'][0, 0]
+                    )) for mat in self.matStruct
+                ])
+            else:
+                self.queries_utms = np.concatenate([
+                    np.concatenate((
+                        mat['q_pose_morning'][0, 0],
+                        mat['q_pose_clearsky'][0, 0],
+                        mat['q_pose_rainy'][0, 0],
+                    )) for mat in self.matStruct
+                ])
         elif self.img_time == 'nighttime':
-            self.queries_utms = np.concatenate([
-                mat['q_pose_evening'][0, 0] for mat in self.matStruct
-            ])
+            if self.dataset_type == 'sthereo':
+                self.queries_utms = np.concatenate([
+                    mat['q_pose_evening'][0, 0] for mat in self.matStruct
+                ])
+            else:
+                self.queries_utms = np.concatenate([
+                    mat['q_pose_nighttime'][0, 0] for mat in self.matStruct
+                ])
         elif self.img_time == 'latetime':
-            self.queries_utms = np.concatenate([
-                np.concatenate((
-                    mat['q_pose_afternoon'][0, 0],
-                    mat['q_pose_evening'][0, 0],
-                )) for mat in self.matStruct
-            ])
+            if self.dataset_type == 'sthereo':
+                self.queries_utms = np.concatenate([
+                    np.concatenate((
+                        mat['q_pose_afternoon'][0, 0],
+                        mat['q_pose_evening'][0, 0],
+                    )) for mat in self.matStruct
+                ])
+            else:
+                self.queries_utms = np.concatenate([
+                    mat['q_pose_nighttime'][0, 0] for mat in self.matStruct
+                ])
 
         knn = NearestNeighbors(n_jobs=4)
         knn.fit(self.database_utms)
@@ -127,64 +169,121 @@ class BaseSTheReODual(data.Dataset):
             [mat['db_rgb'][0, 0] for mat in self.matStruct]
         )
         if self.img_time == 'allday':
-            self.rgb_queries_paths = np.concatenate([
-                np.concatenate((
-                    mat['q_rgb_morning'][0, 0],
-                    mat['q_rgb_afternoon'][0, 0],
-                    mat['q_rgb_evening'][0, 0]
-                )) for mat in self.matStruct
-            ])
+            if self.dataset_type == 'sthereo':
+                self.rgb_queries_paths = np.concatenate([
+                    np.concatenate((
+                        mat['q_rgb_morning'][0, 0],
+                        mat['q_rgb_afternoon'][0, 0],
+                        mat['q_rgb_evening'][0, 0]
+                    )) for mat in self.matStruct
+                ])
+            else:
+                self.rgb_queries_paths = np.concatenate([
+                    np.concatenate((
+                        mat['q_rgb_morning'][0, 0],
+                        mat['q_rgb_clearsky'][0, 0],
+                        mat['q_rgb_rainy'][0, 0],
+                        mat['q_rgb_nighttime'][0, 0],
+                    )) for mat in self.matStruct
+                ])
         elif self.img_time == 'daytime':
-            self.rgb_queries_paths = np.concatenate([
-                np.concatenate((
-                    mat['q_rgb_morning'][0, 0],
-                    mat['q_rgb_afternoon'][0, 0]
-                )) for mat in self.matStruct
-            ])
+            if self.dataset_type == 'sthereo':
+                self.rgb_queries_paths = np.concatenate([
+                    np.concatenate((
+                        mat['q_rgb_morning'][0, 0],
+                        mat['q_rgb_afternoon'][0, 0]
+                    )) for mat in self.matStruct
+                ])
+            else:
+                self.rgb_queries_paths = np.concatenate([
+                    np.concatenate((
+                        mat['q_rgb_morning'][0, 0],
+                        mat['q_rgb_clearsky'][0, 0],
+                        mat['q_rgb_rainy'][0, 0],
+                    )) for mat in self.matStruct
+                ])
 
         elif self.img_time == 'nighttime':
-            self.rgb_queries_paths = np.concatenate([
-                mat['q_rgb_evening'][0, 0] for mat in self.matStruct
-            ])
+            if self.dataset_type == 'sthereo':
+                self.rgb_queries_paths = np.concatenate([
+                    mat['q_rgb_evening'][0, 0] for mat in self.matStruct
+                ])
+            else:
+                self.rgb_queries_paths = np.concatenate([
+                    mat['q_rgb_nighttime'][0, 0] for mat in self.matStruct
+                ])
         elif self.img_time == 'latetime':
-            self.rgb_queries_paths = np.concatenate([
-                np.concatenate((
-                    mat['q_rgb_afternoon'][0, 0],
-                    mat['q_rgb_evening'][0, 0],
-                )) for mat in self.matStruct
-            ])
+            if self.dataset_type == 'sthereo':
+                self.rgb_queries_paths = np.concatenate([
+                    np.concatenate((
+                        mat['q_rgb_afternoon'][0, 0],
+                        mat['q_rgb_evening'][0, 0],
+                    )) for mat in self.matStruct
+                ])
+            else:
+                self.rgb_queries_paths = np.concatenate([
+                    mat['q_rgb_nighttime'][0, 0] for mat in self.matStruct
+                ])
 
         self.t_database_paths = np.concatenate(
             [mat['db_t'][0, 0] for mat in self.matStruct]
         )
         if self.img_time == 'allday':
-            self.t_queries_paths = np.concatenate([
-                np.concatenate((
-                    mat['q_t_morning'][0, 0],
-                    mat['q_t_afternoon'][0, 0],
-                    mat['q_t_evening'][0, 0]
-                )) for mat in self.matStruct
-            ])
+            if self.dataset_type == 'sthereo':
+                self.t_queries_paths = np.concatenate([
+                    np.concatenate((
+                        mat['q_t_morning'][0, 0],
+                        mat['q_t_afternoon'][0, 0],
+                        mat['q_t_evening'][0, 0]
+                    )) for mat in self.matStruct
+                ])
+            else:
+                self.t_queries_paths = np.concatenate([
+                    np.concatenate((
+                        mat['q_t_morning'][0, 0],
+                        mat['q_t_clearsky'][0, 0],
+                        mat['q_t_rainy'][0, 0],
+                        mat['q_t_nighttime'][0, 0],
+                    )) for mat in self.matStruct
+                ])
         elif self.img_time == 'daytime':
-            self.t_queries_paths = np.concatenate([
-                np.concatenate((
-                    mat['q_t_morning'][0, 0],
-                    mat['q_t_afternoon'][0, 0]
-                )) for mat in self.matStruct
-            ])
-
+            if self.dataset_type == 'sthereo':
+                self.t_queries_paths = np.concatenate([
+                    np.concatenate((
+                        mat['q_t_morning'][0, 0],
+                        mat['q_t_afternoon'][0, 0]
+                    )) for mat in self.matStruct
+                ])
+            else:
+                self.t_queries_paths = np.concatenate([
+                    np.concatenate((
+                        mat['q_t_morning'][0, 0],
+                        mat['q_t_clearsky'][0, 0],
+                        mat['q_t_rainy'][0, 0],
+                    )) for mat in self.matStruct
+                ])
         elif self.img_time == 'nighttime':
-            self.t_queries_paths = np.concatenate([
-                mat['q_t_evening'][0, 0] for mat in self.matStruct
-            ])
+            if self.dataset_type == 'sthereo':
+                self.t_queries_paths = np.concatenate([
+                    mat['q_t_evening'][0, 0] for mat in self.matStruct
+                ])
+            else:
+                self.t_queries_paths = np.concatenate([
+                    mat['q_t_nighttime'][0, 0] for mat in self.matStruct
+                ])
         elif self.img_time == 'latetime':
-            self.t_queries_paths = np.concatenate([
-                np.concatenate((
-                    mat['q_t_afternoon'][0, 0],
-                    mat['q_t_evening'][0, 0],
-                )) for mat in self.matStruct
-            ])
-
+            if self.dataset_type == 'sthereo':
+                self.t_queries_paths = np.concatenate([
+                    np.concatenate((
+                        mat['q_t_afternoon'][0, 0],
+                        mat['q_t_evening'][0, 0],
+                    )) for mat in self.matStruct
+                ])
+            else:
+                self.t_queries_paths = np.concatenate([
+                    mat['q_t_nighttime'][0, 0] for mat in self.matStruct
+                ])
+                
         assert (self.t_database_paths.shape) == (self.rgb_database_paths.shape) and (self.t_queries_paths.shape) == (self.rgb_queries_paths.shape)
 
         self.rgb_img_paths = list(self.rgb_database_paths) + list(self.rgb_queries_paths)
@@ -193,8 +292,12 @@ class BaseSTheReODual(data.Dataset):
         self.queries_num = len(self.rgb_queries_paths)
         
     def get_rgb_img(self, path):
-        img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-        img = cv2.cvtColor(img, cv2.COLOR_BAYER_BG2RGB)
+        if self.dataset_type == 'sthereo':
+            img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+            img = cv2.cvtColor(img, cv2.COLOR_BAYER_BG2RGB)
+        else:  # ms2
+            img = cv2.imread(path, cv2.IMREAD_COLOR)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         return img
 
     def get_thermal_img(self, path):

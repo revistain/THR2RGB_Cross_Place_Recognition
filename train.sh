@@ -6,7 +6,8 @@ CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
 python3 train_wandb.py \
     --train_batch_size 4 \
     --save_dir './logs' \
-    --sequences KAIST \
+    --train_seq Campus \
+    --test_seq Urban Residential \
     --lr 5e-5 \
     --cuda_device $CUDA_VISIBLE_DEVICES \
     --foundation_model_path /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/backbone/dinov2/pretrained/dinov2_vits14_pretrain.pth \
@@ -15,7 +16,7 @@ python3 train_wandb.py \
     --hard_positives_dist_threshold 10 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
-    --comment "224x224-ViTs-numBlock0-reconWeight2.5-sharedDecoder-recurDinoDecoder(6-12)-decAdapter-GELULinear-lr5e-5-withoutScale" \
+    --comment "(Campus,UrbanResidential)-recurDinoDecoder(Weight2.5, 6-12)" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \

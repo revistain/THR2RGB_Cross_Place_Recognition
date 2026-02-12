@@ -38,7 +38,7 @@ if __name__ == "__main__":
         
             with open(gps_path, "r") as gps_file:
                 gps_lines = gps_file.readlines()
-                easting, northing = gps2utm.transform(float(gps_lines[0].strip()), float(gps_lines[2].strip()))
+                easting, northing = gps2utm.transform(float(gps_lines[0].strip()), float(gps_lines[1].strip()))
                 timestamp_UTM[idx][1] = easting
                 timestamp_UTM[idx][2] = northing
         
