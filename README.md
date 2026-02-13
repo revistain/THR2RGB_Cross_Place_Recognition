@@ -1,6 +1,7 @@
 준비작업
-
 a. DINOv2_small pretrained
+b. docker image: thr2rgb_vpr
+아니면 pip install -r requirements.txt
 (다운) https://dl.fbaipublicfiles.com/dinov2/dinov2_vits14/dinov2_vits14_pretrain.pth
 b. 데이터셋 가공(sampling)
 

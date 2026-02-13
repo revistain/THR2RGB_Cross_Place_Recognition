@@ -16,7 +16,7 @@ class Parser():
         self.parser.add_argument("--optim", type=str, default='adam', choices=['adam', 'sgd'])
         self.parser.add_argument("--margin", type=float, default=0.1)
         self.parser.add_argument("--lr", type=float, default=0.00001)
-        self.parser.add_argument("--epochs_num", type=int, default=100)
+        self.parser.add_argument("--epochs_num", type=int, default=50)
         self.parser.add_argument("--train_batch_size", type=int, default=4)
         self.parser.add_argument("--patience", type=int, default=5)
 
