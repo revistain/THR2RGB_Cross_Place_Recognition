@@ -95,7 +95,7 @@ class Parser():
         self.parser.add_argument("--num_decoder_depth", type=int, default=8, help="_")
         self.parser.add_argument("--use_only_cross_decoder", action='store_true', default=False)
         self.parser.add_argument("--use_pos_as_aligned_rgb", action='store_true', default=False)
-        self.parser.add_argument("--recon_loss_type", type=str, default="none", choices=['mse', 'l1', 'ssim', 'mse+ssim'])
+        self.parser.add_argument("--recon_loss_type", type=str, default="none", choices=['mse', 'l1', 'ssim', 'mse+ssim', 'GV', 'GV+l1', 'l1+ssim'])
         self.parser.add_argument("--use_fast_track", action='store_true', default=False)
         self.parser.add_argument("--rerank_with_RGB", action='store_true', default=False)
         self.parser.add_argument("--r2_penultimate_layer", action='store_true', default=False)

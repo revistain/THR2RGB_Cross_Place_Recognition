@@ -98,9 +98,8 @@ def main():
     # 5. Dataset Preparation
     DATASET_FOLDER = "./Dataset/save_mat"
     
-    # 테스트하고 싶은 시퀀스 목록 (기본값: SNU, Valley)
-    # 필요시 args.sequences를 덮어쓰거나 파라미터로 조절 가능
-    target_sequences = ['Valley', 'SNU'] 
+    # 테스트하고 싶은 시퀀스 목록 (args.sequences에서 받음, 미지정 시 기본값 사용)
+    target_sequences = args.sequences if args.sequences else ['Valley', 'SNU']
     
     logging.info(f"Target Sequences for Inference: {target_sequences}")
 

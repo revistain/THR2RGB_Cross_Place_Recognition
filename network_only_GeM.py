@@ -361,7 +361,8 @@ class CrossModalVPR_Net(nn.Module):
         self.output_dim = args.features_dim
         if self.args.use_reranking == 'selaVPR':
             self.local_adapt = LocalAdapt(args.features_dim)
-        self.reranker = RerankingModule(args)
+        if self.args.use_reranking == 'r2former':
+            self.reranker = RerankingModule(args)
 
         # 2. Aggregation Layer (각각 따로 두는 것을 추천)
         self.rgb_aggregation = nn.Sequential(

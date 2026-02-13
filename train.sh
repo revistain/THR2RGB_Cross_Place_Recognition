@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=2
+CUDA_VISIBLE_DEVICES=0
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
@@ -8,7 +8,7 @@ python3 train_wandb.py \
     --save_dir './logs' \
     --train_seq Campus \
     --test_seq Urban Residential \
-    --lr 5e-5 \
+    --lr 3e-5 \
     --cuda_device $CUDA_VISIBLE_DEVICES \
     --foundation_model_path /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/backbone/dinov2/pretrained/dinov2_vits14_pretrain.pth \
     --queries_per_epoch 2000 \
@@ -16,18 +16,14 @@ python3 train_wandb.py \
     --hard_positives_dist_threshold 10 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
-    --comment "(Campus,UrbanResidential)-recurDinoDecoder(Weight2.5, 6-12)" \
+    --comment "biRecon(10,l1)-warmup(3e-5)" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
     --croco_mask_ratio 0.8 \
-    --recon_weight 2.5 \
+    --recon_weight 10 \
     --use_recon_loss \
-    --recon_loss_type 'mse+ssim' \
-    --num_decoder_depth 8 \
-    --use_dino_decoder \
-    --dino_decoder_layer_start 6 \
-    --dino_decoder_layer_end 12
+    --recon_loss_type 'l1'
 
     # --unfreeze_dino_decoder \
     # --use_diff_loss \
@@ -67,6 +63,11 @@ python3 train_wandb.py \
     # --use_selaVPR_attn_score \
     ###
     # --use_reranking 'match_conf' \
+
+    #### DINO decoder
+    # --use_dino_decoder \
+    # --dino_decoder_layer_start 6 \
+    # --dino_decoder_layer_end 12
 
 
     # --use_fast_track \
