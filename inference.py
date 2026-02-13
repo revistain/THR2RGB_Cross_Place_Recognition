@@ -23,24 +23,7 @@ def get_timestamp():
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
-def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True, seq_name=""):
-    """
-    Inference for cross-modal visual place recognition.
-
-    Args:
-        args: Configuration arguments
-        eval_ds: Evaluation dataset
-        model: Trained model
-        pca: Optional PCA for dimensionality reduction
-        k: Number of nearest neighbors
-        use_cuda: Whether to use CUDA
-        verbose: Whether to print verbose logs
-        seq_name: Sequence name for logging
-
-    Returns:
-        recalls: Recall values at different K
-        recalls_str: Formatted recall string
-    """
+def inference(args, eval_ds, model):
     orig_W = args.resize[0]
     orig_H = args.resize[1]
     patch_W = int(orig_W / 14)

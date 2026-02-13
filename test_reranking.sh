@@ -1,18 +1,18 @@
-CUDA_VISIBLE_DEVICES=0
+CUDA_VISIBLE_DEVICES=4
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=4 \
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
-python3 train_wandb.py \
+python3 fast_inference.py \
+    --save_dir './logs' \
     --cuda_device $CUDA_VISIBLE_DEVICES \
     --foundation_model_path /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/backbone/dinov2/pretrained/dinov2_vits14_pretrain.pth \
-    --save_dir './logs' \
-    --lr 3e-5 \
-    --train_seq KAIST \
-    --test_seq SNU Valley \
-    --comment "CroCo-beforeA6000(Sthereo,lr3e-5)" \
+    --resume "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/CroCo-beforeA6000(lr3e-5)/260213_083100/best_model.pth" \
+    --test_seq Urban \
+    --comment "224x224" \
     --croco_mask_ratio 0.8 \
     --recon_weight 10 \
     --use_recon_loss \
     --recon_loss_type 'l1' \
-    --num_decoder_depth 8
+    --num_decoder_depth 8 \
+    --use_reranking 'recon'
