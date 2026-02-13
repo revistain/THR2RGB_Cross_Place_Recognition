@@ -1,4 +1,3 @@
-```markdown
 # 준비 작업
 
 ## a. DINOv2_small pretrained 다운로드
