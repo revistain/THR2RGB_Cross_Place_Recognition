@@ -99,14 +99,14 @@ def main():
     DATASET_FOLDER = "./Dataset/save_mat"
     
     # 테스트하고 싶은 시퀀스 목록 (args.sequences에서 받음, 미지정 시 기본값 사용)
-    target_sequences = args.sequences if args.sequences else ['Valley', 'SNU']
+    test_sequences = args.test_seq
     
-    logging.info(f"Target Sequences for Inference: {target_sequences}")
+    logging.info(f"Target Sequences for Inference: {test_sequences}")
 
     # 6. Run Inference
     total_r1 = []
 
-    for seq in target_sequences:
+    for seq in test_sequences:
         logging.info(f"================================================")
         logging.info(f"===== Evaluating Sequence: {seq} =====")
 
@@ -156,7 +156,6 @@ def main():
                             cls_attn_multihead=cls_attn_multihead,
                             global_desc=global_desc
                         )
-                        break
 
                 # Visualize RGB database
                 rgb_indices = [i for i in vis_indices if i < test_ds.database_num]
@@ -198,7 +197,7 @@ def main():
         total_r1.append(recalls[0]) # R@1 저장
 
     logging.info(f"================================================")
-    logging.info(f"Average R@1 over {len(target_sequences)} sequences: {np.mean(total_r1):.2f}")
+    logging.info(f"Average R@1 over {len(test_sequences)} sequences: {np.mean(total_r1):.2f}")
     logging.info(f"Inference Completed.")
     logging.info(f"Comment: {args.comment}")
 

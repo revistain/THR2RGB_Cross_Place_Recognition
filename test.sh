@@ -5,10 +5,10 @@ OMP_NUM_THREADS=8 \
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
 python3 fast_inference.py \
     --save_dir './logs' \
-    --sequences KAIST \
+    --test_seq Urban Residential \
     --cuda_device $CUDA_VISIBLE_DEVICES \
     --foundation_model_path /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/backbone/dinov2/pretrained/dinov2_vits14_pretrain.pth \
-    --resume "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/test-224x224-CroCo-ViTs-numBlock0-sharedDecoder-diffLossValue(@)/260211_055822/last_model.pth" \
+    --resume "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/biRecon(10,l1)-warmup(3e-5)/260213_021641/best_model.pth" \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
@@ -21,12 +21,9 @@ python3 fast_inference.py \
     --croco_mask_ratio 0.8 \
     --recon_weight 10 \
     --use_recon_loss \
-    --recon_loss_type 'mse+ssim' \
+    --recon_loss_type 'l1' \
     --num_decoder_depth 8 \
-    --use_reranking 'reconPairVPR' \
-    --use_dino_decoder \
-    --dino_decoder_layer_start 6 \
-    --dino_decoder_layer_end 12
+    --visualize_attention
 
     # --selaVPR_rerank_score_type 'none' \
     # --use_reranking 'reconSelaVPR' \
