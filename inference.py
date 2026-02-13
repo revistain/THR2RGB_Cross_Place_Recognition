@@ -344,8 +344,157 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                         del encoded_dbs_features, encoded_dbs_attn_map, encoded_dbs_descriptor, concated_db_patches_flat, concated_db_attn_map_flat
                         # if args.use_fast_track: break
             elif args.use_reranking == 'recon':
-                # FIXME: 옛날 코드에서 긁어서 추가하기
-                ...
+                # Bidirectional reconstruction loss reranking
+                logging.info("Using bidirectional reconstruction loss reranking")
+
+                from torchvision.transforms import v2
+                from datasets_T2R import base_transform
+
+                predictions_list = []
+                rerank_scores_dict = {}
+
+                # Reuse model's reconstruction criterion
+                recon_criterion = model.module.reconstruction_criterion
+
+                # Check if using DINO decoder
+                use_dino_decoder = model.module.args.use_dino_decoder
+
+                with torch.no_grad():
+                    for query_index, pred in enumerate(tqdm(prev_predictions, desc="Recon Reranking")):
+                        top_k_indices = pred[:RERANKING_TOP_K]
+
+                        # ===== 1. Load raw images =====
+                        query_img_raw = eval_ds.get_thermal_img(eval_ds.t_queries_paths[query_index])
+                        query_img = base_transform(query_img_raw)
+                        query_img = v2.functional.resize(query_img, args.resize).unsqueeze(0).cuda()
+
+                        candidate_imgs = []
+                        for db_idx in top_k_indices:
+                            cand_img_raw = eval_ds.get_rgb_img(eval_ds.rgb_database_paths[db_idx])
+                            cand_img = base_transform(cand_img_raw)
+                            cand_img = v2.functional.resize(cand_img, args.resize)
+                            candidate_imgs.append(cand_img)
+                        candidate_imgs = torch.stack(candidate_imgs).cuda()  # [K, 3, H, W]
+
+                        # ===== 2. Get encoder features =====
+                        query_batch = query_img.expand(RERANKING_TOP_K, -1, -1, -1)  # [K, 3, H, W]
+
+                        thermal_out = model.module.shared_backbone(query_batch, return_attention=True)
+                        rgb_out = model.module.shared_backbone(candidate_imgs, return_attention=True)
+
+                        thermal_feat = thermal_out["x_norm_patchtokens"]  # [K, N, D]
+                        rgb_feat = rgb_out["x_norm_patchtokens"]  # [K, N, D]
+
+                        B, N, D = thermal_feat.shape
+                        H_feat, W_feat = int(args.resize[0]/14), int(args.resize[1]/14)
+
+                        # ===== 3. Compute GeM attention scores =====
+                        thermal_spatial = thermal_feat.permute(0, 2, 1).view(B, D, H_feat, W_feat)
+                        thermal_gem = model.module.thermal_aggregation(thermal_spatial)
+                        thermal_gem_scores = torch.einsum('bd,bnd->bn', thermal_gem.detach(), thermal_feat.detach())
+
+                        rgb_spatial = rgb_feat.permute(0, 2, 1).view(B, D, H_feat, W_feat)
+                        rgb_gem = model.module.rgb_aggregation(rgb_spatial)
+                        rgb_gem_scores = torch.einsum('bd,bnd->bn', rgb_gem.detach(), rgb_feat.detach())
+
+                        # ===== 4. Generate masks (mask high GeM attention) =====
+                        mask_generator = model.module.mask_generator
+                        thermal_masks = mask_generator(thermal_feat, gem_score=thermal_gem_scores)  # [K, N]
+                        rgb_masks = mask_generator(rgb_feat, gem_score=rgb_gem_scores)  # [K, N]
+
+                        # ===== 5. Apply recursive MLP and mask expansion =====
+                        if use_dino_decoder:
+                            # DINO decoder path: use recursive heads
+                            recur_thermal = model.module.recursive_thermal_head(thermal_feat)
+                            recur_rgb = model.module.recursive_rgb_head(rgb_feat)
+
+                            # Mask expansion
+                            thermal_masked = model.module.mask_token.expand(B, N, -1).clone()
+                            thermal_masked[~thermal_masks] = recur_thermal[~thermal_masks]
+
+                            rgb_masked = model.module.mask_token.expand(B, N, -1).clone()
+                            rgb_masked[~rgb_masks] = recur_rgb[~rgb_masks]
+
+                            # Reference features (full features after recursive MLP)
+                            thermal_ref_features = {layer: recur_thermal for layer in model.module.dino_decoder_layers}
+                            rgb_ref_features = {layer: recur_rgb for layer in model.module.dino_decoder_layers}
+
+                            # ===== 6. Bidirectional DINO decoder =====
+                            # Direction 1: thermal (masked) <- RGB (reference)
+                            thermal_dec, _ = model.module.dino_decoder.forward(
+                                x=thermal_masked + model.module.decoder_pos_embed,
+                                ref_features=rgb_ref_features,
+                            )
+
+                            # Direction 2: RGB (masked) <- thermal (reference)
+                            rgb_dec, _ = model.module.dino_decoder.forward(
+                                x=rgb_masked + model.module.decoder_pos_embed,
+                                ref_features=thermal_ref_features,
+                            )
+                        else:
+                            # CroCo decoder path
+                            # Apply projection if needed
+                            if model.module.args.use_mlp_dim_before_decoder != 0:
+                                thermal_feat_proj = model.module.proj_before_decoder(thermal_feat)
+                                rgb_feat_proj = model.module.proj_before_decoder(rgb_feat)
+                            else:
+                                thermal_feat_proj = thermal_feat
+                                rgb_feat_proj = rgb_feat
+
+                            # Mask expansion
+                            thermal_masked = model.module.mask_token.expand(B, N, -1).clone()
+                            thermal_masked[~thermal_masks] = thermal_feat_proj[~thermal_masks]
+
+                            rgb_masked = model.module.mask_token.expand(B, N, -1).clone()
+                            rgb_masked[~rgb_masks] = rgb_feat_proj[~rgb_masks]
+
+                            # ===== 6. Bidirectional CroCo decoder =====
+                            # Direction 1: thermal (masked) <- RGB (reference)
+                            thermal_dec = thermal_masked + model.module.decoder_pos_embed
+                            rgb_ref = rgb_feat_proj + model.module.decoder_pos_embed
+                            for blk in model.module.decoder_blocks:
+                                thermal_dec = blk(thermal_dec, rgb_ref)
+                            thermal_dec = model.module.decoder_norm(thermal_dec)
+
+                            # Direction 2: RGB (masked) <- thermal (reference)
+                            rgb_dec = rgb_masked + model.module.decoder_pos_embed
+                            thermal_ref = thermal_feat_proj + model.module.decoder_pos_embed
+                            for blk in model.module.decoder_blocks:
+                                rgb_dec = blk(rgb_dec, thermal_ref)
+                            rgb_dec = model.module.decoder_norm(rgb_dec)
+
+                        # ===== 7. Prediction heads =====
+                        thermal_recon = model.module.prediction_thermal_head(thermal_dec)  # [K, N, 588]
+                        rgb_recon = model.module.prediction_rgb_head(rgb_dec)  # [K, N, 588]
+
+                        # ===== 8. Target patches =====
+                        thermal_target = patchify(query_batch)  # [K, N, 588]
+                        rgb_target = patchify(candidate_imgs)   # [K, N, 588]
+
+                        # ===== 9. Compute losses per candidate =====
+                        recon_losses = []
+                        for k in range(RERANKING_TOP_K):
+                            loss_thermal = recon_criterion(
+                                pred=thermal_recon[k:k+1],
+                                mask=thermal_masks[k:k+1],
+                                target=thermal_target[k:k+1]
+                            )
+                            loss_rgb = recon_criterion(
+                                pred=rgb_recon[k:k+1],
+                                mask=rgb_masks[k:k+1],
+                                target=rgb_target[k:k+1]
+                            )
+                            avg_loss = (loss_thermal.item() + loss_rgb.item()) / 2
+                            recon_losses.append(avg_loss)
+
+                        recon_losses = np.array(recon_losses)
+
+                        # ===== 10. Rerank (lower loss = better match) =====
+                        rerank_index = recon_losses.argsort()
+                        rerank_scores_dict[query_index] = recon_losses[rerank_index].tolist()
+                        predictions_list.append(pred[rerank_index])
+
+                predictions = np.array(predictions_list)
             elif args.use_reranking == 'selaVPR':
                 saved_files = os.listdir(NPY_ROOTPATH)
                 prefix = "sela"

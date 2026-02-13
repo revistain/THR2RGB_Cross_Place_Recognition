@@ -360,8 +360,14 @@ class CrossModalVPR_Net(nn.Module):
         if args.use_diff_loss:
             self.DiffGeMLoss = DiffLoss(args).to(args.device)
     
-        self.output_dim = args.features_dim
-        self.use_masked_inference = False
+        self.output_dim = self.decoder_dim = args.features_dim
+        if args.use_mlp_dim_before_decoder != 0:
+            print("=="*10)
+            self.proj_before_decoder = nn.Linear(self.output_dim, args.use_mlp_dim_before_decoder)
+            print("dimcoder_dim_before:", self.decoder_dim)
+            self.decoder_dim = args.use_mlp_dim_before_decoder
+            print("dimcoder_dim_after :", self.decoder_dim)
+            
         self.use_only_cross_decdoer = args.use_only_cross_decoder
         self.recon_loss_type = args.recon_loss_type
         if args.use_sela_local_loss or args.use_reranking in ['selaVPR', 'reconSelaVPR']:
@@ -435,18 +441,18 @@ class CrossModalVPR_Net(nn.Module):
             print(f"Using Swin Decoder: window_size={window_size}, drop_path_rate={drop_path_rate}")
         else:
             self.decoder_blocks = nn.ModuleList([
-                CroCoDecoderBlock(self.output_dim, dec_num_heads)
+                CroCoDecoderBlock(self.decoder_dim, dec_num_heads)
                 for _ in range(dec_depth)
             ])
 
-        self.decoder_norm = nn.LayerNorm(self.output_dim)
+        self.decoder_norm = nn.LayerNorm(self.decoder_dim)
         self.mask_token = None
         self.patch_count = int(args.resize[0]/14)*int(args.resize[1]/14)
         self._set_dino_decode_cls_tokens()
-        self._set_mask_token(self.output_dim)
-        self._set_decode_positional_embedding(self.output_dim)
+        self._set_mask_token(self.decoder_dim)
+        self._set_decode_positional_embedding(self.decoder_dim)
         self._set_mask_generator(self.patch_count, args.croco_mask_ratio)
-        self._set_prediction_head(self.output_dim, args.resize[0], args.resize[1])
+        self._set_prediction_head(self.decoder_dim, args.resize[0], args.resize[1])
         if self.args.use_reranking == 'r2former':
             self.reranker = RerankingModule(args)
         
@@ -490,7 +496,7 @@ class CrossModalVPR_Net(nn.Module):
     
     def _set_mask_generator(self, num_patches, mask_ratio):
         """Random masking generator 초기화"""
-        self.mask_generator = RandomMask(num_patches, mask_ratio)
+        self.mask_generator = RandomMask(num_patches, mask_ratio, method=self.args.masking_method)
 
     def _set_prediction_head(self, dec_embed_dim, image_H, image_W):
         # 1. 차원 설정 (ViT Standard: 4x Expansion)
@@ -591,7 +597,7 @@ class CrossModalVPR_Net(nn.Module):
         return imgs
     
     
-    def croco_like_encoder(self, x, modality='thermal', collect_layers=None):
+    def croco_like_encoder(self, x, modality='thermal', collect_layers=None, gem_score=None, cls_score=None):
         """
         Masked encoder following CroCo style.
 
@@ -640,7 +646,7 @@ class CrossModalVPR_Net(nn.Module):
             ], dim=1)  # [B, 1 + num_register_tokens + 256, 768]
 
         # Masking (CLS and register tokens are always visible)
-        mask = self.mask_generator(image_patch)  # [B, 256]
+        mask = self.mask_generator(image_patch, gem_score=gem_score, cls_score=cls_score)  # [B, 256]
         cls_reg_mask = torch.zeros(patch_B, 1 + num_register_tokens, dtype=torch.bool, device=mask.device)
         full_mask = torch.cat([cls_reg_mask, mask], dim=1)  # [B, 1 + num_reg + 256]
 
@@ -666,11 +672,11 @@ class CrossModalVPR_Net(nn.Module):
         return patch_only_visible, mask, patch_B, patch_N, patch_D, cls_visible
 
 
-    def croco_encoded_mask_expension(self, thermal_visible, mask, patch_B, patch_N, patch_D):
+    def croco_encoded_mask_expension(self, thermal_visible, mask, patch_B, patch_N):
         # CROCO로 masking된 부분 mask token으로 채워넣기
         thermal_full = self.mask_token.expand(patch_B, patch_N, -1).clone()  # [B, 256, 768]
         thermal_full[~mask] = thermal_visible.flatten(0, 1)  # 이제 shape 맞음
-        thermal_full = thermal_full.view(patch_B, patch_N, patch_D)
+        thermal_full = thermal_full.view(patch_B, patch_N, -1)
         return thermal_full
 
     def expand_intermediate_features(self, intermediate_visible, mask, patch_B, patch_N, patch_D):
@@ -790,19 +796,9 @@ class CrossModalVPR_Net(nn.Module):
         masked_patch_thermal = None
         cls_attn_map = None
         if modality == 'rgb':
-            if self.use_masked_inference:
-                rgb_visible, mask_rgb, patch_B, patch_N, patch_D, rgb_cls = self.croco_like_encoder(x, modality='rgb')
-                rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B, patch_N, patch_D)
-                rgb_full_dec = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
-                out = {
-                    "x_norm_patchtokens": rgb_full_dec,
-                    "x_norm_clstoken": rgb_cls,
-                }
-            else:
-                out = self.shared_backbone(x, return_attention=True)
-                cls_attn_map = out["cls_attention"].sum(dim=1)
-                penultimate_patch = out["penultimate_norm_patchtokens"]
-                
+            out = self.shared_backbone(x, return_attention=True)
+            cls_attn_map = out["cls_attention"].sum(dim=1)
+            penultimate_patch = out["penultimate_norm_patchtokens"]
             agg_layer = self.rgb_aggregation
         elif modality == 'thermal':
             if self.training:
@@ -829,8 +825,8 @@ class CrossModalVPR_Net(nn.Module):
                     recur_rgb_visible = self.recursive_rgb_head(rgb_visible)
 
                     # 6. Mask token expansion (after recursive MLP)
-                    thermal_full = self.croco_encoded_mask_expension(recur_thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
-                    rgb_full = self.croco_encoded_mask_expension(recur_rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb)
+                    thermal_full = self.croco_encoded_mask_expension(recur_thermal_visible, mask_thermal, patch_B, patch_N)
+                    rgb_full = self.croco_encoded_mask_expension(recur_rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb)
 
                     out = paired_thermal
                     if return_masked_patch:
@@ -855,12 +851,9 @@ class CrossModalVPR_Net(nn.Module):
 
                     thermal_reconed_dec = thermal_decoded
                     rgb_full_dec = rgb_decoded
-
                 else:
                     # ========== Original CroCo/Swin Decoder Path ==========
                     # 1-4. masked encoder
-                    thermal_visible, mask_thermal, patch_B, patch_N, patch_D, thermal_cls = self.croco_like_encoder(x, modality='thermal')
-                    rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb, rgb_cls = self.croco_like_encoder(paired_rgb, modality='rgb')
 
                     # 5. Get full features for global descriptor
                     paired_thermal = self.shared_backbone(x, return_attention=True)
@@ -873,14 +866,47 @@ class CrossModalVPR_Net(nn.Module):
 
                     cls_attn_map = paired_thermal_cls_attn_single_head
 
+                    gem_attn_score_thermal = None
+                    gem_attn_score_rgb = None
+                    cls_attn_score = None
+                    if self.args.masking_method == 'GeM':
+                        B, N, D = paired_thermal_full.shape # B, # N # D
+                        H_feat = int(x.shape[2]/14)
+                        W_feat = int(x.shape[3]/14)
+                        x_feat = paired_thermal_full.permute(0, 2, 1).view(B, D, H_feat, W_feat)
+                        global_desc = self.thermal_aggregation(x_feat) 
+                        gem_attn_score_thermal = torch.einsum('bd,bnd->bn', global_desc.detach(), paired_thermal_full.detach())
+                        
+                        B, N, D = paired_rgb_full.shape # B, # N # D
+                        H_feat = int(x.shape[2]/14)
+                        W_feat = int(x.shape[3]/14)
+                        x_feat = paired_rgb_full.permute(0, 2, 1).view(B, D, H_feat, W_feat)
+                        global_desc = self.rgb_aggregation(x_feat) 
+                        gem_attn_score_rgb = torch.einsum('bd,bnd->bn', global_desc.detach(), paired_rgb_full.detach())                        
+                    elif self.args.masking_method == 'CLS':
+                        raise Exception("Not Yet implemented, maybe someday")
+                        ...
+                    
+                    thermal_visible, mask_thermal, patch_B, patch_N, patch_D, thermal_cls = \
+                        self.croco_like_encoder(x, modality='thermal', gem_score=gem_attn_score_thermal, cls_score=cls_attn_score)
+                    rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb, rgb_cls = \
+                        self.croco_like_encoder(paired_rgb, modality='rgb', gem_score=gem_attn_score_rgb, cls_score=cls_attn_score)
+                    
+                    # mask 붙이기 전 mlp로 channel 변경
+                    if self.args.use_mlp_dim_before_decoder != 0:
+                        thermal_visible = self.proj_before_decoder(thermal_visible)
+                        rgb_visible = self.proj_before_decoder(rgb_visible)
+                        paired_thermal_full = self.proj_before_decoder(paired_thermal_full)
+                        paired_rgb_full = self.proj_before_decoder(paired_rgb_full)
+                        
                     # 6. Mask token expansion
-                    thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
-                    rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb)
+                    thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N)
+                    rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb)
 
                     out = paired_thermal
                     if return_masked_patch:
                         masked_patch_thermal = thermal_full
-
+                    
                     # 7. CroCo Decoder forward
                     thermal_full_dec = thermal_full + self.decoder_pos_embed
                     rgb_full_dec = rgb_full + self.decoder_pos_embed
@@ -910,24 +936,10 @@ class CrossModalVPR_Net(nn.Module):
                 recon_loss_rgb = recon_loss_fn(reconstructed_rgb_patches, mask_rgb, target_rgb_patches)    
             else:
                 # when inference
-                # NOTE: 부르는 곳에 no_grad 호출하기
-                if self.use_masked_inference:
-                    # 1-4. masked thermal encoder
-                    thermal_visible, mask_thermal, patch_B, patch_N, patch_D, thermal_cls = self.croco_like_encoder(x, modality='thermal')
-                    
-                    # 5. Mask token expansion
-                    thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
-                    
-                    # 6. Decoder Positional Encoding
-                    thermal_full_dec = thermal_full + self.decoder_pos_embed  # [B, 256, 768]
-                    out = {
-                        "x_norm_patchtokens": thermal_full_dec,
-                        "x_norm_clstoken": thermal_cls,
-                    }
-                else:
-                    out = self.shared_backbone(x,return_attention=True)
-                    cls_attn_map = out["cls_attention"].sum(dim=1)
-                    penultimate_patch = out["penultimate_norm_patchtokens"]
+                out = self.shared_backbone(x,return_attention=True)
+                cls_attn_map = out["cls_attention"].sum(dim=1)
+                penultimate_patch = out["penultimate_norm_patchtokens"]
+                
             agg_layer = self.thermal_aggregation
         else:
             raise ValueError("Modality must be 'rgb' or 'thermal'")
@@ -938,32 +950,32 @@ class CrossModalVPR_Net(nn.Module):
 
         sela_local_feature = None
         gem_attn_map = None
-        if not self.use_masked_inference:
-            # attnetion_dict_keys(['x_norm_clstoken', 'x_norm_patchtokens', 'x_prenorm', 'masks'])
-            B, N, D = patch_tokens.shape # B, # N # D
+        
+        # attnetion_dict_keys(['x_norm_clstoken', 'x_norm_patchtokens', 'x_prenorm', 'masks'])
+        B, N, D = patch_tokens.shape # B, # N # D
 
-            # 224,224 정방 이미지 입력 가정(patch 2D 복원)
-            H_feat = int(x.shape[2]/14)
-            W_feat = int(x.shape[3]/14)
-            x_feat = patch_tokens.permute(0, 2, 1).view(B, D, H_feat, W_feat)
+        # 224,224 정방 이미지 입력 가정(patch 2D 복원)
+        H_feat = int(x.shape[2]/14)
+        W_feat = int(x.shape[3]/14)
+        x_feat = patch_tokens.permute(0, 2, 1).view(B, D, H_feat, W_feat)
 
-            # Aggregation -> Descriptor
-            if self.args.use_cls_for_vpr:
-                global_desc = out["x_norm_clstoken"]
-            else:
-                global_desc = agg_layer(x_feat) # [B, D]
+        # Aggregation -> Descriptor
+        if self.args.use_cls_for_vpr:
+            global_desc = out["x_norm_clstoken"]
+        else:
+            global_desc = agg_layer(x_feat) # [B, D]
 
-            # Compute GeM attention map: dot product between global descriptor and patch tokens
-            # global_desc: [B, D], patch_tokens: [B, N, D] -> gem_attn_map: [B, N]
-            gem_attn_map = torch.einsum('bd,bnd->bn', global_desc, patch_tokens)
+        # Compute GeM attention map: dot product between global descriptor and patch tokens
+        # global_desc: [B, D], patch_tokens: [B, N, D] -> gem_attn_map: [B, N]
+        gem_attn_map = torch.einsum('bd,bnd->bn', global_desc, patch_tokens)
 
-            # selaVPR local feature computation using interpolation
-            if self.args.use_sela_local_loss or (not self.training and (self.args.use_reranking in ['selaVPR', 'reconSelaVPR'])):
-                x0 = patch_tokens.view(-1, H_feat, W_feat, self.output_dim).permute(0, 3, 1, 2)
-                x0 = self.local_adapt(x0)
-                x0 = x0.permute(0, 2, 3, 1)
-                sela_local_feature = torch.nn.functional.normalize(x0, p=2, dim=-1)
-
+        # selaVPR local feature computation using interpolation
+        if self.args.use_sela_local_loss or (not self.training and (self.args.use_reranking in ['selaVPR', 'reconSelaVPR'])):
+            x0 = patch_tokens.view(-1, H_feat, W_feat, self.output_dim).permute(0, 3, 1, 2)
+            x0 = self.local_adapt(x0)
+            x0 = x0.permute(0, 2, 3, 1)
+            sela_local_feature = torch.nn.functional.normalize(x0, p=2, dim=-1)
+                
         return global_desc, patch_tokens, [recon_loss_thermal, recon_loss_rgb], \
                 mask_thermal, masked_patch_thermal, cls_attn_map, \
                 penultimate_patch, sela_local_feature, gem_attn_map

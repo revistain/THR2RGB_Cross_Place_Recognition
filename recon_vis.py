@@ -30,22 +30,46 @@ def visualize_reconstruction(model, args, thermal_img, paired_rgb, device='cuda'
     net.train()
 
     with torch.no_grad():
-        # ========== Run encoder with masking ==========
-        # Thermal encoder (masked)
-        thermal_visible, mask_thermal, patch_B, patch_N, patch_D, thermal_cls = net.croco_like_encoder(thermal_img, modality='thermal')
-        # RGB encoder (masked)
-        rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb, rgb_cls = net.croco_like_encoder(paired_rgb, modality='rgb')
-
         # Get full encoder outputs (unmasked) for cross-attention
         paired_thermal = net.shared_backbone(thermal_img, return_attention=True)
-        paired_thermal_full = paired_thermal["x_norm_patchtokens"]
+        paired_thermal_full = paired_thermal["x_norm_patchtokens"] # [1, N, C]
 
         paired_rgb_emb = net.shared_backbone(paired_rgb, return_attention=True)
         paired_rgb_full = paired_rgb_emb["x_norm_patchtokens"]
 
+        gem_attn_score_thermal = None
+        gem_attn_score_rgb = None
+        cls_attn_score = None
+        if args.masking_method == 'GeM':
+            B, N, D = paired_thermal_full.shape
+            x_feat = paired_thermal_full.permute(0, 2, 1).view(B, D, 16, 16)
+            global_desc = net.thermal_aggregation(x_feat) 
+            gem_attn_score_thermal = torch.einsum('bd,bnd->bn', global_desc.detach(), paired_thermal_full.detach())
+            
+            B, N, D = paired_rgb_full.shape
+            x_feat = paired_rgb_full.permute(0, 2, 1).view(B, D, 16, 16)
+            global_desc = net.rgb_aggregation(x_feat) 
+            gem_attn_score_rgb = torch.einsum('bd,bnd->bn', global_desc.detach(), paired_rgb_full.detach())                        
+        elif args.masking_method == 'CLS':
+            raise Exception("Not Yet implemented, maybe someday")
+        
+        thermal_visible, mask_thermal, patch_B, patch_N, patch_D, thermal_cls = \
+            net.croco_like_encoder(thermal_img, modality='thermal', gem_score=gem_attn_score_thermal, cls_score=cls_attn_score)
+        rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb, rgb_cls = \
+            net.croco_like_encoder(paired_rgb, modality='rgb', gem_score=gem_attn_score_rgb, cls_score=cls_attn_score)
+        
+        # thermal_visible, mask_thermal, patch_B, patch_N, patch_D, thermal_cls = net.croco_like_encoder(thermal_img, modality='thermal')
+        # rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb, rgb_cls = net.croco_like_encoder(paired_rgb, modality='rgb')
+        
+        if net.args.use_mlp_dim_before_decoder != 0:
+            thermal_visible = net.proj_before_decoder(thermal_visible)
+            rgb_visible = net.proj_before_decoder(rgb_visible)
+            paired_thermal_full = net.proj_before_decoder(paired_thermal_full)
+            paired_rgb_full = net.proj_before_decoder(paired_rgb_full)
+                        
         # Expand mask tokens for masked positions
-        thermal_full = net.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
-        rgb_full = net.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb)
+        thermal_full = net.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N)
+        rgb_full = net.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb)
 
         # Add decoder positional embeddings
         thermal_full_dec = thermal_full + net.decoder_pos_embed
@@ -63,8 +87,8 @@ def visualize_reconstruction(model, args, thermal_img, paired_rgb, device='cuda'
             recur_paired_rgb_full = net.recursive_rgb_head(paired_rgb_full)
 
             # Mask expansion (after recursive MLP)
-            thermal_full = net.croco_encoded_mask_expension(recur_thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
-            rgb_full = net.croco_encoded_mask_expension(recur_rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb)
+            thermal_full = net.croco_encoded_mask_expension(recur_thermal_visible, mask_thermal, patch_B, patch_N)
+            rgb_full = net.croco_encoded_mask_expension(recur_rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb)
 
             # Prepare reference features - use SAME recursive MLP output for ALL decoder layers
             thermal_ref_features = {layer: recur_paired_thermal_full for layer in net.dino_decoder_layers}

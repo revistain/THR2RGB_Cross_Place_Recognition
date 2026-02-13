@@ -109,6 +109,8 @@ class Parser():
         self.parser.add_argument("--visualize_attention", action='store_true', default=False, help="Visualize CLS and GeM attention maps during inference")
         self.parser.add_argument("--use_sela_local_loss", action='store_true', default=False)
         self.parser.add_argument("--use_diff_loss", action='store_true', default=False)
+        self.parser.add_argument("--use_mlp_dim_before_decoder", type=int, default=0)
+        self.parser.add_argument("--masking_method", type=str, default="random", choices=['random', 'CLS', 'GeM'])
         
         # Decoder DINO setting
         self.parser.add_argument('--use_dino_decoder', action='store_true', default=False)
