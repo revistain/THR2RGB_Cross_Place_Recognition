@@ -1,141 +1,103 @@
+# Parser.py
+# Argument parser for cross-modal VPR
 import os
 import argparse
 import yaml
 
-'''
-TODO
---model
-get different models
-'''
 
 class Parser():
     def __init__(self):
-        self.parser = argparse.ArgumentParser(description=None,
-                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-        ### Training settings
-        self.parser.add_argument("--optim", type=str, default='adam', help="_", choices=['adam', 'sgd'])
-        self.parser.add_argument("--margin", type=float, default=0.1, help="_")
-        self.parser.add_argument("--lr", type=float, default=0.00001, help="_")
-        self.parser.add_argument("--epochs_num", type=int, default=100, help="number of epochs to train for")
-        self.parser.add_argument("--train_batch_size", type=int, default=4,
-                            help="Batch size for train")
+        self.parser = argparse.ArgumentParser(
+            description=None,
+            formatter_class=argparse.ArgumentDefaultsHelpFormatter
+        )
+
+        # Training settings
+        self.parser.add_argument("--optim", type=str, default='adam', choices=['adam', 'sgd'])
+        self.parser.add_argument("--margin", type=float, default=0.1)
+        self.parser.add_argument("--lr", type=float, default=0.00001)
+        self.parser.add_argument("--epochs_num", type=int, default=100)
+        self.parser.add_argument("--train_batch_size", type=int, default=4)
         self.parser.add_argument("--patience", type=int, default=5)
-        
-        self.parser.add_argument("--soft_positives_dist_threshold", type=int, default=10, help="_")
-        self.parser.add_argument("--hard_positives_dist_threshold", type=int, default=10, help="_")
+
+        self.parser.add_argument("--soft_positives_dist_threshold", type=int, default=10)
+        self.parser.add_argument("--hard_positives_dist_threshold", type=int, default=10)
 
         self.parser.add_argument("--mining", type=str, default="partial", choices=["partial", "full", "random"])
-        self.parser.add_argument("--cache_refresh_rate", type=int, default=1000,
-                        help="How often to refresh cache, in number of queries")
-        self.parser.add_argument("--queries_per_epoch", type=int, default=5000,
-                        help="How many queries to consider for one epoch. Must be multiple of cache_refresh_rate")
-        self.parser.add_argument("--negs_num_per_query", type=int, default=10, help="_")
-        self.parser.add_argument("--neg_samples_num", type=int, default=1000, help="How many negatives to use to compute the hardest ones")
+        self.parser.add_argument("--cache_refresh_rate", type=int, default=1000)
+        self.parser.add_argument("--queries_per_epoch", type=int, default=5000)
+        self.parser.add_argument("--negs_num_per_query", type=int, default=10)
+        self.parser.add_argument("--neg_samples_num", type=int, default=1000)
 
-        ### Inference settings
-        self.parser.add_argument("--infer_batch_size", type=int, default=64,
-                            help="Batch size for inference (caching and testing)")
+        # Inference settings
+        self.parser.add_argument("--infer_batch_size", type=int, default=64)
         self.parser.add_argument('--test_method', type=str, default="hard_resize",
-                            choices=["hard_resize", "single_query", "central_crop", "five_crops", "nearest_crop", "maj_voting"],
-                            help="This includes pre/post-processing methods and prediction refinement")
+                            choices=["hard_resize", "single_query", "central_crop", "five_crops", "nearest_crop", "maj_voting"])
 
-        ### Evaluation settings
-        self.parser.add_argument("--majority_weight", type=float, default=0.01, 
-                            help="only for majority voting, scale factor, the higher it is the more importance is given to agreement")
-        self.parser.add_argument('--recall_values', type=int, default=[1, 5, 10, 20], nargs="+",
-                            help="Recalls to be computed, such as R@5.")
-        self.parser.add_argument('--fuse', type=str, default=None, choices=[None, 'cat', 'add'])
-        
-        ### Model settings
-        self.parser.add_argument('--resize', type=int, default=[224, 224], nargs=2, help="Resizing shape for images (HxW) to be fed into the network.")
-        self.parser.add_argument("--foundation_model_path", type=str, default=None, help="_")
+        # Evaluation settings
+        self.parser.add_argument("--majority_weight", type=float, default=0.01)
+        self.parser.add_argument('--recall_values', type=int, default=[1, 5, 10, 20], nargs="+")
 
-        ### Dataset parameters
-        self.parser.add_argument("--img_time", type=str, default="allday", choices=["allday", "daytime", "nighttime", "latetime"])
-        # self.parser.add_argument("--sequences", type=str, default=['KAIST', 'SNU', 'Valley'], nargs="+",
-        #                          help="List of sequences to load from the dataset. Default: ['KAIST', 'SNU', 'Valley']")
-        self.parser.add_argument("--train_seq", type=str, default=None, nargs='+', help="_")
-        self.parser.add_argument("--test_seq", type=str, default=None, nargs='+', help="_")
-        
-        # Data augmentation parameters, # applyed to the training set
-        self.parser.add_argument("--brightness", type=float, default=None, help="_")
-        self.parser.add_argument("--contrast", type=float, default=None, help="_")
-        self.parser.add_argument("--saturation", type=float, default=None, help="_")
-        self.parser.add_argument("--hue", type=float, default=None, help="_")
-        self.parser.add_argument("--rand_perspective", type=float, default=None, help="_")
-        self.parser.add_argument("--random_resized_crop", type=float, default=None, help="_")
-        self.parser.add_argument("--random_rotation", type=float, default=None, help="_")
-        self.parser.add_argument("--horizontal_flip", action='store_true', help="_")
+        # Model settings
+        self.parser.add_argument('--resize', type=int, default=[224, 224], nargs=2)
+        self.parser.add_argument("--foundation_model_path", type=str, default=None)
+        self.parser.add_argument("--features_dim", type=int, default=768)
 
-        ### Record settings
-        self.parser.add_argument("--config", type=str, default=None, help="Path to args config file")
-        self.parser.add_argument("--save_dir", type=str, default="default", help="_")
+        # Dataset parameters
+        self.parser.add_argument("--img_time", type=str, default="allday",
+                            choices=["allday", "daytime", "nighttime", "latetime"])
+        self.parser.add_argument("--train_seq", type=str, default=None, nargs='+')
+        self.parser.add_argument("--test_seq", type=str, default=None, nargs='+')
 
-        ### Common settings
+        # Data augmentation
+        self.parser.add_argument("--brightness", type=float, default=None)
+        self.parser.add_argument("--contrast", type=float, default=None)
+        self.parser.add_argument("--saturation", type=float, default=None)
+        self.parser.add_argument("--hue", type=float, default=None)
+        self.parser.add_argument("--rand_perspective", type=float, default=None)
+        self.parser.add_argument("--random_resized_crop", type=float, default=None)
+        self.parser.add_argument("--random_rotation", type=float, default=None)
+        self.parser.add_argument("--horizontal_flip", action='store_true')
+
+        # Record settings
+        self.parser.add_argument("--config", type=str, default=None)
+        self.parser.add_argument("--save_dir", type=str, default="default")
+
+        # Common settings
         self.parser.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu"])
-        self.parser.add_argument("--num_workers", type=int, default=8, help="num_workers for all dataloaders")
-        self.parser.add_argument("--efficient_ram_testing", action='store_true', help="_")
+        self.parser.add_argument("--num_workers", type=int, default=8)
         self.parser.add_argument("--seed", type=int, default=42)
-        self.parser.add_argument("--resume", type=str, default=None, nargs='*',
-                            help="Path to load checkpoint from, for resuming training or testing.")
+        self.parser.add_argument("--resume", type=str, default=None, nargs='*')
         self.parser.add_argument("--save_all", type=bool, default=False)
-        
-        self.parser.add_argument("--num_trainable_blocks_RGB", type=int, default=0, help="number of trainable blocks")
-        self.parser.add_argument("--num_trainable_blocks_THERMAL", type=int, default=0, help="number of trainable blocks")
-        
-        # custom settings
+
+        # Backbone settings
+        self.parser.add_argument("--num_trainable_blocks_RGB", type=int, default=0)
+        self.parser.add_argument("--num_trainable_blocks_THERMAL", type=int, default=0)
+
+        # Custom settings
         self.parser.add_argument('--comment', type=str)
         self.parser.add_argument('--cuda_device', type=str)
-        self.parser.add_argument("--use_alignment_loss", action='store_true', default=False)
-        self.parser.add_argument("--use_sepearte_backbone_lr", action='store_true', default=False)
-        self.parser.add_argument("--backbone_lr", type=float, default=0.00001, help="_")
-        self.parser.add_argument("--croco_mask_ratio", type=float, default=0.75, help="_")
-        self.parser.add_argument("--recon_weight", type=float, default=1, help="_")
-        self.parser.add_argument("--use_rerank_loss", action='store_true', default=False)
-        self.parser.add_argument("--num_decoder_depth", type=int, default=8, help="_")
-        self.parser.add_argument("--use_only_cross_decoder", action='store_true', default=False)
-        self.parser.add_argument("--use_pos_as_aligned_rgb", action='store_true', default=False)
-        self.parser.add_argument("--recon_loss_type", type=str, default="none", choices=['mse', 'l1', 'ssim', 'mse+ssim', 'GV', 'GV+l1', 'l1+ssim'])
-        self.parser.add_argument("--use_fast_track", action='store_true', default=False)
-        self.parser.add_argument("--rerank_with_RGB", action='store_true', default=False)
-        self.parser.add_argument("--r2_penultimate_layer", action='store_true', default=False)
-        self.parser.add_argument("--r2_add_random_patch", action='store_true', default=False)
-        self.parser.add_argument("--use_cls_for_vpr", action='store_true', default=False)
+
+        # Reconstruction loss settings (CroCo decoder)
         self.parser.add_argument("--use_recon_loss", action='store_true', default=False)
-        self.parser.add_argument("--use_reranking", type=str, default="none",
-                                 choices=['none', 'recon', 'r2former', 'selaVPR', 'reconSelaVPR', 'GeM_KL', 'reconDiffVPR', 'diffGeM', 'reconPairVPR'])
-        self.parser.add_argument("--features_dim", type=int, default=768)
-        self.parser.add_argument("--selaVPR_rerank_score_type", type=str, default="none", choices=['none', 'quantile_attn', 'mul_cossim'])
-        self.parser.add_argument("--visualize_attention", action='store_true', default=False, help="Visualize CLS and GeM attention maps during inference")
-        self.parser.add_argument("--use_sela_local_loss", action='store_true', default=False)
-        self.parser.add_argument("--use_diff_loss", action='store_true', default=False)
-        
-        # Decoder DINO setting
-        self.parser.add_argument('--use_dino_decoder', action='store_true', default=False)
-        self.parser.add_argument('--dino_decoder_layer_start', type=int, default=6)
-        self.parser.add_argument('--dino_decoder_layer_end', type=int, default=12)
-        self.parser.add_argument('--unfreeze_dino_decoder', action='store_true', default=False,
-                                 help="Unfreeze DINO blocks in decoder (train self-attn + MLP, not just cross-attn)")   
-        self.parser.add_argument('--is_dino_dec_stage2', action='store_true', default=False)
+        self.parser.add_argument("--recon_loss_type", type=str, default="mse",
+                            choices=['mse', 'l1', 'ssim', 'mse+ssim'])
+        self.parser.add_argument("--recon_weight", type=float, default=1)
+        self.parser.add_argument("--croco_mask_ratio", type=float, default=0.75)
+        self.parser.add_argument("--num_decoder_depth", type=int, default=8)
 
-        # Swin Decoder settings
-        self.parser.add_argument("--use_swin_decoder", action='store_true', default=False,
-                                 help="Use Swin V2 decoder blocks instead of CroCo decoder blocks")
-        self.parser.add_argument("--swin_window_size", type=int, default=4,
-                                 help="Window size for Swin V2 windowed self-attention")
-        self.parser.add_argument("--drop_path_rate", type=float, default=0.1,
-                                 help="Stochastic depth rate for Swin decoder blocks")
-        
-
+        # Training options
+        self.parser.add_argument("--use_pos_as_aligned_rgb", action='store_true', default=False)
+        self.parser.add_argument("--use_fast_track", action='store_true', default=False)
 
     def parse_arguments(self):
         args = self.parser.parse_args()
         if args.config is not None:
             with open(args.config, 'r') as file:
                 config = yaml.safe_load(file)
-        
+
             self.parser.set_defaults(**config)
             args = self.parser.parse_args()
             args.save_dir = os.path.basename(os.path.dirname(args.save_dir))
-        
+
         return args

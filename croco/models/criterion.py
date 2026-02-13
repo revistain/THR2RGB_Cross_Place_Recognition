@@ -12,7 +12,6 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from pytorch_msssim import ms_ssim
-from info_nce import InfoNCE, info_nce
 
 class GradientVariance(nn.Module):
     """Class for calculating GV loss between to RGB images
