@@ -25,7 +25,7 @@ class Parser():
 
         self.parser.add_argument("--mining", type=str, default="partial", choices=["partial", "full", "random"])
         self.parser.add_argument("--cache_refresh_rate", type=int, default=1000)
-        self.parser.add_argument("--queries_per_epoch", type=int, default=5000)
+        self.parser.add_argument("--queries_per_epoch", type=int, default=2000)
         self.parser.add_argument("--negs_num_per_query", type=int, default=10)
         self.parser.add_argument("--neg_samples_num", type=int, default=1000)
 
@@ -70,25 +70,21 @@ class Parser():
         self.parser.add_argument("--resume", type=str, default=None, nargs='*')
         self.parser.add_argument("--save_all", type=bool, default=False)
 
-        # Backbone settings
-        self.parser.add_argument("--num_trainable_blocks_RGB", type=int, default=0)
-        self.parser.add_argument("--num_trainable_blocks_THERMAL", type=int, default=0)
-
         # Custom settings
         self.parser.add_argument('--comment', type=str)
         self.parser.add_argument('--cuda_device', type=str)
 
         # Reconstruction loss settings (CroCo decoder)
-        self.parser.add_argument("--use_recon_loss", action='store_true', default=False)
-        self.parser.add_argument("--recon_loss_type", type=str, default="mse",
+        self.parser.add_argument("--use_recon_loss", action='store_true', default=False) # CroCo 사용여부
+        self.parser.add_argument("--recon_loss_type", type=str, default="mse", # reconstruction loss 계산방식
                             choices=['mse', 'l1', 'ssim', 'mse+ssim'])
-        self.parser.add_argument("--recon_weight", type=float, default=1)
-        self.parser.add_argument("--croco_mask_ratio", type=float, default=0.75)
-        self.parser.add_argument("--num_decoder_depth", type=int, default=8)
+        self.parser.add_argument("--recon_weight", type=float, default=1) # loss = (triplet_loss + recon_weight * reconstruction_loss)
+        self.parser.add_argument("--croco_mask_ratio", type=float, default=0.75) # CroCo masking Ratio
+        self.parser.add_argument("--num_decoder_depth", type=int, default=8) # decoder의 layer 개수
 
         # Training options
-        self.parser.add_argument("--use_pos_as_aligned_rgb", action='store_true', default=False)
-        self.parser.add_argument("--use_fast_track", action='store_true', default=False)
+        self.parser.add_argument("--use_pos_as_aligned_rgb", action='store_true', default=False) # CroCo는 동시에 찍은 사진은 reference로 사용하는데, 이게 키면 pos로 수집한걸 사용
+        self.parser.add_argument("--use_fast_track", action='store_true', default=False) # training 빠르게 건너뛰어서 실험할때 사용
 
     def parse_arguments(self):
         args = self.parser.parse_args()

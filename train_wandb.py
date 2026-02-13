@@ -49,7 +49,7 @@ if __name__ == "__main__":
     dinoblock.adapter_dim = args.features_dim
 
     # wandb init
-    wandb.init(project="cross-modal-vpr", name=args.comment, config=vars(args))
+    wandb.init(project="cross-modal-vpr-ms2", name=args.comment, config=vars(args))
 
     args.save_dir = os.path.join(args.save_dir, args.comment, utils.get_timestamp())
     commons.setup_logging(args.save_dir)
@@ -77,6 +77,20 @@ if __name__ == "__main__":
         test_ds_list.append(test_ds)
         logging.info(f"[Test - {seq}] Database: {test_ds.database_num}, Queries: {test_ds.queries_num}, Total: {len(test_ds)}")
 
+    '''Model'''
+    if args.use_recon_loss:
+        model = network.CrossModalVPR_Net(
+            args,
+            pretrained_foundation=True,
+            foundation_model_path=args.foundation_model_path,
+        )
+    else:
+        model = network_only_GeM.CrossModalVPR_Net(
+            args,
+            pretrained_foundation=True,
+            foundation_model_path=args.foundation_model_path,
+        )
+            
     '''Resume from checkpoint'''
     if args.resume:
         model, _, best_r1, start_epoch_num, not_improved_num = utils.resume_train(args, model, strict=False)
@@ -85,34 +99,13 @@ if __name__ == "__main__":
     else:
         best_r1 = start_epoch_num = not_improved_num = 0
 
-        '''Model'''
-        if args.use_recon_loss:
-            model = network.CrossModalVPR_Net(
-                args,
-                pretrained_foundation=True,
-                foundation_model_path=args.foundation_model_path,
-            )
-        else:
-            model = network_only_GeM.CrossModalVPR_Net(
-                args,
-                pretrained_foundation=True,
-                foundation_model_path=args.foundation_model_path,
-            )
-
     model = model.to(args.device)
     model = torch.nn.DataParallel(model)
 
     # Freeze backbone except adapter layers
-    print("="*30)
-    print("- Tuning RGB backbone layers: ", args.num_trainable_blocks_RGB)
-    print("- Tuning THERMAL backbone layers: ", args.num_trainable_blocks_THERMAL)
-    print("="*30)
     for name, param in model.module.shared_backbone.named_parameters():
         if "adapter" not in name:
             param.requires_grad = False
-        for i in range(args.num_trainable_blocks_RGB):
-            num_blocks = len(model.module.shared_backbone.blocks)
-            model.module.shared_backbone.blocks[num_blocks - i - 1].requires_grad_(True)
 
     # Initialize adapter layers
     for n, m in model.named_modules():

@@ -1,5 +1,4 @@
 # network.py
-# BiReconstruction CroCo 방식 네트워크
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -9,8 +8,80 @@ from pathlib import Path
 
 from croco.models.masking import RandomMask
 from croco.models.criterion import MaskedMSE
-from croco.models.blocks import CroCoDecoderBlock
 
+class CroCoDecoderBlock(nn.Module):
+    def __init__(self, dim=768, num_heads=12, mlp_ratio=4.0, drop_path=0.0):
+        super().__init__()
+        
+        # Self-Attention components
+        self.norm1 = nn.LayerNorm(dim)
+        self.self_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
+        
+        # Cross-Attention components
+        self.norm2 = nn.LayerNorm(dim)
+        self.norm_cross = nn.LayerNorm(dim)
+        self.cross_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
+        
+        # MLP components
+        self.norm3 = nn.LayerNorm(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, mlp_hidden_dim),
+            nn.GELU(),
+            nn.Linear(mlp_hidden_dim, dim)
+        )
+        
+        # ========== Attention 저장용 ==========
+        self.self_attn_weights = None
+        self.cross_attn_weights = None
+        # ======================================
+        
+    def forward(self, x, y, return_attention=False):
+        """
+        Args:
+            x: [B, N, D] - decoder input (RGB masked)
+            y: [B, M, D] - encoder output (Thermal reference)
+            return_attention: bool - attention map 반환 여부
+        Returns:
+            x: [B, N, D] - updated decoder features
+        """
+        # Step 1: Self-Attention
+        x_norm = self.norm1(x)
+        if return_attention:
+            self_out, self_attn_weights = self.self_attn(
+                x_norm, x_norm, x_norm, 
+                need_weights=True, 
+                average_attn_weights=True  # [B, N, N]
+            )
+            self.self_attn_weights = self_attn_weights
+        else:
+            self_out = self.self_attn(x_norm, x_norm, x_norm)[0]
+        x = x + self_out
+        
+        # Step 2: Cross-Attention
+        x_norm = self.norm2(x)
+        encoder_norm = self.norm_cross(y)
+        if return_attention:
+            cross_out, cross_attn_weights = self.cross_attn(
+                query=x_norm,
+                key=encoder_norm,
+                value=encoder_norm,
+                need_weights=True,
+                average_attn_weights=True  # [B, N, M]
+            )
+            self.cross_attn_weights = cross_attn_weights
+        else:
+            cross_out = self.cross_attn(
+                query=x_norm,
+                key=encoder_norm,
+                value=encoder_norm
+            )[0]
+        x = x + cross_out
+        
+        # Step 3: MLP
+        x = x + self.mlp(self.norm3(x))
+
+        return x
 
 class GeM(nn.Module):
     def __init__(self, p=3, eps=1e-6, work_with_tokens=False):
@@ -35,8 +106,10 @@ def gem(x, p=3, eps=1e-6, work_with_tokens=False):
 
 
 class Flatten(nn.Module):
-    def __init__(self): super().__init__()
-    def forward(self, x): assert x.shape[2] == x.shape[3] == 1; return x[:,:,0,0]
+    def __init__(self):
+        super().__init__()
+    def forward(self, x):
+        assert x.shape[2] == x.shape[3] == 1; return x[:,:,0,0]
 
 
 class L2Norm(nn.Module):
@@ -129,6 +202,8 @@ class CrossModalVPR_Net(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_dim, output_dim)
         )
+        # self.prediction_thermal_head = nn.Linear(dec_embed_dim, output_dim)
+        # self.prediction_rgb_head = nn.Linear(dec_embed_dim, output_dim)
 
         # Initialize weights
         for head in [self.prediction_thermal_head, self.prediction_rgb_head]:
@@ -162,6 +237,7 @@ class CrossModalVPR_Net(nn.Module):
         cls_token = current_backbone.cls_token.expand(patch_B, -1, -1)
 
         # Positional embedding
+        # - DINO의 positional embedding을 224x224(16x16)에 맞게 interpolate해서 넣기
         pos_tokens = current_backbone.pos_embed[:, 1:, :]
         pos_embed_grid = pos_tokens.reshape(1, 37, 37, patch_D).permute(0, 3, 1, 2)
         pos_embed_resized = F.interpolate(pos_embed_grid, size=(int(x.shape[2]/14), int(x.shape[3]/14)), mode='bicubic', align_corners=False)
@@ -175,6 +251,7 @@ class CrossModalVPR_Net(nn.Module):
         image_with_cls = torch.cat([cls_token, image_patch], dim=1)
 
         # Register tokens (DINOv2 with registers)
+        # - register backbone 호환용
         num_register_tokens = current_backbone.num_register_tokens
         if current_backbone.register_tokens is not None:
             register_tokens = current_backbone.register_tokens.expand(patch_B, -1, -1)
@@ -189,6 +266,7 @@ class CrossModalVPR_Net(nn.Module):
         cls_reg_mask = torch.zeros(patch_B, 1 + num_register_tokens, dtype=torch.bool, device=mask.device)
         full_mask = torch.cat([cls_reg_mask, mask], dim=1)
 
+        # Masking되고 살아남은 patch token들
         patch_visible = image_with_cls[~full_mask].reshape(patch_B, -1, patch_D)
 
         # Encoder forward
@@ -197,9 +275,17 @@ class CrossModalVPR_Net(nn.Module):
         patch_visible = current_backbone.norm(patch_visible)
 
         # Separate CLS token
+        # - CLS token 분리
         cls_visible = patch_visible[:, 0:1, :]
         patch_only_visible = patch_visible[:, 1 + num_register_tokens:, :]
 
+        '''
+        return
+        - [0] masking되고 남은 token [B, N*(1-mask_ratio), C]
+        - [1] mask: boolean mask [B, N]
+        - [2,3,4] patch BNC
+        - [5] 분리된 CLS token
+        '''
         return patch_only_visible, mask, patch_B, patch_N, patch_D, cls_visible
 
     def croco_encoded_mask_expension(self, visible_tokens, mask, patch_B, patch_N, patch_D):
@@ -207,6 +293,11 @@ class CrossModalVPR_Net(nn.Module):
         full_tokens = self.mask_token.expand(patch_B, patch_N, -1).clone()
         full_tokens[~mask] = visible_tokens.flatten(0, 1)
         full_tokens = full_tokens.view(patch_B, patch_N, patch_D)
+        
+        '''
+        return
+        - [0]: visible(masking안된) token들에 mask_token을 붙여서 [B, N]으로 만든거
+        '''
         return full_tokens
 
     def forward_model(self, x, paired_rgb=None, modality='rgb'):
@@ -216,16 +307,18 @@ class CrossModalVPR_Net(nn.Module):
         mask_thermal = None
 
         if modality == 'rgb':
+            agg_layer = self.rgb_aggregation # RGB용 GeM
             out = self.shared_backbone(x)
-            agg_layer = self.rgb_aggregation
-
         elif modality == 'thermal':
+            agg_layer = self.thermal_aggregation # Thermal용 GeM
             if self.training:
                 # Masked encoder for both modalities
+                # - 이미지 masking하고 DINOv2 통과하고 남은 token들 return
                 thermal_visible, mask_thermal, patch_B, patch_N, patch_D, _ = self.croco_like_encoder(x, modality='thermal')
                 rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb, _ = self.croco_like_encoder(paired_rgb, modality='rgb')
 
                 # Full features for global descriptor
+                # - pair 이미지들도 DINOv2 통과후 feature embedding 추출
                 paired_thermal = self.shared_backbone(x)
                 paired_thermal_full = paired_thermal["x_norm_patchtokens"]
 
@@ -233,42 +326,47 @@ class CrossModalVPR_Net(nn.Module):
                 paired_rgb_full = paired_rgb_emb["x_norm_patchtokens"]
 
                 # Mask token expansion
+                # - masking되고 encoding된 token들을 mask_token이랑 합쳐서 feature embedding 만들기
                 thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
                 rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb)
 
+                # CroCo 태우기전 결과저장 (paried_thermal 뒤에서 안써서 clone 안했음)
                 out = paired_thermal
 
                 # CroCo Decoder forward (bidirectional)
+                # - mask_token 추가된 feature embedding들에 decoder의 positional embedding 추가
                 thermal_full_dec = thermal_full + self.decoder_pos_embed
                 rgb_full_dec = rgb_full + self.decoder_pos_embed
                 paired_thermal_dec = paired_thermal_full + self.decoder_pos_embed
                 paired_rgb_dec = paired_rgb_full + self.decoder_pos_embed
 
+                # 연산 효율 위해 decoder 태우기전 batch로 구성
                 target_full_dec = torch.cat([thermal_full_dec, rgb_full_dec], dim=0)
                 ref_full_dec = torch.cat([paired_rgb_dec, paired_thermal_dec], dim=0)
 
+                # decoder 통과
                 for blk in self.decoder_blocks:
                     target_full_dec = blk(target_full_dec, ref_full_dec)
                 target_full_dec = self.decoder_norm(target_full_dec)
 
+                # batch 다시 분리
                 thermal_reconed_dec = target_full_dec[:thermal_full_dec.shape[0], :, :]
                 rgb_reconed_dec = target_full_dec[thermal_full_dec.shape[0]:, :, :]
 
                 # Prediction Head
+                # - MLP로 decoded feature embedding -> pixel level
                 reconstructed_thermal_patches = self.prediction_thermal_head(thermal_reconed_dec)
                 reconstructed_rgb_patches = self.prediction_rgb_head(rgb_reconed_dec)
                 target_thermal_patches = self.patchify(x)
                 target_rgb_patches = self.patchify(paired_rgb)
 
                 # Reconstruction loss
+                # - masked된 부분에 대해 loss 계산
                 recon_loss_thermal = self.calculate_recon_loss(reconstructed_thermal_patches, mask_thermal, target_thermal_patches)
                 recon_loss_rgb = self.calculate_recon_loss(reconstructed_rgb_patches, mask_rgb, target_rgb_patches)
             else:
+                # inference 때
                 out = self.shared_backbone(x)
-
-            agg_layer = self.thermal_aggregation
-        else:
-            raise ValueError("Modality must be 'rgb' or 'thermal'")
 
         # Process backbone output
         patch_tokens = out["x_norm_patchtokens"]
@@ -278,6 +376,7 @@ class CrossModalVPR_Net(nn.Module):
         x_feat = patch_tokens.permute(0, 2, 1).view(B, D, H_feat, W_feat)
 
         # Aggregation -> Descriptor
+        # - feature embedding -> GeM -> Descriptor
         global_desc = agg_layer(x_feat)
 
         return global_desc, patch_tokens, [recon_loss_thermal, recon_loss_rgb], mask_thermal
@@ -289,9 +388,9 @@ class CrossModalVPR_Net(nn.Module):
             flags = flags.to(x.device)
 
         is_rgb = (flags == 1)
-        final_emb = torch.zeros((x.size(0), self.output_dim), device=x.device)
-        patch_emb = torch.zeros((x.size(0), self.patch_count, self.output_dim), device=x.device)
-        masks = torch.zeros((x.size(0), self.patch_count), dtype=torch.bool, device=x.device)
+        final_emb = torch.zeros((x.size(0), self.output_dim), device=x.device) # GeM된 descriptor 모음
+        patch_emb = torch.zeros((x.size(0), self.patch_count, self.output_dim), device=x.device) # feature embedding들 모음
+        masks = torch.zeros((x.size(0), self.patch_count), dtype=torch.bool, device=x.device) # masking 모음
         recon_losses = None
 
         if is_rgb.any():
@@ -315,7 +414,6 @@ class CrossModalVPR_Net(nn.Module):
 
     def calculate_recon_loss(self, pred, mask, target):
         return self.reconstruction_criterion(pred=pred, mask=mask, target=target)
-
 
 def get_backbone(pretrained_foundation, foundation_model_path, args=None):
     model_path = Path(foundation_model_path)
