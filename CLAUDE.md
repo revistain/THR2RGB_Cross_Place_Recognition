@@ -95,8 +95,16 @@ Separate reconstruction pathway that doesn't interfere with encoder:
 1. Masked encoder produces visible patches
 2. Recursive MLP transforms features
 3. Mask expansion fills masked positions with learnable tokens
-4. DINO decoder with cross-attention: thermal uses RGB as reference, RGB uses thermal
+4. DINO decoder with cross-attention (using RoPE): thermal uses RGB as reference, RGB uses thermal
 5. Prediction heads output reconstructed patches
+
+### Positional Encoding: RoPE (Rotary Position Embedding)
+
+The decoder cross-attention uses RoPE instead of learnable positional embeddings:
+- **2D RoPE** (default): Separate rotations for height/width dimensions, better for 2D vision
+- **1D RoPE**: Standard sequential position encoding
+- RoPE encodes position by rotating Q/K vectors, enabling better extrapolation and relative position awareness
+- Controlled via `--use_rope` (default: True) and `--rope_2d` (default: True)
 
 ### Reranking Options (`--use_reranking`)
 
@@ -121,6 +129,8 @@ SThReO dataset with 3 sequences: KAIST (train), SNU (test), Valley (test)
 | `--use_dino_decoder` | Use DINOv2 decoder instead of CroCo |
 | `--dino_decoder_layer_start/end` | Decoder layer range (e.g., 6-12) |
 | `--unfreeze_dino_decoder` | Train DINO blocks (not just adapters) |
+| `--use_rope` / `--no_rope` | Enable/disable RoPE in decoder cross-attention (default: enabled) |
+| `--rope_2d` / `--rope_1d` | Use 2D or 1D RoPE (default: 2D) |
 | `--use_recon_loss` | Enable reconstruction loss |
 | `--recon_loss_type` | mse, l1, ssim, or mse+ssim |
 | `--croco_mask_ratio` | Masking ratio (default: 0.8) |

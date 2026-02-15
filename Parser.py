@@ -115,8 +115,18 @@ class Parser():
         self.parser.add_argument('--dino_decoder_layer_start', type=int, default=6)
         self.parser.add_argument('--dino_decoder_layer_end', type=int, default=12)
         self.parser.add_argument('--unfreeze_dino_decoder', action='store_true', default=False,
-                                 help="Unfreeze DINO blocks in decoder (train self-attn + MLP, not just cross-attn)")   
+                                 help="Unfreeze DINO blocks in decoder (train self-attn + MLP, not just cross-attn)")
         self.parser.add_argument('--is_dino_dec_stage2', action='store_true', default=False)
+
+        # RoPE (Rotary Position Embedding) settings for decoder cross-attention
+        self.parser.add_argument('--use_rope', action='store_true', default=True,
+                                 help="Use RoPE instead of learnable positional embedding in decoder cross-attention (default: True)")
+        self.parser.add_argument('--no_rope', dest='use_rope', action='store_false',
+                                 help="Disable RoPE and use learnable positional embedding instead")
+        self.parser.add_argument('--rope_2d', action='store_true', default=True,
+                                 help="Use 2D RoPE for vision (default: True)")
+        self.parser.add_argument('--rope_1d', dest='rope_2d', action='store_false',
+                                 help="Use 1D RoPE instead of 2D")
 
         # Swin Decoder settings
         self.parser.add_argument("--use_swin_decoder", action='store_true', default=False,
