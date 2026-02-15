@@ -13,6 +13,7 @@ npys_agg/
 attention_visualizations/
 debug_alignment/
 ms2_videos*/
+CLAUDE.md
 
 *.pth
 *.png
