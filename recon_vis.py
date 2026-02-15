@@ -47,11 +47,11 @@ def visualize_reconstruction(model, args, thermal_img, paired_rgb, device='cuda'
         thermal_full = net.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
         rgb_full = net.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb)
 
-        # Add decoder positional embeddings
-        thermal_full_dec = thermal_full + net.decoder_pos_embed
-        rgb_full_dec = rgb_full + net.decoder_pos_embed
-        paired_thermal_dec = paired_thermal_full + net.decoder_pos_embed
-        paired_rgb_dec = paired_rgb_full + net.decoder_pos_embed
+        # Apply CoordConv
+        thermal_full_dec = net.coord_conv(thermal_full)
+        rgb_full_dec = net.coord_conv(rgb_full)
+        paired_thermal_dec = net.coord_conv(paired_thermal_full)
+        paired_rgb_dec = net.coord_conv(paired_rgb_full)
 
         # ========== Decoder pass (cross-attention) ==========
         # Thermal decoder: masked thermal attends to full RGB
@@ -73,12 +73,12 @@ def visualize_reconstruction(model, args, thermal_img, paired_rgb, device='cuda'
             # DINO Decoder forward
             # Thermal: masked thermal decoded with full RGB reference
             thermal_full_dec, _ = net.dino_decoder.forward(
-                x=thermal_full + net.decoder_pos_embed,
+                x=net.coord_conv(thermal_full),
                 ref_features=rgb_ref_features,
             )
             # RGB: masked RGB decoded with full thermal reference
             rgb_full_dec, _ = net.dino_decoder.forward(
-                x=rgb_full + net.decoder_pos_embed,
+                x=net.coord_conv(rgb_full),
                 ref_features=thermal_ref_features,
             )
         else:

@@ -52,11 +52,11 @@ class DiffLoss(torch.nn.Module):
                 patch_embedding[positives_indexes], \
                 patch_embedding[negatives_indexes]
         
-        # Add Positional Embedding to Feature Embedding
-        positional_embedding = model.decoder_pos_embed.detach()
-        query_patches = query_patches + positional_embedding
-        pos_patches = pos_patches + positional_embedding
-        neg_patches = neg_patches + positional_embedding
+        # Apply CoordConv (detach to prevent gradients flowing to coord_conv)
+        with torch.no_grad():
+            query_patches = model.coord_conv(query_patches)
+            pos_patches = model.coord_conv(pos_patches)
+            neg_patches = model.coord_conv(neg_patches)
         
         # Pass it through decoder (no_grad to prevent gradients flowing to decoder)
         if use_train == True:
@@ -162,15 +162,15 @@ class DiffLoss(torch.nn.Module):
             scores: [K] reranking scores (higher = more similar)
         """
         K = candidate_patches.shape[0]
-        positional_embedding = model.decoder_pos_embed.detach()
 
         # Expand query to match candidates: [K, N, D]
         query_patches_exp = query_patches.expand(K, -1, -1)
         query_GeM_exp = query_GeM.expand(K, -1)
 
-        # Add positional embedding
-        query_patches_pos = query_patches_exp + positional_embedding
-        candidate_patches_pos = candidate_patches + positional_embedding
+        # Apply CoordConv
+        with torch.no_grad():
+            query_patches_pos = model.coord_conv(query_patches_exp)
+            candidate_patches_pos = model.coord_conv(candidate_patches)
 
         # Bidirectional decoding: query->candidate and candidate->query
         target_batch = torch.cat([query_patches_pos, candidate_patches_pos], dim=0)
@@ -247,15 +247,14 @@ class DiffLoss(torch.nn.Module):
         N = candidate_patches.shape[1]
         H = W = int(math.sqrt(N))  # Assuming square grid
 
-        positional_embedding = model.decoder_pos_embed.detach()
-
         # Expand query to match candidates
         query_patches_exp = query_patches.expand(K, -1, -1)
         query_GeM_exp = query_GeM.expand(K, -1)
 
-        # Add positional embedding
-        query_patches_pos = query_patches_exp + positional_embedding
-        candidate_patches_pos = candidate_patches + positional_embedding
+        # Apply CoordConv
+        with torch.no_grad():
+            query_patches_pos = model.coord_conv(query_patches_exp)
+            candidate_patches_pos = model.coord_conv(candidate_patches)
 
         # Bidirectional decoding
         target_batch = torch.cat([query_patches_pos, candidate_patches_pos], dim=0)

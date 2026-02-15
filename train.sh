@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=3
+CUDA_VISIBLE_DEVICES=0
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=6 \
@@ -16,7 +16,7 @@ python3 train_wandb.py \
     --hard_positives_dist_threshold 10 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
-    --comment "biRecon(w10,l1,dep8,r0.8)-1e4-posAfter30" \
+    --comment "biRecon(w10,l1,dep8,r0.8)-1e4-coordconv" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
@@ -24,8 +24,7 @@ python3 train_wandb.py \
     --recon_weight 10 \
     --use_recon_loss \
     --num_decoder_depth 8 \
-    --recon_loss_type 'l1' \
-    --paired_rgb_epochs 30
+    --recon_loss_type 'l1'
 
     # --paired_rgb_epochs 35
     # --unfreeze_dino_decoder \

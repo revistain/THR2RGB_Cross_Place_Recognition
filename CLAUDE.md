@@ -95,16 +95,16 @@ Separate reconstruction pathway that doesn't interfere with encoder:
 1. Masked encoder produces visible patches
 2. Recursive MLP transforms features
 3. Mask expansion fills masked positions with learnable tokens
-4. DINO decoder with cross-attention (using RoPE): thermal uses RGB as reference, RGB uses thermal
+4. DINO decoder with cross-attention: thermal uses RGB as reference, RGB uses thermal
 5. Prediction heads output reconstructed patches
 
-### Positional Encoding: RoPE (Rotary Position Embedding)
+### Positional Encoding: Pure CoordConv
 
-The CroCo decoder uses RoPE (2D Rotary Position Embedding) instead of learnable positional embeddings:
-- **2D RoPE**: Separate rotations for height/width dimensions, better suited for 2D image patches
-- RoPE encodes position by rotating Q/K vectors in attention, enabling better extrapolation and relative position awareness
-- When `--use_rope` is enabled (default: True), the decoder's self-attention and cross-attention use RoPE
-- When disabled, falls back to learnable positional embeddings added before the decoder
+The CroCo decoder uses **pure CoordConv positional encoding**:
+- Normalized coordinate grids (y, x) in range [-1, 1]
+- Concatenated to features: `[B, N, D]` + `[B, N, 2]` → `[B, N, D+2]`
+- Projected back: `D+2 → D` via learnable linear layer
+- **Why CoordConv?** Explicit coordinate channels. No attention bias like RoPE—model learns position usage freely
 
 ### Reranking Options (`--use_reranking`)
 
@@ -129,7 +129,6 @@ SThReO dataset with 3 sequences: KAIST (train), SNU (test), Valley (test)
 | `--use_dino_decoder` | Use DINOv2 decoder instead of CroCo |
 | `--dino_decoder_layer_start/end` | Decoder layer range (e.g., 6-12) |
 | `--unfreeze_dino_decoder` | Train DINO blocks (not just adapters) |
-| `--use_rope` / `--no_rope` | Enable/disable 2D RoPE in CroCo decoder (default: enabled) |
 | `--paired_rgb_epochs` | Epochs to use aligned/paired RGB, then switch to positive RGB (default: 40) |
 | `--use_recon_loss` | Enable reconstruction loss |
 | `--recon_loss_type` | mse, l1, ssim, or mse+ssim |

@@ -20,7 +20,55 @@ from swin_transformer import *
 from local_matching import LocalFeatureLoss
 from diff_loss import DiffLoss
 from backbone.dinov2.decoder import DINOv2Decoder
-     
+
+
+class CoordConv(nn.Module):
+    """
+    Pure CoordConv-style positional encoding for transformers.
+
+    Concatenates 2D coordinate channels (y, x) to features, then projects D+2 -> D.
+
+    Args:
+        embed_dim: Feature dimension D
+        h: Height in patches
+        w: Width in patches
+    """
+    def __init__(self, embed_dim: int, h: int, w: int):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.h = h
+        self.w = w
+
+        # Create normalized coordinate grids [-1, 1]
+        y_coords = torch.linspace(-1, 1, h)
+        x_coords = torch.linspace(-1, 1, w)
+
+        # Create 2D grid: [h*w, 2]
+        grid_y, grid_x = torch.meshgrid(y_coords, x_coords, indexing='ij')
+        coord_grid = torch.stack([grid_y, grid_x], dim=-1).reshape(h * w, 2)
+
+        # Register as buffer (fixed, non-learnable)
+        self.register_buffer('coord_grid', coord_grid)
+
+        # Projection: D+2 -> D (after concat)
+        self.proj = nn.Linear(embed_dim + 2, embed_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: [B, N, D] features
+        Returns:
+            [B, N, D] features with coord info
+        """
+        B, N, D = x.shape
+        # Expand coords to batch: [1, N, 2] -> [B, N, 2]
+        coords = self.coord_grid.unsqueeze(0).expand(B, -1, -1)
+        # Concat: [B, N, D+2]
+        x_coord = torch.cat([x, coords], dim=-1)
+        # Project back: [B, N, D]
+        return self.proj(x_coord)
+
+
 class GeM(nn.Module):
     def __init__(self, p=3, eps=1e-6, work_with_tokens=False):
         super().__init__()
@@ -434,14 +482,13 @@ class CrossModalVPR_Net(nn.Module):
             ])
             print(f"Using Swin Decoder: window_size={window_size}, drop_path_rate={drop_path_rate}")
         else:
-            # RoPE settings for CroCo decoder
-            self.use_rope = getattr(args, 'use_rope', True)
+            # CoordConv-style positional embedding (no RoPE in attention)
+            self.use_rope = False
             self.decoder_blocks = nn.ModuleList([
-                CroCoDecoderBlock(self.output_dim, dec_num_heads, use_rope=self.use_rope)
+                CroCoDecoderBlock(self.output_dim, dec_num_heads, use_rope=False)
                 for _ in range(dec_depth)
             ])
-            rope_status = "2D RoPE" if self.use_rope else "learnable pos_embed"
-            print(f"Using CroCo Decoder: pos_encoding={rope_status}")
+            print(f"Using CroCo Decoder: pos_encoding=CoordConv")
 
         self.decoder_norm = nn.LayerNorm(self.output_dim)
         self.mask_token = None
@@ -489,8 +536,10 @@ class CrossModalVPR_Net(nn.Module):
         nn.init.normal_(self.mask_token, std=.02)
         
     def _set_decode_positional_embedding(self, dec_embed_dim):
-        self.decoder_pos_embed = nn.Parameter(torch.zeros(1, self.patch_count, dec_embed_dim))
-        nn.init.trunc_normal_(self.decoder_pos_embed, std=0.02)
+        """Pure CoordConv: concat (y,x) coords then project D+2 -> D."""
+        h = int(self.args.resize[0] / 14)
+        w = int(self.args.resize[1] / 14)
+        self.coord_conv = CoordConv(dec_embed_dim, h, w)
     
     def _set_mask_generator(self, num_patches, mask_ratio):
         """Random masking generator 초기화"""
@@ -704,10 +753,10 @@ class CrossModalVPR_Net(nn.Module):
         pos_feature = feature_embs[pos_index]
         neg_feature = feature_embs[neg_index]
 
-        # Apply recursive head and positional embedding
-        recur_query = self.recursive_thermal_head(query_feature) + self.decoder_pos_embed
-        recur_pos = self.recursive_rgb_head(pos_feature) + self.decoder_pos_embed
-        recur_neg = self.recursive_rgb_head(neg_feature) + self.decoder_pos_embed
+        # Apply recursive head and CoordConv
+        recur_query = self.coord_conv(self.recursive_thermal_head(query_feature))
+        recur_pos = self.coord_conv(self.recursive_rgb_head(pos_feature))
+        recur_neg = self.coord_conv(self.recursive_rgb_head(neg_feature))
 
         # CLS 토큰 붙이기
         B = query_feature.shape[0]
@@ -748,9 +797,9 @@ class CrossModalVPR_Net(nn.Module):
     def stage2_inference(self, query_embedding, candidate_embedding):
         TOP_K_SIZE = candidate_embedding.shape[0]
 
-        # Apply recursive head and positional embedding
-        recur_query = self.recursive_thermal_head(query_embedding) + self.decoder_pos_embed
-        recur_candidate = self.recursive_rgb_head(candidate_embedding) + self.decoder_pos_embed
+        # Apply recursive head and CoordConv
+        recur_query = self.coord_conv(self.recursive_thermal_head(query_embedding))
+        recur_candidate = self.coord_conv(self.recursive_rgb_head(candidate_embedding))
 
         # CLS 토큰 붙이기
         B = query_embedding.shape[0]
@@ -797,7 +846,7 @@ class CrossModalVPR_Net(nn.Module):
             if self.use_masked_inference:
                 rgb_visible, mask_rgb, patch_B, patch_N, patch_D, rgb_cls = self.croco_like_encoder(x, modality='rgb')
                 rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B, patch_N, patch_D)
-                rgb_full_dec = rgb_full + self.decoder_pos_embed  # [B, 256, 768]
+                rgb_full_dec = self.coord_conv(rgb_full)  # [B, 256, 768]
                 out = {
                     "x_norm_patchtokens": rgb_full_dec,
                     "x_norm_clstoken": rgb_cls,
@@ -848,8 +897,8 @@ class CrossModalVPR_Net(nn.Module):
                     # 8. DINO Decoder forward (separate pathway from encoder)
                     # Thermal: masked thermal decoded with full RGB reference
                     # RGB: masked RGB decoded with full thermal reference
-                    thermal_input = thermal_full + self.decoder_pos_embed
-                    rgb_input = rgb_full + self.decoder_pos_embed
+                    thermal_input = self.coord_conv(thermal_full)
+                    rgb_input = self.coord_conv(rgb_full)
 
                     thermal_decoded, _ = self.dino_decoder.forward(
                         x=thermal_input,
@@ -888,18 +937,11 @@ class CrossModalVPR_Net(nn.Module):
                     if return_masked_patch:
                         masked_patch_thermal = thermal_full
 
-                    # 7. CroCo Decoder forward
-                    # Add positional embedding only if not using RoPE
-                    if getattr(self, 'use_rope', False):
-                        thermal_full_dec = thermal_full
-                        rgb_full_dec = rgb_full
-                        paired_thermal_dec = paired_thermal_full
-                        paired_rgb_dec = paired_rgb_full
-                    else:
-                        thermal_full_dec = thermal_full + self.decoder_pos_embed
-                        rgb_full_dec = rgb_full + self.decoder_pos_embed
-                        paired_thermal_dec = paired_thermal_full + self.decoder_pos_embed
-                        paired_rgb_dec = paired_rgb_full + self.decoder_pos_embed
+                    # 7. CroCo Decoder forward with CoordConv
+                    thermal_full_dec = self.coord_conv(thermal_full)
+                    rgb_full_dec = self.coord_conv(rgb_full)
+                    paired_thermal_dec = self.coord_conv(paired_thermal_full)
+                    paired_rgb_dec = self.coord_conv(paired_rgb_full)
 
                     target_full_dec = torch.cat([thermal_full_dec, rgb_full_dec], dim=0)
                     ref_full_dec = torch.cat([paired_rgb_dec, paired_thermal_dec], dim=0)
@@ -936,7 +978,7 @@ class CrossModalVPR_Net(nn.Module):
                     thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N, patch_D)
                     
                     # 6. Decoder Positional Encoding
-                    thermal_full_dec = thermal_full + self.decoder_pos_embed  # [B, 256, 768]
+                    thermal_full_dec = self.coord_conv(thermal_full)  # [B, 256, 768]
                     out = {
                         "x_norm_patchtokens": thermal_full_dec,
                         "x_norm_clstoken": thermal_cls,
@@ -1020,13 +1062,9 @@ class CrossModalVPR_Net(nn.Module):
             thermal_decoded_local: [B, 61, 61, 768] thermal decoded with RGB context
             rgb_decoded_local: [B, 61, 61, 768] RGB decoded with thermal context
         """
-        # Add positional embedding only if not using RoPE
-        if getattr(self, 'use_rope', False):
-            thermal_dec = thermal_feat
-            rgb_dec = rgb_feat
-        else:
-            thermal_dec = thermal_feat + self.decoder_pos_embed
-            rgb_dec = rgb_feat + self.decoder_pos_embed
+        # Apply CoordConv
+        thermal_dec = self.coord_conv(thermal_feat)
+        rgb_dec = self.coord_conv(rgb_feat)
         target_dec = torch.cat([thermal_dec, rgb_dec], dim=0)
         ref_dec = torch.cat([rgb_dec, thermal_dec], dim=0)
 
@@ -1074,13 +1112,9 @@ class CrossModalVPR_Net(nn.Module):
         """
         # Add positional embedding only if not using RoPE
         # feature / positional 따로 interpolation
-        # FIXME: 일단 size up 안하고 실험해보기
-        if getattr(self, 'use_rope', False):
-            thermal_dec = thermal_feat
-            rgb_dec = rgb_feat
-        else:
-            thermal_dec = thermal_feat + self.decoder_pos_embed
-            rgb_dec = rgb_feat + self.decoder_pos_embed
+        # Apply CoordConv
+        thermal_dec = self.coord_conv(thermal_feat)
+        rgb_dec = self.coord_conv(rgb_feat)
         target_dec = torch.cat([thermal_dec, rgb_dec], dim=0)
         ref_dec = torch.cat([rgb_dec, thermal_dec], dim=0)
 
