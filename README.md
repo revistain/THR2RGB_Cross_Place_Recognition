@@ -74,6 +74,7 @@ bash test.sh
 - `--test_seq`: train epoch 후 평가하는 scene
 - `--comment`: log 파일이나 wandb에 기록되는 이름
 
+---
 **파일들**
 - train_wandb.py : main 함수
 - [network.py](http://network.py): CroCo 방식 model 정의
@@ -81,4 +82,3 @@ bash test.sh
 - datasets_T2R.py: dataloader 및 dataset
 - inference.py: 추론
 - fast_inference.py: 이미 학습 끝난 pth를 불러서 inference만 할때 사용
-```
