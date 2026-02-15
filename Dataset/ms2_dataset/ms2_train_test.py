@@ -19,7 +19,7 @@ class SCENE(Enum):
     Nighttime = 3
 
 
-dataset_dir = '/data2/datasets/sync_data'
+dataset_dir = '/DATA2/datasets/stereo_dataset/MS2/sync_data'
 # 전부 있는 Scene (Campus, Residential, Urban, SubUrban(얘는 또 dataset에 없음...))
 sequence_metadata = {
     "Campus": [
@@ -309,6 +309,6 @@ for seq in seqs:
         'posDistSqThr': posDistSqThr,
         'nonTrivPosDistSqThr': nonTrivPosDistSqThr
     }
-    matfile = os.path.join(save_path_train, 'ms2_test.mat')
+    matfile = os.path.join(save_path_test, 'ms2_test.mat')
     io.savemat(matfile, {'dbStruct': dbStruct})    
     print("=" * 50)
