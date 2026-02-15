@@ -391,17 +391,11 @@ class CrossModalVPR_Net(nn.Module):
             dino_layer_end = getattr(args, 'dino_decoder_layer_end', 9)  # exclusive, so 10 means layers 3-9
             drop_path_rate = getattr(args, 'drop_path_rate', 0.1)
 
-            # RoPE settings for decoder cross-attention
-            self.use_rope = getattr(args, 'use_rope', True)
-            self.rope_2d = getattr(args, 'rope_2d', True)
-
             self.dino_decoder = DINOv2Decoder.from_encoder(
                 encoder=self.shared_backbone,
                 layer_range=(dino_layer_start, dino_layer_end),
                 num_heads=self.shared_backbone.num_heads,
                 drop_path_rate=drop_path_rate,
-                use_rope=self.use_rope,
-                rope_2d=self.rope_2d,
             )
 
             # Conditionally freeze DINO blocks
@@ -415,9 +409,8 @@ class CrossModalVPR_Net(nn.Module):
             self.dino_decoder_layers = list(range(dino_layer_start, dino_layer_end))
 
             num_trainable = self.dino_decoder.get_num_trainable_params()
-            rope_status = f"2D RoPE" if self.rope_2d else ("1D RoPE" if self.use_rope else "learnable pos_embed")
             print(f"Using DINOv2 Decoder: layers {dino_layer_start}-{dino_layer_end-1}, "
-                  f"DINO blocks: {freeze_status}, pos_encoding: {rope_status}, trainable params: {num_trainable:,}")
+                  f"DINO blocks: {freeze_status}, trainable params: {num_trainable:,}")
 
             # Create placeholder for compatibility (decoder_blocks not used with dino_decoder)
             self.decoder_blocks = None
@@ -441,10 +434,14 @@ class CrossModalVPR_Net(nn.Module):
             ])
             print(f"Using Swin Decoder: window_size={window_size}, drop_path_rate={drop_path_rate}")
         else:
+            # RoPE settings for CroCo decoder
+            self.use_rope = getattr(args, 'use_rope', True)
             self.decoder_blocks = nn.ModuleList([
-                CroCoDecoderBlock(self.output_dim, dec_num_heads)
+                CroCoDecoderBlock(self.output_dim, dec_num_heads, use_rope=self.use_rope)
                 for _ in range(dec_depth)
             ])
+            rope_status = "2D RoPE" if self.use_rope else "learnable pos_embed"
+            print(f"Using CroCo Decoder: pos_encoding={rope_status}")
 
         self.decoder_norm = nn.LayerNorm(self.output_dim)
         self.mask_token = None
@@ -707,16 +704,10 @@ class CrossModalVPR_Net(nn.Module):
         pos_feature = feature_embs[pos_index]
         neg_feature = feature_embs[neg_index]
 
-        # Apply recursive head
-        recur_query = self.recursive_thermal_head(query_feature)
-        recur_pos = self.recursive_rgb_head(pos_feature)
-        recur_neg = self.recursive_rgb_head(neg_feature)
-
-        # Add positional embedding only if not using RoPE
-        if not getattr(self, 'use_rope', True):
-            recur_query = recur_query + self.decoder_pos_embed
-            recur_pos = recur_pos + self.decoder_pos_embed
-            recur_neg = recur_neg + self.decoder_pos_embed
+        # Apply recursive head and positional embedding
+        recur_query = self.recursive_thermal_head(query_feature) + self.decoder_pos_embed
+        recur_pos = self.recursive_rgb_head(pos_feature) + self.decoder_pos_embed
+        recur_neg = self.recursive_rgb_head(neg_feature) + self.decoder_pos_embed
 
         # CLS 토큰 붙이기
         B = query_feature.shape[0]
@@ -739,13 +730,9 @@ class CrossModalVPR_Net(nn.Module):
                 recur_query
             ], dim=0) # [4B, N, C]
 
-        # Get spatial size for RoPE (excluding CLS token)
-        spatial_size = (int(math.sqrt(query_feature.shape[1])), int(math.sqrt(query_feature.shape[1])))
-
         outputs, _ = self.dino_decoder.forward(
             x=batch_x,
             ref_features=batch_ref_features,
-            spatial_size=spatial_size,
         )
 
         cls_tokens = outputs[:, 0, :]
@@ -761,14 +748,9 @@ class CrossModalVPR_Net(nn.Module):
     def stage2_inference(self, query_embedding, candidate_embedding):
         TOP_K_SIZE = candidate_embedding.shape[0]
 
-        # Apply recursive head
-        recur_query = self.recursive_thermal_head(query_embedding)
-        recur_candidate = self.recursive_rgb_head(candidate_embedding)
-
-        # Add positional embedding only if not using RoPE
-        if not getattr(self, 'use_rope', True):
-            recur_query = recur_query + self.decoder_pos_embed
-            recur_candidate = recur_candidate + self.decoder_pos_embed
+        # Apply recursive head and positional embedding
+        recur_query = self.recursive_thermal_head(query_embedding) + self.decoder_pos_embed
+        recur_candidate = self.recursive_rgb_head(candidate_embedding) + self.decoder_pos_embed
 
         # CLS 토큰 붙이기
         B = query_embedding.shape[0]
@@ -788,13 +770,9 @@ class CrossModalVPR_Net(nn.Module):
                 recur_query,
             ], dim=0) # [2B, N, C]
 
-        # Get spatial size for RoPE (excluding CLS token)
-        spatial_size = (int(math.sqrt(query_embedding.shape[1])), int(math.sqrt(query_embedding.shape[1])))
-
         outputs, _ = self.dino_decoder.forward(
             x=batch_x,
             ref_features=batch_ref_features,
-            spatial_size=spatial_size,
         )
 
         cls_tokens = outputs[:, 0, :]
@@ -870,27 +848,16 @@ class CrossModalVPR_Net(nn.Module):
                     # 8. DINO Decoder forward (separate pathway from encoder)
                     # Thermal: masked thermal decoded with full RGB reference
                     # RGB: masked RGB decoded with full thermal reference
-
-                    # Add positional embedding only if not using RoPE
-                    if getattr(self, 'use_rope', True):
-                        thermal_input = thermal_full
-                        rgb_input = rgb_full
-                    else:
-                        thermal_input = thermal_full + self.decoder_pos_embed
-                        rgb_input = rgb_full + self.decoder_pos_embed
-
-                    # Get spatial size for RoPE
-                    spatial_size = (int(math.sqrt(patch_N)), int(math.sqrt(patch_N)))
+                    thermal_input = thermal_full + self.decoder_pos_embed
+                    rgb_input = rgb_full + self.decoder_pos_embed
 
                     thermal_decoded, _ = self.dino_decoder.forward(
                         x=thermal_input,
                         ref_features=rgb_ref_features,
-                        spatial_size=spatial_size,
                     )
                     rgb_decoded, _ = self.dino_decoder.forward(
                         x=rgb_input,
                         ref_features=thermal_ref_features,
-                        spatial_size=spatial_size,
                     )
 
                     thermal_reconed_dec = thermal_decoded
@@ -922,16 +889,26 @@ class CrossModalVPR_Net(nn.Module):
                         masked_patch_thermal = thermal_full
 
                     # 7. CroCo Decoder forward
-                    thermal_full_dec = thermal_full + self.decoder_pos_embed
-                    rgb_full_dec = rgb_full + self.decoder_pos_embed
-                    paired_thermal_dec = paired_thermal_full + self.decoder_pos_embed
-                    paired_rgb_dec = paired_rgb_full + self.decoder_pos_embed
+                    # Add positional embedding only if not using RoPE
+                    if getattr(self, 'use_rope', False):
+                        thermal_full_dec = thermal_full
+                        rgb_full_dec = rgb_full
+                        paired_thermal_dec = paired_thermal_full
+                        paired_rgb_dec = paired_rgb_full
+                    else:
+                        thermal_full_dec = thermal_full + self.decoder_pos_embed
+                        rgb_full_dec = rgb_full + self.decoder_pos_embed
+                        paired_thermal_dec = paired_thermal_full + self.decoder_pos_embed
+                        paired_rgb_dec = paired_rgb_full + self.decoder_pos_embed
 
                     target_full_dec = torch.cat([thermal_full_dec, rgb_full_dec], dim=0)
                     ref_full_dec = torch.cat([paired_rgb_dec, paired_thermal_dec], dim=0)
 
+                    # Compute spatial size for RoPE
+                    spatial_size = (int(math.sqrt(patch_N)), int(math.sqrt(patch_N)))
+
                     for blk in self.decoder_blocks:
-                        target_full_dec = blk(target_full_dec, ref_full_dec)
+                        target_full_dec = blk(target_full_dec, ref_full_dec, spatial_size=spatial_size)
                     target_full_dec = self.decoder_norm(target_full_dec)
 
                     thermal_reconed_dec = target_full_dec[:thermal_full_dec.shape[0], :, :]
@@ -1043,18 +1020,25 @@ class CrossModalVPR_Net(nn.Module):
             thermal_decoded_local: [B, 61, 61, 768] thermal decoded with RGB context
             rgb_decoded_local: [B, 61, 61, 768] RGB decoded with thermal context
         """
-        # Add positional embedding
-        thermal_dec = thermal_feat + self.decoder_pos_embed
-        rgb_dec = rgb_feat + self.decoder_pos_embed
+        # Add positional embedding only if not using RoPE
+        if getattr(self, 'use_rope', False):
+            thermal_dec = thermal_feat
+            rgb_dec = rgb_feat
+        else:
+            thermal_dec = thermal_feat + self.decoder_pos_embed
+            rgb_dec = rgb_feat + self.decoder_pos_embed
         target_dec = torch.cat([thermal_dec, rgb_dec], dim=0)
         ref_dec = torch.cat([rgb_dec, thermal_dec], dim=0)
+
+        # Compute spatial size for RoPE
+        spatial_size = (int(math.sqrt(thermal_feat.shape[1])), int(math.sqrt(thermal_feat.shape[1])))
 
         RETURN_LAYER_NUM = return_layer
         # Direction 1: Thermal decoded with RGB as context
         layer_target_decoded = None
         target_decoded = target_dec.clone()
         for idx, blk in enumerate(self.decoder_blocks):
-            target_decoded = blk(target_decoded, ref_dec)
+            target_decoded = blk(target_decoded, ref_dec, spatial_size=spatial_size)
             if idx == RETURN_LAYER_NUM - 1:
                 layer_target_decoded = target_decoded.clone()
                 break
@@ -1088,20 +1072,27 @@ class CrossModalVPR_Net(nn.Module):
             thermal_decoded_local: [B, 61, 61, 384] thermal decoded with RGB context
             rgb_decoded_local: [B, 61, 61, 384] RGB decoded with thermal context
         """
-        # Add positional embedding
+        # Add positional embedding only if not using RoPE
         # feature / positional 따로 interpolation
         # FIXME: 일단 size up 안하고 실험해보기
-        thermal_dec = thermal_feat + self.decoder_pos_embed
-        rgb_dec = rgb_feat + self.decoder_pos_embed
+        if getattr(self, 'use_rope', False):
+            thermal_dec = thermal_feat
+            rgb_dec = rgb_feat
+        else:
+            thermal_dec = thermal_feat + self.decoder_pos_embed
+            rgb_dec = rgb_feat + self.decoder_pos_embed
         target_dec = torch.cat([thermal_dec, rgb_dec], dim=0)
         ref_dec = torch.cat([rgb_dec, thermal_dec], dim=0)
+
+        # Compute spatial size for RoPE
+        spatial_size = (int(math.sqrt(thermal_feat.shape[1])), int(math.sqrt(thermal_feat.shape[1])))
 
         RETURN_LAYER_NUM = return_layer
         # Direction 1: Thermal decoded with RGB as context
         layer_target_decoded = None
         target_decoded = target_dec.clone()
         for idx, blk in enumerate(self.decoder_blocks):
-            target_decoded = blk(target_decoded, ref_dec)
+            target_decoded = blk(target_decoded, ref_dec, spatial_size=spatial_size)
             if idx == RETURN_LAYER_NUM - 1:
                 layer_target_decoded = target_decoded.clone()
                 break

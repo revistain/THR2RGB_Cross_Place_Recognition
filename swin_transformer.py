@@ -5,6 +5,242 @@ import torch.nn.functional as F
 from timm.layers import DropPath
 from typing import Tuple, Optional
 
+
+class RotaryPositionEmbedding2D(nn.Module):
+    """
+    2D Rotary Position Embedding (RoPE) for vision transformers.
+
+    Applies separate rotations for height and width dimensions, better suited
+    for 2D image patches than 1D RoPE.
+
+    Args:
+        dim: Dimension per head (must be divisible by 4 for 2D)
+        max_h: Maximum height in patches
+        max_w: Maximum width in patches
+        base: Base for the frequency computation
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        max_h: int = 32,
+        max_w: int = 32,
+        base: float = 10000.0,
+    ) -> None:
+        super().__init__()
+        assert dim % 4 == 0, f"dim={dim} must be divisible by 4 for 2D RoPE"
+
+        self.dim = dim
+        self.max_h = max_h
+        self.max_w = max_w
+        self.base = base
+
+        # Half dimensions for each spatial direction (h and w)
+        half_dim = dim // 2
+
+        # Inverse frequencies for position encoding
+        inv_freq = 1.0 / (base ** (torch.arange(0, half_dim, 2).float() / half_dim))
+        self.register_buffer('inv_freq', inv_freq, persistent=False)
+
+        # Cache for precomputed cos/sin values
+        self._cos_cache = None
+        self._sin_cache = None
+        self._cached_h = 0
+        self._cached_w = 0
+
+    def _build_cache(self, h: int, w: int, device: torch.device, dtype: torch.dtype):
+        """Build cos/sin cache for given spatial dimensions."""
+        if h <= self._cached_h and w <= self._cached_w and self._cos_cache is not None:
+            return
+
+        self._cached_h = max(h, self._cached_h)
+        self._cached_w = max(w, self._cached_w)
+
+        # Position indices for height and width
+        pos_h = torch.arange(self._cached_h, device=device, dtype=dtype)
+        pos_w = torch.arange(self._cached_w, device=device, dtype=dtype)
+
+        inv_freq = self.inv_freq.to(device=device, dtype=dtype)
+
+        # Compute frequencies: [H, dim/4] and [W, dim/4]
+        freqs_h = torch.einsum('i,j->ij', pos_h, inv_freq)
+        freqs_w = torch.einsum('i,j->ij', pos_w, inv_freq)
+
+        # Expand to grid: [H, W, dim/4]
+        freqs_h = freqs_h[:, None, :].expand(-1, self._cached_w, -1)
+        freqs_w = freqs_w[None, :, :].expand(self._cached_h, -1, -1)
+
+        # Flatten: [H*W, dim/4]
+        freqs_h = freqs_h.reshape(-1, freqs_h.shape[-1])
+        freqs_w = freqs_w.reshape(-1, freqs_w.shape[-1])
+
+        # Combine: [H*W, dim] = [h_freq, h_freq, w_freq, w_freq]
+        emb = torch.cat([freqs_h, freqs_h, freqs_w, freqs_w], dim=-1)
+
+        # Cache as [1, 1, H*W, dim] for broadcasting
+        self._cos_cache = emb.cos()[None, None, :, :]
+        self._sin_cache = emb.sin()[None, None, :, :]
+
+    def _rotate_half(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply rotation for 2D RoPE (separate h and w rotations)."""
+        quarter = self.dim // 4
+        x1 = x[..., :quarter]
+        x2 = x[..., quarter:quarter*2]
+        x3 = x[..., quarter*2:quarter*3]
+        x4 = x[..., quarter*3:]
+        return torch.cat([-x2, x1, -x4, x3], dim=-1)
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        h: int,
+        w: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Apply 2D rotary position embedding to Q and K.
+
+        Args:
+            q: Query tensor [B, num_heads, N, head_dim]
+            k: Key tensor [B, num_heads, M, head_dim]
+            h: Height in patches
+            w: Width in patches
+
+        Returns:
+            Rotated (q, k) tensors
+        """
+        seq_len_q = q.shape[2]
+        seq_len_k = k.shape[2]
+
+        self._build_cache(h, w, q.device, q.dtype)
+
+        # Get cos/sin for Q and K sequence lengths
+        cos_q = self._cos_cache[:, :, :seq_len_q, :self.dim].to(q.dtype)
+        sin_q = self._sin_cache[:, :, :seq_len_q, :self.dim].to(q.dtype)
+        cos_k = self._cos_cache[:, :, :seq_len_k, :self.dim].to(k.dtype)
+        sin_k = self._sin_cache[:, :, :seq_len_k, :self.dim].to(k.dtype)
+
+        # Apply rotation: x * cos + rotate_half(x) * sin
+        q_rot = (q * cos_q) + (self._rotate_half(q) * sin_q)
+        k_rot = (k * cos_k) + (self._rotate_half(k) * sin_k)
+
+        return q_rot, k_rot
+
+
+class MultiheadAttentionWithRoPE(nn.Module):
+    """
+    Multi-head attention with 2D Rotary Position Embedding.
+
+    Replaces nn.MultiheadAttention with RoPE support for vision transformers.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        qkv_bias: bool = True,
+        use_rope: bool = True,
+    ):
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
+        self.use_rope = use_rope
+
+        # Separate Q, K, V projections (required for RoPE)
+        self.q_proj = nn.Linear(dim, dim, bias=qkv_bias)
+        self.k_proj = nn.Linear(dim, dim, bias=qkv_bias)
+        self.v_proj = nn.Linear(dim, dim, bias=qkv_bias)
+        self.out_proj = nn.Linear(dim, dim)
+
+        # 2D RoPE
+        if use_rope:
+            self.rope = RotaryPositionEmbedding2D(
+                dim=self.head_dim,
+                max_h=32,
+                max_w=32,
+            )
+        else:
+            self.rope = None
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        nn.init.xavier_uniform_(self.q_proj.weight)
+        nn.init.xavier_uniform_(self.k_proj.weight)
+        nn.init.xavier_uniform_(self.v_proj.weight)
+        nn.init.xavier_uniform_(self.out_proj.weight)
+        if self.q_proj.bias is not None:
+            nn.init.zeros_(self.q_proj.bias)
+            nn.init.zeros_(self.k_proj.bias)
+            nn.init.zeros_(self.v_proj.bias)
+        nn.init.zeros_(self.out_proj.bias)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        spatial_size: Optional[Tuple[int, int]] = None,
+        need_weights: bool = False,
+        average_attn_weights: bool = True,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Args:
+            query: [B, N, D]
+            key: [B, M, D]
+            value: [B, M, D]
+            spatial_size: (H, W) for 2D RoPE. If None, inferred from sequence length.
+            need_weights: Whether to return attention weights
+            average_attn_weights: Whether to average attention weights across heads
+
+        Returns:
+            output: [B, N, D]
+            attn_weights: [B, N, M] if need_weights else None
+        """
+        B, N, _ = query.shape
+        M = key.shape[1]
+
+        # Project Q, K, V
+        q = self.q_proj(query)
+        k = self.k_proj(key)
+        v = self.v_proj(value)
+
+        # Reshape to multi-head: [B, num_heads, seq_len, head_dim]
+        q = q.view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(B, M, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(B, M, self.num_heads, self.head_dim).transpose(1, 2)
+
+        # Apply RoPE
+        if self.rope is not None:
+            if spatial_size is not None:
+                h, w = spatial_size
+            else:
+                # Infer square spatial size
+                h = w = int(math.sqrt(N))
+            q, k = self.rope(q, k, h, w)
+
+        # Scaled dot-product attention
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = F.softmax(attn, dim=-1)
+
+        # Apply attention to values
+        out = attn @ v
+
+        # Reshape back: [B, N, D]
+        out = out.transpose(1, 2).contiguous().view(B, N, self.dim)
+        out = self.out_proj(out)
+
+        if need_weights:
+            if average_attn_weights:
+                attn_weights = attn.mean(dim=1)  # [B, N, M]
+            else:
+                attn_weights = attn  # [B, num_heads, N, M]
+            return out, attn_weights
+
+        return out, None
+
 def window_partition(x: torch.Tensor, window_size: int) -> torch.Tensor:
     """
     Partition feature map into non-overlapping windows.
@@ -311,18 +547,26 @@ class SwinDecoderBlock(nn.Module):
 
 
 class CroCoDecoderBlock(nn.Module):
-    def __init__(self, dim=768, num_heads=12, mlp_ratio=4.0, drop_path=0.0):
+    def __init__(self, dim=768, num_heads=12, mlp_ratio=4.0, drop_path=0.0, use_rope=False):
         super().__init__()
-        
+
+        self.use_rope = use_rope
+
         # Self-Attention components
         self.norm1 = nn.LayerNorm(dim)
-        self.self_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
-        
+        if use_rope:
+            self.self_attn = MultiheadAttentionWithRoPE(dim, num_heads, use_rope=True)
+        else:
+            self.self_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
+
         # Cross-Attention components
         self.norm2 = nn.LayerNorm(dim)
         self.norm_cross = nn.LayerNorm(dim)
-        self.cross_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
-        
+        if use_rope:
+            self.cross_attn = MultiheadAttentionWithRoPE(dim, num_heads, use_rope=True)
+        else:
+            self.cross_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
+
         # MLP components
         self.norm3 = nn.LayerNorm(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
@@ -331,54 +575,86 @@ class CroCoDecoderBlock(nn.Module):
             nn.GELU(),
             nn.Linear(mlp_hidden_dim, dim)
         )
-        
+
         # ========== Attention 저장용 ==========
         self.self_attn_weights = None
         self.cross_attn_weights = None
         # ======================================
-        
-    def forward(self, x, y, return_attention=False):
+
+    def forward(self, x, y, return_attention=False, spatial_size=None):
         """
         Args:
             x: [B, N, D] - decoder input (RGB masked)
             y: [B, M, D] - encoder output (Thermal reference)
             return_attention: bool - attention map 반환 여부
+            spatial_size: (H, W) for RoPE. If None, inferred from sequence length.
         Returns:
             x: [B, N, D] - updated decoder features
         """
         # Step 1: Self-Attention
         x_norm = self.norm1(x)
-        if return_attention:
-            self_out, self_attn_weights = self.self_attn(
-                x_norm, x_norm, x_norm, 
-                need_weights=True, 
-                average_attn_weights=True  # [B, N, N]
-            )
-            self.self_attn_weights = self_attn_weights
+        if self.use_rope:
+            if return_attention:
+                self_out, self_attn_weights = self.self_attn(
+                    x_norm, x_norm, x_norm,
+                    spatial_size=spatial_size,
+                    need_weights=True,
+                    average_attn_weights=True
+                )
+                self.self_attn_weights = self_attn_weights
+            else:
+                self_out, _ = self.self_attn(x_norm, x_norm, x_norm, spatial_size=spatial_size)
         else:
-            self_out = self.self_attn(x_norm, x_norm, x_norm)[0]
+            if return_attention:
+                self_out, self_attn_weights = self.self_attn(
+                    x_norm, x_norm, x_norm,
+                    need_weights=True,
+                    average_attn_weights=True  # [B, N, N]
+                )
+                self.self_attn_weights = self_attn_weights
+            else:
+                self_out = self.self_attn(x_norm, x_norm, x_norm)[0]
         x = x + self_out
-        
+
         # Step 2: Cross-Attention
         x_norm = self.norm2(x)
         encoder_norm = self.norm_cross(y)
-        if return_attention:
-            cross_out, cross_attn_weights = self.cross_attn(
-                query=x_norm,
-                key=encoder_norm,
-                value=encoder_norm,
-                need_weights=True,
-                average_attn_weights=True  # [B, N, M]
-            )
-            self.cross_attn_weights = cross_attn_weights
+        if self.use_rope:
+            if return_attention:
+                cross_out, cross_attn_weights = self.cross_attn(
+                    query=x_norm,
+                    key=encoder_norm,
+                    value=encoder_norm,
+                    spatial_size=spatial_size,
+                    need_weights=True,
+                    average_attn_weights=True
+                )
+                self.cross_attn_weights = cross_attn_weights
+            else:
+                cross_out, _ = self.cross_attn(
+                    query=x_norm,
+                    key=encoder_norm,
+                    value=encoder_norm,
+                    spatial_size=spatial_size
+                )
         else:
-            cross_out = self.cross_attn(
-                query=x_norm,
-                key=encoder_norm,
-                value=encoder_norm
-            )[0]
+            if return_attention:
+                cross_out, cross_attn_weights = self.cross_attn(
+                    query=x_norm,
+                    key=encoder_norm,
+                    value=encoder_norm,
+                    need_weights=True,
+                    average_attn_weights=True  # [B, N, M]
+                )
+                self.cross_attn_weights = cross_attn_weights
+            else:
+                cross_out = self.cross_attn(
+                    query=x_norm,
+                    key=encoder_norm,
+                    value=encoder_norm
+                )[0]
         x = x + cross_out
-        
+
         # Step 3: MLP
         x = x + self.mlp(self.norm3(x))
 

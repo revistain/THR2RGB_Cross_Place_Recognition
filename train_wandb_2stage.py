@@ -147,7 +147,9 @@ if __name__ == "__main__":
     '''Training'''
     global_step = 0
     for epoch_num in range(start_epoch_num, args.epochs_num):
-        logging.info(f"Start training epoch: {epoch_num:02d}")
+        # Log training mode based on epoch
+        rgb_mode = "paired RGB" if epoch_num < args.paired_rgb_epochs else "positive RGB"
+        logging.info(f"Start training epoch: {epoch_num:02d} (reconstruction with {rgb_mode})")
 
         epoch_start_time = datetime.now()
         epoch_losses = np.zeros((0, 1), dtype=np.float32)
@@ -181,14 +183,20 @@ if __name__ == "__main__":
             model = model.train()
             logging.debug(f"Start loading {len(triplets_ds)} triplets as {len(triplets_dl)} batches")
 
+            # Determine whether to use paired RGB or positive RGB based on epoch
+            use_paired_rgb = epoch_num < args.paired_rgb_epochs
+            if epoch_num == args.paired_rgb_epochs:
+                logging.info(f"[Epoch {epoch_num}] Switching from paired RGB to positive RGB for reconstruction")
+
             print("- Training...")
             for images, triplets_local_indexes, _, aligned_rgbs in tqdm(triplets_dl, ncols=100, desc=f"GPU{args.cuda_device}/Epoch {epoch_num:02d}"):
                 ### model을 통해, triplet의 descriptor와 patch embedding 추출
-                if args.use_pos_as_aligned_rgb:
+                # Use positive RGB instead of aligned RGB after paired_rgb_epochs
+                if args.use_pos_as_aligned_rgb or not use_paired_rgb:
                     assert images.size(0) % args.train_batch_size == 0
                     size_of_batch = int(images.size(0) / args.train_batch_size)
                     train_batch_size = args.train_batch_size
-                    
+
                     pos_rgbs = [images[idx] for idx in range(1, images.size(0), size_of_batch)]
                     pos_rgbs = torch.stack(pos_rgbs)
                     pos_rgbs = triplets_ds.transform(pos_rgbs)
@@ -332,7 +340,13 @@ if __name__ == "__main__":
         )
 
         # wandb 로깅 (epoch 단위)
-        wandb.log({"train/epoch_avg_loss": epoch_losses.mean(), "epoch": epoch_num}, step=global_step)
+        # Log RGB mode: 1 = paired, 0 = positive
+        rgb_mode_flag = 1 if epoch_num < args.paired_rgb_epochs else 0
+        wandb.log({
+            "train/epoch_avg_loss": epoch_losses.mean(),
+            "train/rgb_mode": rgb_mode_flag,  # 1=paired, 0=positive
+            "epoch": epoch_num
+        }, step=global_step)
         logging.info(f"epoch {epoch_num:02d} time: {str(datetime.now() - epoch_start_time)[:-7]}, ")
 
         # Compute recalls

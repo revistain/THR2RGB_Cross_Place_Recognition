@@ -95,6 +95,8 @@ class Parser():
         self.parser.add_argument("--num_decoder_depth", type=int, default=8, help="_")
         self.parser.add_argument("--use_only_cross_decoder", action='store_true', default=False)
         self.parser.add_argument("--use_pos_as_aligned_rgb", action='store_true', default=False)
+        self.parser.add_argument("--paired_rgb_epochs", type=int, default=40,
+                                 help="Number of epochs to use aligned/paired RGB. After this, switch to positive RGB (default: 40)")
         self.parser.add_argument("--recon_loss_type", type=str, default="none", choices=['mse', 'l1', 'ssim', 'mse+ssim', 'GV', 'GV+l1', 'l1+ssim'])
         self.parser.add_argument("--use_fast_track", action='store_true', default=False)
         self.parser.add_argument("--rerank_with_RGB", action='store_true', default=False)
@@ -118,15 +120,11 @@ class Parser():
                                  help="Unfreeze DINO blocks in decoder (train self-attn + MLP, not just cross-attn)")
         self.parser.add_argument('--is_dino_dec_stage2', action='store_true', default=False)
 
-        # RoPE (Rotary Position Embedding) settings for decoder cross-attention
+        # RoPE (Rotary Position Embedding) settings for CroCo decoder
         self.parser.add_argument('--use_rope', action='store_true', default=True,
-                                 help="Use RoPE instead of learnable positional embedding in decoder cross-attention (default: True)")
+                                 help="Use 2D RoPE instead of learnable positional embedding in CroCo decoder (default: True)")
         self.parser.add_argument('--no_rope', dest='use_rope', action='store_false',
                                  help="Disable RoPE and use learnable positional embedding instead")
-        self.parser.add_argument('--rope_2d', action='store_true', default=True,
-                                 help="Use 2D RoPE for vision (default: True)")
-        self.parser.add_argument('--rope_1d', dest='rope_2d', action='store_false',
-                                 help="Use 1D RoPE instead of 2D")
 
         # Swin Decoder settings
         self.parser.add_argument("--use_swin_decoder", action='store_true', default=False,

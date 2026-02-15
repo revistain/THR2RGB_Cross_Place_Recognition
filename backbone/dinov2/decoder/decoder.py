@@ -12,12 +12,11 @@ with trainable cross-attention adapters inserted between them.
 
 Structure of each decoder block:
     1. Self-Attention (frozen, from pretrained DINO)
-    2. Cross-Attention (trainable adapter) with RoPE
+    2. Cross-Attention (trainable adapter)
     3. MLP (frozen, from pretrained DINO)
 """
 
 import copy
-import math
 from functools import partial
 from typing import Dict, List, Optional, Tuple
 
@@ -27,220 +26,6 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from timm.models.layers import DropPath
-
-
-class RotaryPositionEmbedding(nn.Module):
-    """
-    Rotary Position Embedding (RoPE) for 2D vision transformers.
-
-    RoPE encodes position by rotating query and key vectors, enabling better
-    extrapolation to unseen positions and capturing relative position information.
-
-    Args:
-        dim: Dimension of the embedding (must be divisible by 2)
-        max_seq_len: Maximum sequence length (for precomputing frequencies)
-        base: Base for the frequency computation (default: 10000)
-    """
-
-    def __init__(
-        self,
-        dim: int,
-        max_seq_len: int = 1024,
-        base: float = 10000.0,
-    ) -> None:
-        super().__init__()
-        self.dim = dim
-        self.max_seq_len = max_seq_len
-        self.base = base
-
-        # Precompute inverse frequencies
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
-        self.register_buffer('inv_freq', inv_freq, persistent=False)
-
-        # Cache for cos and sin values
-        self._cos_cache = None
-        self._sin_cache = None
-        self._cache_seq_len = 0
-
-    def _update_cache(self, seq_len: int, device: torch.device, dtype: torch.dtype):
-        """Update the cos/sin cache if needed."""
-        if seq_len <= self._cache_seq_len and self._cos_cache is not None:
-            return
-
-        self._cache_seq_len = max(seq_len, self._cache_seq_len)
-
-        # Create position indices
-        t = torch.arange(self._cache_seq_len, device=device, dtype=dtype)
-
-        # Compute frequencies: [seq_len, dim/2]
-        freqs = torch.einsum('i,j->ij', t, self.inv_freq.to(device=device, dtype=dtype))
-
-        # Duplicate for full dimension: [seq_len, dim]
-        emb = torch.cat([freqs, freqs], dim=-1)
-
-        self._cos_cache = emb.cos()[None, None, :, :]  # [1, 1, seq_len, dim]
-        self._sin_cache = emb.sin()[None, None, :, :]
-
-    def _rotate_half(self, x: Tensor) -> Tensor:
-        """Rotate half the hidden dims of the input."""
-        x1 = x[..., : self.dim // 2]
-        x2 = x[..., self.dim // 2 :]
-        return torch.cat([-x2, x1], dim=-1)
-
-    def forward(
-        self,
-        q: Tensor,
-        k: Tensor,
-        seq_len: Optional[int] = None,
-    ) -> Tuple[Tensor, Tensor]:
-        """
-        Apply rotary position embedding to query and key tensors.
-
-        Args:
-            q: Query tensor [B, num_heads, N, head_dim]
-            k: Key tensor [B, num_heads, M, head_dim]
-            seq_len: Optional sequence length (defaults to max of q and k lengths)
-
-        Returns:
-            Tuple of rotated (q, k) tensors
-        """
-        q_len = q.shape[2]
-        k_len = k.shape[2]
-        max_len = max(q_len, k_len) if seq_len is None else seq_len
-
-        self._update_cache(max_len, q.device, q.dtype)
-
-        # Get relevant cos/sin values
-        cos_q = self._cos_cache[:, :, :q_len, :self.dim].to(q.dtype)
-        sin_q = self._sin_cache[:, :, :q_len, :self.dim].to(q.dtype)
-        cos_k = self._cos_cache[:, :, :k_len, :self.dim].to(k.dtype)
-        sin_k = self._sin_cache[:, :, :k_len, :self.dim].to(k.dtype)
-
-        # Apply rotation
-        q_rot = (q * cos_q) + (self._rotate_half(q) * sin_q)
-        k_rot = (k * cos_k) + (self._rotate_half(k) * sin_k)
-
-        return q_rot, k_rot
-
-
-class RotaryPositionEmbedding2D(nn.Module):
-    """
-    2D Rotary Position Embedding for vision transformers.
-
-    Applies separate RoPE for height and width dimensions, better suited for
-    2D image patches than 1D RoPE.
-
-    Args:
-        dim: Dimension of the embedding (must be divisible by 4)
-        max_h: Maximum height in patches
-        max_w: Maximum width in patches
-        base: Base for the frequency computation
-    """
-
-    def __init__(
-        self,
-        dim: int,
-        max_h: int = 32,
-        max_w: int = 32,
-        base: float = 10000.0,
-    ) -> None:
-        super().__init__()
-        assert dim % 4 == 0, "dim must be divisible by 4 for 2D RoPE"
-
-        self.dim = dim
-        self.max_h = max_h
-        self.max_w = max_w
-        self.base = base
-
-        # Half the dimensions for each spatial direction
-        half_dim = dim // 2
-
-        # Separate inverse frequencies for h and w
-        inv_freq = 1.0 / (base ** (torch.arange(0, half_dim, 2).float() / half_dim))
-        self.register_buffer('inv_freq', inv_freq, persistent=False)
-
-        # Cache
-        self._cos_cache = None
-        self._sin_cache = None
-        self._cached_h = 0
-        self._cached_w = 0
-
-    def _update_cache(self, h: int, w: int, device: torch.device, dtype: torch.dtype):
-        """Update 2D cos/sin cache."""
-        if h <= self._cached_h and w <= self._cached_w and self._cos_cache is not None:
-            return
-
-        self._cached_h = max(h, self._cached_h)
-        self._cached_w = max(w, self._cached_w)
-
-        # Create position grids
-        pos_h = torch.arange(self._cached_h, device=device, dtype=dtype)
-        pos_w = torch.arange(self._cached_w, device=device, dtype=dtype)
-
-        inv_freq = self.inv_freq.to(device=device, dtype=dtype)
-
-        # Compute frequencies for each dimension
-        freqs_h = torch.einsum('i,j->ij', pos_h, inv_freq)  # [H, dim/4]
-        freqs_w = torch.einsum('i,j->ij', pos_w, inv_freq)  # [W, dim/4]
-
-        # Expand to all positions: [H, W, dim/4]
-        freqs_h = freqs_h[:, None, :].expand(-1, self._cached_w, -1)
-        freqs_w = freqs_w[None, :, :].expand(self._cached_h, -1, -1)
-
-        # Flatten spatial dimensions: [H*W, dim/4]
-        freqs_h = freqs_h.reshape(-1, freqs_h.shape[-1])
-        freqs_w = freqs_w.reshape(-1, freqs_w.shape[-1])
-
-        # Combine: [H*W, dim] with pattern [h_cos, h_sin, w_cos, w_sin]
-        emb = torch.cat([freqs_h, freqs_h, freqs_w, freqs_w], dim=-1)
-
-        self._cos_cache = emb.cos()[None, None, :, :]  # [1, 1, H*W, dim]
-        self._sin_cache = emb.sin()[None, None, :, :]
-
-    def _rotate_half(self, x: Tensor) -> Tensor:
-        """Rotate for 2D: separate rotations for h and w dimensions."""
-        quarter = self.dim // 4
-        x1 = x[..., :quarter]
-        x2 = x[..., quarter:quarter*2]
-        x3 = x[..., quarter*2:quarter*3]
-        x4 = x[..., quarter*3:]
-        return torch.cat([-x2, x1, -x4, x3], dim=-1)
-
-    def forward(
-        self,
-        q: Tensor,
-        k: Tensor,
-        h: int,
-        w: int,
-    ) -> Tuple[Tensor, Tensor]:
-        """
-        Apply 2D rotary position embedding.
-
-        Args:
-            q: Query tensor [B, num_heads, N, head_dim]
-            k: Key tensor [B, num_heads, M, head_dim]
-            h: Height in patches
-            w: Width in patches
-
-        Returns:
-            Tuple of rotated (q, k) tensors
-        """
-        seq_len_q = q.shape[2]
-        seq_len_k = k.shape[2]
-
-        self._update_cache(h, w, q.device, q.dtype)
-
-        # Get relevant cos/sin values
-        cos_q = self._cos_cache[:, :, :seq_len_q, :self.dim].to(q.dtype)
-        sin_q = self._sin_cache[:, :, :seq_len_q, :self.dim].to(q.dtype)
-        cos_k = self._cos_cache[:, :, :seq_len_k, :self.dim].to(k.dtype)
-        sin_k = self._sin_cache[:, :, :seq_len_k, :self.dim].to(k.dtype)
-
-        # Apply rotation
-        q_rot = (q * cos_q) + (self._rotate_half(q) * sin_q)
-        k_rot = (k * cos_k) + (self._rotate_half(k) * sin_k)
-
-        return q_rot, k_rot
 
 
 class VanillaAdapter(nn.Module):
@@ -270,20 +55,15 @@ class VanillaAdapter(nn.Module):
 
 class CrossAttentionAdapter(nn.Module):
     """
-    Trainable cross-attention adapter with Rotary Position Embedding (RoPE).
+    Trainable cross-attention adapter inserted between frozen self-attention and MLP.
 
     This adapter enables cross-modal conditioning by attending to features
     from a reference modality (e.g., RGB features when decoding thermal).
-    Uses RoPE instead of additive positional embeddings for better
-    position encoding.
 
     Args:
         dim: Feature dimension
         num_heads: Number of attention heads
         drop_path: Drop path rate for regularization
-        use_rope: Whether to use RoPE (default: True)
-        rope_2d: Whether to use 2D RoPE (default: True for vision)
-        max_seq_len: Maximum sequence length for RoPE cache
     """
 
     def __init__(
@@ -291,46 +71,22 @@ class CrossAttentionAdapter(nn.Module):
         dim: int,
         num_heads: int = 12,
         drop_path: float = 0.0,
-        use_rope: bool = True,
-        rope_2d: bool = True,
-        max_seq_len: int = 1024,
     ) -> None:
         super().__init__()
 
         self.dim = dim
         self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-        self.scale = self.head_dim ** -0.5
-        self.use_rope = use_rope
-        self.rope_2d = rope_2d
 
         # Layer norms for query and key/value
         self.norm_q = nn.LayerNorm(dim)
         self.norm_kv = nn.LayerNorm(dim)
 
-        # Separate projections for Q, K, V (needed for RoPE)
-        self.q_proj = nn.Linear(dim, dim)
-        self.k_proj = nn.Linear(dim, dim)
-        self.v_proj = nn.Linear(dim, dim)
-        self.out_proj = nn.Linear(dim, dim)
-
-        # RoPE
-        if use_rope:
-            if rope_2d:
-                # For 2D, we need head_dim divisible by 4
-                assert self.head_dim % 4 == 0, f"head_dim={self.head_dim} must be divisible by 4 for 2D RoPE"
-                self.rope = RotaryPositionEmbedding2D(
-                    dim=self.head_dim,
-                    max_h=32,  # Supports up to 32x32 patches
-                    max_w=32,
-                )
-            else:
-                self.rope = RotaryPositionEmbedding(
-                    dim=self.head_dim,
-                    max_seq_len=max_seq_len,
-                )
-        else:
-            self.rope = None
+        # Cross-attention layer
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=dim,
+            num_heads=num_heads,
+            batch_first=True,
+        )
 
         # Drop path for regularization
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
@@ -338,85 +94,47 @@ class CrossAttentionAdapter(nn.Module):
         self._reset_parameters()
 
     def _reset_parameters(self):
-        # Initialize projections with xavier uniform
-        nn.init.xavier_uniform_(self.q_proj.weight)
-        nn.init.xavier_uniform_(self.k_proj.weight)
-        nn.init.xavier_uniform_(self.v_proj.weight)
-        nn.init.xavier_uniform_(self.out_proj.weight)
-        nn.init.zeros_(self.q_proj.bias)
-        nn.init.zeros_(self.k_proj.bias)
-        nn.init.zeros_(self.v_proj.bias)
-        nn.init.zeros_(self.out_proj.bias)
+        # Initialize cross-attention with small weights for stability
+        nn.init.xavier_uniform_(self.cross_attn.in_proj_weight)
+        nn.init.xavier_uniform_(self.cross_attn.out_proj.weight)
+        nn.init.zeros_(self.cross_attn.in_proj_bias)
+        nn.init.zeros_(self.cross_attn.out_proj.bias)
 
     def forward(
         self,
         x: Tensor,
         ref: Tensor,
         return_attention: bool = False,
-        spatial_size: Optional[Tuple[int, int]] = None,
     ) -> Tuple[Tensor, Optional[Tensor]]:
         """
-        Forward pass of cross-attention adapter with RoPE.
+        Forward pass of cross-attention adapter.
 
         Args:
             x: Query features from target modality [B, N, D]
             ref: Key/Value features from reference modality [B, M, D]
             return_attention: Whether to return attention weights
-            spatial_size: Optional (H, W) tuple for 2D RoPE. If None, assumes square.
 
         Returns:
             Tuple of (output features, optional attention weights)
         """
-        B, N, _ = x.shape
-        M = ref.shape[1]
-
         # Normalize inputs
-        q_in = self.norm_q(x)
-        kv_in = self.norm_kv(ref)
+        q = self.norm_q(x)
+        kv = self.norm_kv(ref)
 
-        # Project to Q, K, V
-        q = self.q_proj(q_in)
-        k = self.k_proj(kv_in)
-        v = self.v_proj(kv_in)
-
-        # Reshape for multi-head attention: [B, num_heads, seq_len, head_dim]
-        q = q.view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(B, M, self.num_heads, self.head_dim).transpose(1, 2)
-        v = v.view(B, M, self.num_heads, self.head_dim).transpose(1, 2)
-
-        # Apply RoPE to Q and K
-        if self.rope is not None:
-            if self.rope_2d:
-                # Determine spatial size
-                if spatial_size is not None:
-                    h, w = spatial_size
-                else:
-                    # Assume square spatial arrangement (excluding CLS token if present)
-                    h = w = int(math.sqrt(N))
-                q, k = self.rope(q, k, h, w)
-            else:
-                q, k = self.rope(q, k)
-
-        # Scaled dot-product attention
-        attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-        attn_weights = F.softmax(attn_weights, dim=-1)
-
-        # Apply attention to values
-        attn_out = torch.matmul(attn_weights, v)
-
-        # Reshape back: [B, N, D]
-        attn_out = attn_out.transpose(1, 2).contiguous().view(B, N, self.dim)
-
-        # Output projection
-        attn_out = self.out_proj(attn_out)
+        # Cross-attention
+        attn_out, attn_weights = self.cross_attn(
+            query=q,
+            key=kv,
+            value=kv,
+            need_weights=return_attention,
+            average_attn_weights=True,
+        )
 
         # Residual connection with drop path
         out = x + self.drop_path(attn_out)
 
         if return_attention:
-            # Average attention weights across heads
-            avg_attn = attn_weights.mean(dim=1)
-            return out, avg_attn
+            return out, attn_weights
         return out, None
 
 
@@ -426,7 +144,7 @@ class DinoDecoderBlock(nn.Module):
 
     Structure:
         x = x + self_attn(norm1(x))      # Frozen, from DINO
-        x = x + cross_attn(x, ref)        # Trainable adapter with RoPE
+        x = x + cross_attn(x, ref)        # Trainable adapter
         x = x + mlp(norm2(x))             # Frozen, from DINO
 
     Args:
@@ -434,8 +152,6 @@ class DinoDecoderBlock(nn.Module):
         dim: Feature dimension
         num_heads: Number of attention heads for cross-attention
         drop_path: Drop path rate for cross-attention adapter
-        use_rope: Whether to use RoPE in cross-attention
-        rope_2d: Whether to use 2D RoPE
     """
 
     def __init__(
@@ -444,8 +160,6 @@ class DinoDecoderBlock(nn.Module):
         dim: int,
         num_heads: int = 12,
         drop_path: float = 0.0,
-        use_rope: bool = True,
-        rope_2d: bool = True,
     ) -> None:
         super().__init__()
 
@@ -455,13 +169,11 @@ class DinoDecoderBlock(nn.Module):
         self.ls1 = dino_block.ls1
         self.drop_path1 = dino_block.drop_path1
 
-        # ============ Cross-Attention (trainable adapter with RoPE) ============
+        # ============ Cross-Attention (trainable adapter) ============
         self.cross_attn_adapter = CrossAttentionAdapter(
             dim=dim,
             num_heads=num_heads,
             drop_path=drop_path,
-            use_rope=use_rope,
-            rope_2d=rope_2d,
         )
 
         # ============ MLP components (frozen, from DINO) ============
@@ -528,7 +240,6 @@ class DinoDecoderBlock(nn.Module):
         x: Tensor,
         ref: Tensor,
         return_attention: bool = False,
-        spatial_size: Optional[Tuple[int, int]] = None,
     ) -> Tuple[Tensor, Optional[Tensor]]:
         """
         Forward pass: self-attn → cross-attn → MLP
@@ -537,7 +248,6 @@ class DinoDecoderBlock(nn.Module):
             x: Input features [B, N, D]
             ref: Reference features for cross-attention [B, M, D]
             return_attention: Whether to return cross-attention weights
-            spatial_size: Optional (H, W) tuple for 2D RoPE
 
         Returns:
             Tuple of (output features, optional cross-attention weights)
@@ -545,8 +255,8 @@ class DinoDecoderBlock(nn.Module):
         # 1. Self-Attention (frozen, from DINO)
         x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x))))
 
-        # 2. Cross-Attention (trainable adapter with RoPE)
-        x, attn_weights = self.cross_attn_adapter(x, ref, return_attention, spatial_size)
+        # 2. Cross-Attention (trainable adapter)
+        x, attn_weights = self.cross_attn_adapter(x, ref, return_attention)
 
         # 3. MLP (frozen, from DINO)
         mlp_out = self.mlp(self.norm2(x))
@@ -564,7 +274,7 @@ class DINOv2Decoder(nn.Module):
 
     Each block has the structure:
         1. Self-Attention (frozen, pretrained DINO weights)
-        2. Cross-Attention (trainable adapter with RoPE)
+        2. Cross-Attention (trainable adapter)
         3. MLP (frozen, pretrained DINO weights)
 
     Args:
@@ -572,8 +282,6 @@ class DINOv2Decoder(nn.Module):
         num_heads: Number of attention heads
         layer_indices: Which DINO layers to use (default: [3,4,5,6,7,8,9])
         drop_path_rate: Drop path rate for cross-attention adapters
-        use_rope: Whether to use RoPE in cross-attention (default: True)
-        rope_2d: Whether to use 2D RoPE for vision (default: True)
     """
 
     def __init__(
@@ -582,8 +290,6 @@ class DINOv2Decoder(nn.Module):
         num_heads: int = 12,
         layer_indices: List[int] = None,
         drop_path_rate: float = 0.0,
-        use_rope: bool = True,
-        rope_2d: bool = True,
     ) -> None:
         super().__init__()
 
@@ -594,8 +300,6 @@ class DINOv2Decoder(nn.Module):
         self.num_heads = num_heads
         self.layer_indices = layer_indices
         self.num_blocks = len(layer_indices)
-        self.use_rope = use_rope
-        self.rope_2d = rope_2d
 
         # Placeholder for decoder blocks (will be populated by from_encoder)
         self.blocks = nn.ModuleList()
@@ -617,8 +321,6 @@ class DINOv2Decoder(nn.Module):
         layer_range: Tuple[int, int] = (3, 10),
         num_heads: int = None,
         drop_path_rate: float = 0.0,
-        use_rope: bool = True,
-        rope_2d: bool = True,
     ) -> 'DINOv2Decoder':
         """
         Create decoder by extracting DINO block components from encoder.
@@ -628,11 +330,9 @@ class DINOv2Decoder(nn.Module):
             layer_range: Range of layers to use (start, end), e.g., (3, 10) for layers 3-9
             num_heads: Number of attention heads (defaults to encoder's num_heads)
             drop_path_rate: Drop path rate for cross-attention adapters
-            use_rope: Whether to use RoPE in cross-attention (default: True)
-            rope_2d: Whether to use 2D RoPE for vision (default: True)
 
         Returns:
-            DINOv2Decoder instance with frozen DINO components + trainable cross-attention with RoPE
+            DINOv2Decoder instance with frozen DINO components + trainable cross-attention
         """
         start_layer, end_layer = layer_range
         layer_indices = list(range(start_layer, end_layer))
@@ -648,8 +348,6 @@ class DINOv2Decoder(nn.Module):
             num_heads=num_heads,
             layer_indices=layer_indices,
             drop_path_rate=drop_path_rate,
-            use_rope=use_rope,
-            rope_2d=rope_2d,
         )
 
         # Create decoder blocks from encoder blocks
@@ -657,14 +355,12 @@ class DINOv2Decoder(nn.Module):
             # Deep copy the DINO block to extract its components
             dino_block = copy.deepcopy(encoder.blocks[layer_idx])
 
-            # Create decoder block with DINO components + cross-attention with RoPE
+            # Create decoder block with DINO components + cross-attention
             decoder_block = DinoDecoderBlock(
                 dino_block=dino_block,
                 dim=dim,
                 num_heads=num_heads,
                 drop_path=decoder.drop_path_rates[i],
-                use_rope=use_rope,
-                rope_2d=rope_2d,
             )
             decoder_block.layer_idx = layer_idx
 
@@ -723,18 +419,15 @@ class DINOv2Decoder(nn.Module):
         x: Tensor,
         ref_features: Dict[int, Tensor],
         return_attention: bool = False,
-        spatial_size: Optional[Tuple[int, int]] = None,
     ) -> Tuple[Tensor, Optional[Dict[int, Tensor]]]:
         """
         Forward pass through decoder.
 
         Args:
             x: Input features from layer 3 of target modality [B, N, D]
-               If N includes CLS token, spatial_size should be computed from N-1
             ref_features: Dict mapping layer index to reference features
                          e.g., {3: [B,N,D], 4: [B,N,D], ..., 9: [B,N,D]}
             return_attention: Whether to return attention weights
-            spatial_size: Optional (H, W) tuple for 2D RoPE. If None, auto-inferred.
 
         Returns:
             Tuple of:
@@ -742,20 +435,6 @@ class DINOv2Decoder(nn.Module):
                 - Optional dict of attention weights per layer
         """
         attn_weights_dict = {} if return_attention else None
-
-        # Infer spatial size if not provided
-        if spatial_size is None and self.rope_2d:
-            # x might have CLS token, so we check if N-1 is a perfect square
-            N = x.shape[1]
-            # Try without CLS first
-            sqrt_n = int(math.sqrt(N))
-            if sqrt_n * sqrt_n == N:
-                spatial_size = (sqrt_n, sqrt_n)
-            else:
-                # Try with CLS token (N-1 patches)
-                sqrt_n = int(math.sqrt(N - 1))
-                if sqrt_n * sqrt_n == (N - 1):
-                    spatial_size = (sqrt_n, sqrt_n)
 
         for block in self.blocks:
             layer_idx = block.layer_idx
@@ -767,8 +446,8 @@ class DINOv2Decoder(nn.Module):
                 raise KeyError(f"Reference features for layer {layer_idx} not found. "
                               f"Available layers: {list(ref_features.keys())}")
 
-            # Forward through block: self-attn → cross-attn (with RoPE) → MLP
-            x, attn = block(x, ref, return_attention, spatial_size)
+            # Forward through block: self-attn → cross-attn → MLP
+            x, attn = block(x, ref, return_attention)
 
             if return_attention and attn is not None:
                 attn_weights_dict[layer_idx] = attn
@@ -785,7 +464,6 @@ class DINOv2Decoder(nn.Module):
         target_intermediates: Dict[int, Tensor],
         ref_intermediates: Dict[int, Tensor],
         return_attention: bool = False,
-        spatial_size: Optional[Tuple[int, int]] = None,
     ) -> Tuple[Tensor, Tensor, Optional[Dict], Optional[Dict]]:
         """
         Bidirectional forward pass (both target→ref and ref→target).
@@ -798,7 +476,6 @@ class DINOv2Decoder(nn.Module):
             target_intermediates: All intermediate layers from target
             ref_intermediates: All intermediate layers from reference
             return_attention: Whether to return attention weights
-            spatial_size: Optional (H, W) tuple for 2D RoPE
 
         Returns:
             Tuple of:
@@ -809,12 +486,12 @@ class DINOv2Decoder(nn.Module):
         """
         # Target decoding with reference cross-attention
         target_out, target_attn = self.forward(
-            x_target, ref_intermediates, return_attention, spatial_size
+            x_target, ref_intermediates, return_attention
         )
 
         # Reference decoding with target cross-attention
         ref_out, ref_attn = self.forward(
-            x_ref, target_intermediates, return_attention, spatial_size
+            x_ref, target_intermediates, return_attention
         )
 
         return target_out, ref_out, target_attn, ref_attn
