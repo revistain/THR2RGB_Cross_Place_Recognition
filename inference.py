@@ -777,6 +777,51 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                         predictions.append(pred[rerank_index])
                 predictions = np.array(predictions)
 
+            elif args.use_reranking == 'featureRecon':
+                # Feature-based reranking: bidirectional decode → MLP → compare with paired encoded
+                logging.info("Using featureRecon reranking (bidirectional decoder + feature MSE)")
+
+                # Verify saved patch features exist
+                saved_files = os.listdir(NPY_ROOTPATH)
+                db_files = [f for f in saved_files if f.startswith(f"Db_{seq_name}_")
+                            and "sela" not in f and "penultimate" not in f]
+                query_files = [f for f in saved_files if f.startswith(f"Query_{seq_name}_")
+                               and "sela" not in f and "penultimate" not in f]
+
+                assert len(db_files) == eval_ds.database_num, \
+                    f"DB files mismatch: {len(db_files)} vs {eval_ds.database_num}"
+                assert len(query_files) == eval_ds.queries_num, \
+                    f"Query files mismatch: {len(query_files)} vs {eval_ds.queries_num}"
+                logging.info(f"✓ Verified: {len(db_files)} DB + {len(query_files)} Query patch files")
+
+                predictions = []
+                rerank_scores_dict = {}
+                candidates_features = torch.zeros(RERANKING_TOP_K, patch_count, args.features_dim, device='cuda')
+
+                with torch.no_grad():
+                    for query_index, pred in enumerate(tqdm(prev_predictions, desc="FeatureRecon Reranking")):
+                        # Load query encoder features: [256, 768]
+                        query_enc_features = torch.from_numpy(
+                            load_npy(f"Query_{seq_name}_{query_index}")
+                        ).float().cuda()
+
+                        # Load top-K candidate encoder features
+                        for cnt, candidate_idx in enumerate(pred[:RERANKING_TOP_K]):
+                            candidates_features[cnt] = torch.from_numpy(
+                                load_npy(f"Db_{seq_name}_{candidate_idx}")
+                            ).float().cuda()
+
+                        # Query: [1, 256, 768], Candidates: [K, 256, 768]
+                        query_batch = query_enc_features.unsqueeze(0)
+                        rerank_scores = model.module.forward_feature_rerank(query_batch, candidates_features)
+
+                        # Sort and reorder (higher score = better match)
+                        rerank_scores_np = rerank_scores.cpu().numpy()
+                        rerank_index = rerank_scores_np.argsort()[::-1]
+                        rerank_scores_dict[query_index] = rerank_scores_np[rerank_index].tolist()
+                        predictions.append(pred[rerank_index])
+                predictions = np.array(predictions)
+
             del queries_features
             del database_features
         

@@ -220,10 +220,11 @@ if __name__ == "__main__":
                     aligned_rgbs = pos_rgbs
 
                 recon_loss = None
+                feature_loss = None
                 if args.use_recon_loss:
                     global_features, patch_embedding, \
                     recon_loss, masks, cls_attn_map, \
-                    penultimate_patch_embedding, local_embedding, _, masked_patch_embedding = model(
+                    penultimate_patch_embedding, local_embedding, _, masked_patch_embedding, feature_loss = model(
                         images.to(args.device),
                         flags=flags,
                         paired_rgb=aligned_rgbs.to(args.device),
@@ -316,6 +317,21 @@ if __name__ == "__main__":
                             * recon_weight / (args.train_batch_size * args.negs_num_per_query),
                         "train/recon_loss(Rgb)": rgb_recon_loss.mean().item()
                             * recon_weight / (args.train_batch_size * args.negs_num_per_query),
+                    }, step=global_step)
+
+                # Feature-level loss: decoded → MLP → compare with paired encoded
+                if args.use_feature_loss and feature_loss is not None and feature_loss[0] is not None:
+                    feature_weight = args.feature_loss_weight
+                    thermal_feature_loss = feature_loss[0]
+                    rgb_feature_loss = feature_loss[1]
+                    combined_feature_loss = (thermal_feature_loss + rgb_feature_loss) / 2
+                    overall_loss += (combined_feature_loss * feature_weight)
+
+                    wandb.log({
+                        "train/feature_loss(Thermal)": thermal_feature_loss.item()
+                            * feature_weight / (args.train_batch_size * args.negs_num_per_query),
+                        "train/feature_loss(Rgb)": rgb_feature_loss.item()
+                            * feature_weight / (args.train_batch_size * args.negs_num_per_query),
                     }, step=global_step)
 
                 overall_loss /= (args.train_batch_size * args.negs_num_per_query)

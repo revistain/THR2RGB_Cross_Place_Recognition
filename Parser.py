@@ -102,8 +102,10 @@ class Parser():
         self.parser.add_argument("--r2_add_random_patch", action='store_true', default=False)
         self.parser.add_argument("--use_cls_for_vpr", action='store_true', default=False)
         self.parser.add_argument("--use_recon_loss", action='store_true', default=False)
+        self.parser.add_argument("--use_feature_loss", action='store_true', default=False, help="Feature-level loss: decoded→MLP→compare with paired encoded")
+        self.parser.add_argument("--feature_loss_weight", type=float, default=1.0, help="Weight for feature-level loss")
         self.parser.add_argument("--use_reranking", type=str, default="none",
-                                 choices=['none', 'recon', 'r2former', 'selaVPR', 'reconSelaVPR', 'GeM_KL', 'reconDiffVPR', 'diffGeM', 'reconPairVPR'])
+                                 choices=['none', 'recon', 'r2former', 'selaVPR', 'reconSelaVPR', 'GeM_KL', 'reconDiffVPR', 'diffGeM', 'reconPairVPR', 'featureRecon'])
         self.parser.add_argument("--features_dim", type=int, default=768)
         self.parser.add_argument("--selaVPR_rerank_score_type", type=str, default="none", choices=['none', 'quantile_attn', 'mul_cossim'])
         self.parser.add_argument("--visualize_attention", action='store_true', default=False, help="Visualize CLS and GeM attention maps during inference")

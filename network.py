@@ -457,6 +457,22 @@ class CrossModalVPR_Net(nn.Module):
             loss_type=self.recon_loss_type
         )
 
+        # Feature-level loss: project decoded features to match encoded features
+        self.use_feature_loss = getattr(args, 'use_feature_loss', False)
+        if self.use_feature_loss:
+            # MLP to project decoded thermal → paired RGB encoder space
+            self.feature_proj_thermal = nn.Sequential(
+                nn.Linear(self.output_dim, self.output_dim),
+                nn.GELU(),
+                nn.Linear(self.output_dim, self.output_dim),
+            )
+            # MLP to project decoded RGB → paired thermal encoder space
+            self.feature_proj_rgb = nn.Sequential(
+                nn.Linear(self.output_dim, self.output_dim),
+                nn.GELU(),
+                nn.Linear(self.output_dim, self.output_dim),
+            )
+
         # 2. Aggregation Layer (각각 따로 두는 것을 추천)
         self.rgb_aggregation = nn.Sequential(
             L2Norm(), 
@@ -784,6 +800,8 @@ class CrossModalVPR_Net(nn.Module):
         
         recon_loss_thermal = None
         recon_loss_rgb = None
+        feature_loss_thermal = None
+        feature_loss_rgb = None
         global_desc = None
         mask_thermal = None
         penultimate_patch = None
@@ -907,7 +925,20 @@ class CrossModalVPR_Net(nn.Module):
 
                 # 10. Reconstruction loss 계산
                 recon_loss_thermal = recon_loss_fn(reconstructed_thermal_patches, mask_thermal, target_thermal_patches)
-                recon_loss_rgb = recon_loss_fn(reconstructed_rgb_patches, mask_rgb, target_rgb_patches)    
+                recon_loss_rgb = recon_loss_fn(reconstructed_rgb_patches, mask_rgb, target_rgb_patches)
+
+                # 11. Feature-level loss: decoded → MLP → compare with paired encoded
+                if self.use_feature_loss:
+                    # thermal_decoded → MLP → should match paired_rgb_full (RGB encoder output)
+                    proj_thermal = self.feature_proj_thermal(thermal_reconed_dec)
+                    feature_loss_thermal = F.mse_loss(proj_thermal, paired_rgb_full)
+
+                    # rgb_decoded → MLP → should match paired_thermal_full (thermal encoder output)
+                    proj_rgb = self.feature_proj_rgb(rgb_full_dec)
+                    feature_loss_rgb = F.mse_loss(proj_rgb, paired_thermal_full)
+                else:
+                    feature_loss_thermal = None
+                    feature_loss_rgb = None
             else:
                 # when inference
                 # NOTE: 부르는 곳에 no_grad 호출하기
@@ -966,7 +997,8 @@ class CrossModalVPR_Net(nn.Module):
 
         return global_desc, patch_tokens, [recon_loss_thermal, recon_loss_rgb], \
                 mask_thermal, masked_patch_thermal, cls_attn_map, \
-                penultimate_patch, sela_local_feature, gem_attn_map
+                penultimate_patch, sela_local_feature, gem_attn_map, \
+                [feature_loss_thermal, feature_loss_rgb]
 
     def forward_model_basic(self, x, modality='rgb'):
         """단일 모달리티에 대한 Forward"""
@@ -1076,6 +1108,75 @@ class CrossModalVPR_Net(nn.Module):
         target_decoded = F.normalize(target_spatial, p=2, dim=-1)
         return target_decoded[:B//2,:,:], target_decoded[B//2:,:,:]
 
+    def forward_feature_rerank(self, thermal_feat, rgb_feat):
+        """
+        Feature-based reranking: bidirectional decode → MLP → compare with paired encoded.
+
+        Args:
+            thermal_feat: [B, 256, 768] encoder patch features from thermal query
+            rgb_feat: [K, 256, 768] encoder patch features from RGB candidates
+        Returns:
+            scores: [K] reranking scores (higher = better match)
+        """
+        B = thermal_feat.shape[0]  # typically 1 (single query)
+        K = rgb_feat.shape[0]      # number of candidates
+
+        # Expand query to match candidates: [1, 256, 768] -> [K, 256, 768]
+        thermal_expanded = thermal_feat.expand(K, -1, -1)
+
+        if self.use_dino_decoder:
+            # Use DINO decoder path
+            # Apply recursive MLP heads
+            recur_thermal = self.recursive_thermal_head(thermal_expanded) + self.decoder_pos_embed
+            recur_rgb = self.recursive_rgb_head(rgb_feat) + self.decoder_pos_embed
+
+            # Build reference features for cross-attention
+            thermal_ref_features = {layer: recur_thermal for layer in self.dino_decoder_layers}
+            rgb_ref_features = {layer: recur_rgb for layer in self.dino_decoder_layers}
+
+            # Bidirectional decoding
+            # Thermal decoded with RGB as reference
+            thermal_decoded, _ = self.dino_decoder.forward(
+                x=thermal_expanded + self.decoder_pos_embed,
+                ref_features=rgb_ref_features,
+            )
+            # RGB decoded with thermal as reference
+            rgb_decoded, _ = self.dino_decoder.forward(
+                x=rgb_feat + self.decoder_pos_embed,
+                ref_features=thermal_ref_features,
+            )
+        else:
+            # Use CroCo decoder path
+            thermal_dec = thermal_expanded + self.decoder_pos_embed
+            rgb_dec = rgb_feat + self.decoder_pos_embed
+
+            # Thermal decoded with RGB context
+            thermal_decoded = thermal_dec.clone()
+            for blk in self.decoder_blocks:
+                thermal_decoded = blk(thermal_decoded, rgb_dec)
+            thermal_decoded = self.decoder_norm(thermal_decoded)
+
+            # RGB decoded with thermal context
+            rgb_decoded = rgb_dec.clone()
+            for blk in self.decoder_blocks:
+                rgb_decoded = blk(rgb_decoded, thermal_dec)
+            rgb_decoded = self.decoder_norm(rgb_decoded)
+
+        # Apply MLP projectors and compute feature loss
+        # thermal_decoded → MLP → should match rgb_feat (original RGB encoded)
+        proj_thermal = self.feature_proj_thermal(thermal_decoded)
+        mse_thermal = F.mse_loss(proj_thermal, rgb_feat, reduction='none').mean(dim=(1, 2))  # [K]
+
+        # rgb_decoded → MLP → should match thermal_expanded (original thermal encoded)
+        proj_rgb = self.feature_proj_rgb(rgb_decoded)
+        mse_rgb = F.mse_loss(proj_rgb, thermal_expanded, reduction='none').mean(dim=(1, 2))  # [K]
+
+        # Combined score: lower MSE = better match, so negate for ranking
+        combined_mse = (mse_thermal + mse_rgb) / 2
+        scores = -combined_mse  # higher score = better match
+
+        return scores
+
     def forward(self, x, flags, paired_rgb=None, return_mask=False, return_masked_patch=False):
         if not isinstance(flags, torch.Tensor):
             flags = torch.tensor(flags, device=x.device)
@@ -1091,6 +1192,7 @@ class CrossModalVPR_Net(nn.Module):
         cls_attn_map = torch.zeros((x.size(0), self.patch_count), device=x.device)
         gem_attn_map = torch.zeros((x.size(0), self.patch_count), device=x.device)
         recon_losses = None
+        feature_losses = None
         masked_patch_emb = None
 
         # selaVPR local embedding initialization (768-dim with interpolation)
@@ -1099,7 +1201,7 @@ class CrossModalVPR_Net(nn.Module):
             sela_local_emb = torch.zeros((x.size(0), 61, 61, 128), device=x.device)
 
         if is_rgb.any():
-            global_emb, patch_rgb, _, _, _, cls_rgb_attn_map, penultimate_patch_rgb, sela_local_rgb, gem_rgb_attn_map = self.forward_model(x[is_rgb], modality='rgb')
+            global_emb, patch_rgb, _, _, _, cls_rgb_attn_map, penultimate_patch_rgb, sela_local_rgb, gem_rgb_attn_map, _ = self.forward_model(x[is_rgb], modality='rgb')
             if global_emb is not None:
                 final_emb[is_rgb] = global_emb
             if patch_rgb is not None:
@@ -1114,7 +1216,7 @@ class CrossModalVPR_Net(nn.Module):
                 sela_local_emb[is_rgb] = sela_local_rgb
 
         if (~is_rgb).any():
-            global_emb, patch_thermal, recon_losses, mask, masked_patch_thermal, cls_thermal_attn_map, penultimate_patch_thermal, sela_local_thermal, gem_thermal_attn_map = self.forward_model(x[~is_rgb], modality='thermal', paired_rgb=paired_rgb, return_masked_patch=return_masked_patch)
+            global_emb, patch_thermal, recon_losses, mask, masked_patch_thermal, cls_thermal_attn_map, penultimate_patch_thermal, sela_local_thermal, gem_thermal_attn_map, feature_losses = self.forward_model(x[~is_rgb], modality='thermal', paired_rgb=paired_rgb, return_masked_patch=return_masked_patch)
             if global_emb is not None:
                 final_emb[~is_rgb] = global_emb
             if patch_thermal is not None:
@@ -1133,9 +1235,9 @@ class CrossModalVPR_Net(nn.Module):
                 sela_local_emb[~is_rgb] = sela_local_thermal
 
         if return_masked_patch:
-            return final_emb, patch_emb, recon_losses, masks, cls_attn_map, penultimate_patch_emb, sela_local_emb, gem_attn_map, masked_patch_emb
+            return final_emb, patch_emb, recon_losses, masks, cls_attn_map, penultimate_patch_emb, sela_local_emb, gem_attn_map, masked_patch_emb, feature_losses
         else:
-            return final_emb, patch_emb, recon_losses, masks, cls_attn_map, penultimate_patch_emb, sela_local_emb, gem_attn_map
+            return final_emb, patch_emb, recon_losses, masks, cls_attn_map, penultimate_patch_emb, sela_local_emb, gem_attn_map, feature_losses
 
     def calculate_recon_loss(self, pred, mask, target, confidence_map=None):
         recon_loss = self.reconstruction_criterion(
