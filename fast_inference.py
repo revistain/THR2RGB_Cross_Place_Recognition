@@ -111,7 +111,7 @@ def main():
         logging.info(f"[{seq}] Database: {test_ds.database_num}, Queries: {test_ds.queries_num}, Total: {len(test_ds)}")
 
         # Inference 수행
-        recalls, recalls_str = inference.inference(args, test_ds, model, seq_name=seq)
+        recalls, recalls_str = inference.inference(args, test_ds, model)
 
         logging.info(f"Recalls for {seq}: {recalls_str}")
         total_r1.append(recalls[0]) # R@1 저장
