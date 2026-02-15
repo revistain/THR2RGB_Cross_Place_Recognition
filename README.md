@@ -8,8 +8,9 @@
 ## b. 데이터셋 가공 (sampling)
 ```bash
 cd Dataset
-python STheReO_train_split.py
-python STheReO_test_split.py
+python sthereo_dataset/STheReO_train_split.py
+python sthereo_dataset/STheReO_test_split.py
+python ms2_dataset/ms2_train_test.py
 ```
 
 ---
@@ -72,4 +73,12 @@ bash test.sh
 - **`--resume`**: 불러올 checkpoint **← 꼭 바꿔줘야 함**
 - `--test_seq`: train epoch 후 평가하는 scene
 - `--comment`: log 파일이나 wandb에 기록되는 이름
+
+**파일들**
+- train_wandb.py : main 함수
+- [network.py](http://network.py): CroCo 방식 model 정의
+- network_only_GeM.py: GeM 방식 model 정의
+- datasets_T2R.py: dataloader 및 dataset
+- inference.py: 추론
+- fast_inference.py: 이미 학습 끝난 pth를 불러서 inference만 할때 사용
 ```
