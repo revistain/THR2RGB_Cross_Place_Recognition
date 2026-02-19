@@ -110,7 +110,7 @@ class Parser():
         self.parser.add_argument("--use_sela_local_loss", action='store_true', default=False)
         self.parser.add_argument("--use_diff_loss", action='store_true', default=False)
         self.parser.add_argument("--use_mlp_dim_before_decoder", type=int, default=0)
-        self.parser.add_argument("--masking_method", type=str, default="random", choices=['random', 'CLS', 'GeM', 'attention'])
+        self.parser.add_argument("--masking_method", type=str, default="random", choices=['random', 'CLS', 'GeM', '22222'])
         self.parser.add_argument("--use_gem_recon_weight", action='store_true', default=False, help="Use GeM attention scores as weights for reconstruction loss")
         
         # Decoder DINO setting
