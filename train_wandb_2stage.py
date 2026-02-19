@@ -1,4 +1,5 @@
-# train_wandb.py
+# train_wandb_2stage.py
+# Stage2: Attention-based masking + Reconstruction loss training
 import math
 import torch
 import logging
@@ -53,7 +54,7 @@ if __name__ == "__main__":
         dinoblock.adapter_dim = args.features_dim
 
     # wandb 초기화
-    wandb.init(project="cross-modal-vpr-4", name=args.comment, config=vars(args))
+    wandb.init(project="cross-modal-vpr-stage2", name=args.comment, config=vars(args))
 
     args.save_dir = os.path.join(args.save_dir, args.comment, utils.get_timestamp())
     commons.setup_logging(args.save_dir)
@@ -68,13 +69,12 @@ if __name__ == "__main__":
     DATASET_FOLDER = "./Dataset/save_mat"
 
     '''Datasets'''
-    args.sequences = ['KAIST']
+    args.sequences = args.train_seq
     triplets_ds = datasets_T2R.TripletsSTheReODual(args, DATASET_FOLDER, use_align_rgb=True)
     train_ds = datasets_T2R.BaseSTheReODual(args, DATASET_FOLDER, split='train')
-    logging.info(f"[Train - KAIST] Database: {train_ds.database_num}, Queries: {train_ds.queries_num}, Total: {len(train_ds)}")
+    logging.info(f"[Train - {args.train_seq}] Database: {train_ds.database_num}, Queries: {train_ds.queries_num}, Total: {len(train_ds)}")
 
-    args.sequences = ['Valley', 'SNU']
-    test_sequences = args.sequences
+    test_sequences = args.test_seq
     test_ds_list = []
     for seq in test_sequences:
         args.sequences = [seq]
@@ -83,52 +83,49 @@ if __name__ == "__main__":
         logging.info(f"[Test - {seq}] Database: {test_ds.database_num}, Queries: {test_ds.queries_num}, Total: {len(test_ds)}")
 
     '''Model'''
-    if args.use_recon_loss:
-        model = network.CrossModalVPR_Net(
-            args,
-            pretrained_foundation = True,
-            foundation_model_path = args.foundation_model_path,
-        )
-    else:
-        model = network_only_GeM.CrossModalVPR_Net(
-            args,
-            pretrained_foundation = True,
-            foundation_model_path = args.foundation_model_path,
-        )
+    model = network.CrossModalVPR_Net(
+        args,
+        pretrained_foundation=True,
+        foundation_model_path=args.foundation_model_path,
+    )
 
-    '''Resume from checkpoint'''
+    '''Resume from checkpoint (Stage1 weights)'''
     if args.resume:
         model, _, best_r1, start_epoch_num, not_improved_num = utils.resume_train(args, model, strict=False)
-        best_r1 = 0
-        logging.info(f"Resuming from epoch {start_epoch_num}")
+        best_r1 = 0  # Reset for Stage2
+        start_epoch_num = 0  # Start fresh for Stage2
+        logging.info(f"Loaded Stage1 checkpoint, starting Stage2 training")
     else:
         best_r1 = start_epoch_num = not_improved_num = 0
-    
-            
+        logging.warning("No checkpoint provided. Starting from scratch (not recommended for Stage2)")
+
     model = model.to(args.device)
     model = torch.nn.DataParallel(model)
 
-    '''Loss Function - Initialize early for optimizer'''
-    GlobalTriplet = nn.TripletMarginLoss(margin=args.margin, p=2, reduction="sum")
+    '''Stage2 Training Parameters'''
+    # Freeze everything except decoder components
+    for name, param in model.named_parameters():
+        param.requires_grad = False
 
-    train_params = []
+    # Unfreeze Stage2 relevant parameters (CroCo decoder)
     for name, param in model.named_parameters():
-        if param.requires_grad:
-            param.requires_grad = False
-            if 'similarity_score' in name or \
-                'recursive_' in name or \
-                'dino_dec_cls_token' in name or \
-                'dino_decoder' in name:
-                param.requires_grad = True
-    
-    if args.unfreeze_dino_decoder:
-        model.module.dino_decoder.unfreeze_dino_blocks()
-    else:
-        model.module.dino_decoder.freeze_dino_blocks()
-        
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            train_params.append(param)
+        if any(key in name for key in [
+            'decoder_blocks',       # CroCo decoder blocks
+            'decoder_norm',         # Decoder layer norm
+            'prediction_thermal_head',  # Prediction heads for reconstruction
+            'prediction_rgb_head',
+            'mask_token',           # Mask token
+            'decoder_pos_embed',    # Decoder positional embedding
+        ]):
+            param.requires_grad = True
+
+    # Collect trainable params
+    train_params = [p for p in model.parameters() if p.requires_grad]
+
+    # Log trainable parameters
+    trainable_count = sum(p.numel() for p in train_params)
+    total_count = sum(p.numel() for p in model.parameters())
+    logging.info(f"Stage2 Trainable params: {trainable_count:,} / {total_count:,} ({100*trainable_count/total_count:.2f}%)")
 
     if args.optim == "adam":
         optimizer = torch.optim.Adam([
@@ -139,15 +136,10 @@ if __name__ == "__main__":
             {'params': train_params, 'lr': args.lr, 'momentum': 0.9, 'weight_decay': 0.001},
         ])
 
-    thermal_flag = torch.zeros(1, dtype=torch.long)
-    rgb_flags = torch.ones(1 + args.negs_num_per_query, dtype=torch.long)
-    bundle_flags = torch.cat([thermal_flag, rgb_flags]) # [0, 1, 1, ..., 1]
-    flags = bundle_flags.repeat(args.train_batch_size)
-
-    '''Training'''
+    '''Training Loop'''
     global_step = 0
     for epoch_num in range(start_epoch_num, args.epochs_num):
-        logging.info(f"Start training epoch: {epoch_num:02d}")
+        logging.info(f"Start Stage2 training epoch: {epoch_num:02d}")
 
         epoch_start_time = datetime.now()
         epoch_losses = np.zeros((0, 1), dtype=np.float32)
@@ -156,7 +148,7 @@ if __name__ == "__main__":
         for loop_num in range(loops_num):
             logging.debug(f"Cache: {loop_num + 1} / {loops_num}")
 
-            ### contrastive learning을 위한 triplet 샘플링
+            # Compute triplets for sampling positive pairs
             triplets_ds.is_inference = True
             print("- Computing triplets...")
             triplets_ds.compute_triplets(args, model)
@@ -165,149 +157,66 @@ if __name__ == "__main__":
 
             logging.debug("Finish computing triplets")
 
-            ### triplet을 위한 DataLoader 생성
-            # DataLoader는 (Batch, images, triplets_local_indexes, triplets_global_indexes[index], paired_rgb)를 getitem
-            # images: stacked(query, pos, *negs)
-            # triplets_local_indexes: triplet 내에서의 local index
-            #   ex) (0, 1, 2), (0, 1, 3), ..., (0, 1, 11) # (query, pos, neg)의 pairs
-            # triplets_global_indexes[index]: ?
-            # paired_rgb: thermal query와 맞는 rgb query 이미지
-            triplets_dl = DataLoader(dataset=triplets_ds, num_workers=args.num_workers,
-                                    batch_size=args.train_batch_size,
-                                    collate_fn=datasets_T2R.collate_fn,
-                                    pin_memory=(args.device == "cuda"),
-                                    drop_last=True)
-            
+            triplets_dl = DataLoader(
+                dataset=triplets_ds,
+                num_workers=args.num_workers,
+                batch_size=args.train_batch_size,
+                collate_fn=datasets_T2R.collate_fn,
+                pin_memory=(args.device == "cuda"),
+                drop_last=True
+            )
+
             model = model.train()
             logging.debug(f"Start loading {len(triplets_ds)} triplets as {len(triplets_dl)} batches")
 
-            print("- Training...")
+            print("- Stage2 Training (Attention-based Recon)...")
             for images, triplets_local_indexes, _, aligned_rgbs in tqdm(triplets_dl, ncols=100, desc=f"GPU{args.cuda_device}/Epoch {epoch_num:02d}"):
-                ### model을 통해, triplet의 descriptor와 patch embedding 추출
-                if args.use_pos_as_aligned_rgb:
-                    assert images.size(0) % args.train_batch_size == 0
-                    size_of_batch = int(images.size(0) / args.train_batch_size)
-                    train_batch_size = args.train_batch_size
-                    
-                    pos_rgbs = [images[idx] for idx in range(1, images.size(0), size_of_batch)]
-                    pos_rgbs = torch.stack(pos_rgbs)
-                    pos_rgbs = triplets_ds.transform(pos_rgbs)
-                    aligned_rgbs = pos_rgbs
 
-                recon_loss = None
-                if args.use_recon_loss:
-                    global_features, patch_embedding, \
-                    recon_loss, masks, cls_attn_map, \
-                    penultimate_patch_embedding, local_embedding, _, masked_patch_embedding = model(
-                        images.to(args.device),
-                        flags=flags,
-                        paired_rgb=aligned_rgbs.to(args.device),
-                        return_mask=True,
-                        return_masked_patch=True
-                    )
-                else:
-                    outputs = model(
-                        images.to(args.device),
-                        flags=flags,
-                        paired_rgb=aligned_rgbs.to(args.device),
-                        return_mask=True,
-                        return_masked_patch=True
-                    )
-                    global_features = outputs[0]
-                    patch_embedding = outputs[1]
-                    cls_attn_map = outputs[4]
-                    local_embedding = outputs[6]
+                # Extract thermal queries and positive RGBs from batch
+                # images layout: [query, pos, neg1, neg2, ...] * batch_size
+                batch_size = args.train_batch_size
+                size_of_bundle = 2 + args.negs_num_per_query  # query + pos + negs
 
-                # triplets_local_indexes = (batch, 3, neg_num) => [[[0, 1, 2], [0, 1, 3] ... [0, 1, neg_num+2]] * batch]
-                triplets_local_indexes = torch.transpose(
-                    triplets_local_indexes.view(args.train_batch_size, args.negs_num_per_query, 3), 1, 0)
-                
-                dino_dec_loss_sum = 0
-                triplet_loss_sum = 0
-                rerank_loss_sum = 0
-                local_loss_sum = 0
-                diff_loss_sum = 0
+                # Extract query (thermal) indices: 0, size_of_bundle, 2*size_of_bundle, ...
+                query_indices = [i * size_of_bundle for i in range(batch_size)]
+                # Extract positive (RGB) indices: 1, size_of_bundle+1, 2*size_of_bundle+1, ...
+                pos_indices = [i * size_of_bundle + 1 for i in range(batch_size)]
+
+                thermal_imgs = images[query_indices].to(args.device)  # [B, C, H, W]
+                pos_rgb_imgs = images[pos_indices].to(args.device)    # [B, C, H, W]
+
                 optimizer.zero_grad()
-                num_steps = len(triplets_local_indexes)
-                # 각 triplet에 대해 triplet loss 계산
-                for triplets in triplets_local_indexes:
-                    overall_triplet_loss = 0
-                    queries_indexes, positives_indexes, negatives_indexes = triplets.T
-                    
-                    # 각각에 해당하는 descriptor 추출
-                    query_features = global_features[queries_indexes]
-                    positive_features = global_features[positives_indexes]
-                    negative_features = global_features[negatives_indexes]
-                    
-                    ## 새로 추가한거
-                    dino_dec_loss = model.module.stage2_forward(patch_embedding, queries_indexes, positives_indexes, negatives_indexes)
-                    overall_triplet_loss += dino_dec_loss
-                    dino_dec_loss_sum += dino_dec_loss
 
-                    # Reranking loss
-                    if args.use_recon_loss and args.r2_penultimate_layer:
-                        rerank_patch_embedding = penultimate_patch_embedding
-                    else:
-                        rerank_patch_embedding = patch_embedding
+                # Stage2 forward: attention-based masking + reconstruction loss
+                total_recon_loss, recon_loss_thermal, recon_loss_rgb = model.module.stage2_forward_recon(
+                    thermal_imgs=thermal_imgs,
+                    rgb_imgs=pos_rgb_imgs,
+                )
 
-                    if args.use_reranking == 'r2former':
-                        reranker = model.module.reranker
-                        rerank_loss = reranker(rerank_patch_embedding.detach(), cls_attn_map.detach(),
-                                            queries_indexes, positives_indexes, negatives_indexes,
-                                            query_features.detach(), positive_features.detach(), negative_features.detach())
-                        overall_triplet_loss += rerank_loss
-                        rerank_loss_sum += rerank_loss
-
-                    if args.use_sela_local_loss:
-                        local_loss = model.module.MNNLocalFeatureLoss([
-                                    local_embedding[queries_indexes],
-                                    local_embedding[positives_indexes],
-                                    local_embedding[negatives_indexes]])
-                        overall_triplet_loss += local_loss
-                        local_loss_sum += local_loss
-                        
-                    # new reranking loss
-                    if args.use_diff_loss:
-                        diff_loss, lambda_ = model.module.DiffGeMLoss(
-                            model.module, queries_indexes, positives_indexes, negatives_indexes,
-                            global_features.detach(), patch_embedding.detach(),
-                            use_train=True, return_lambda=True
-                        )
-                        overall_triplet_loss += diff_loss
-                        diff_loss_sum += diff_loss
-                
-                    overall_triplet_loss /= (args.train_batch_size * args.negs_num_per_query)
-                    overall_triplet_loss.backward()
-                    
-                del global_features, query_features, positive_features, negative_features
+                # Backward
+                total_recon_loss.backward()
                 optimizer.step()
 
-                batch_loss = overall_triplet_loss.item()
+                batch_loss = total_recon_loss.item()
                 epoch_losses = np.append(epoch_losses, batch_loss)
 
                 # wandb logging
                 wandb.log({
-                    "train/overall_loss": overall_triplet_loss.item(),
-                    "train/triplet_loss(scaled)": triplet_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query)
-                        if isinstance(triplet_loss_sum, torch.Tensor) else 0,
-                    "train/reranking_loss(scaled)": rerank_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query)
-                        if isinstance(rerank_loss_sum, torch.Tensor) else 0,
-                    "train/local_loss(scaled)": local_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query)
-                        if isinstance(local_loss_sum, torch.Tensor) else 0,
-                    "train/diff_loss(scaled)": diff_loss_sum.item() / (args.train_batch_size * args.negs_num_per_query)
-                        if isinstance(diff_loss_sum, torch.Tensor) else 0,
+                    "train/total_recon_loss": total_recon_loss.item(),
+                    "train/recon_loss_thermal": recon_loss_thermal.item(),
+                    "train/recon_loss_rgb": recon_loss_rgb.item(),
                 }, step=global_step)
-                
+
                 global_step += 1
-                
-                # del patch_embedding, masks, cls_attn_map, penultimate_patch_embedding, masked_patch_embedding
-                # del overall_loss, triplet_loss, recon_loss
-                if args.use_fast_track: break
-                
+
+                if args.use_fast_track:
+                    break
+
             logging.info(f"Epoch[{epoch_num:02d}]({loop_num + 1}/{loops_num}): " +
-                        f"current batch triplet loss = {batch_loss:.8f}, " +
-                        f"average epoch triplet loss = {epoch_losses.mean():.8f}")
-        
+                        f"current batch loss = {batch_loss:.8f}, " +
+                        f"average epoch loss = {epoch_losses.mean():.8f}")
+
+        # Visualize reconstructions
         if args.use_recon_loss:
             visualize_during_training(
                 args,
@@ -319,71 +228,63 @@ if __name__ == "__main__":
                 comment=args.comment
             )
 
-        # Visualize attention maps (penultimate and last layer) using PCA
-        visualize_attention_maps_pca(
-            args,
-            model,
-            triplets_dl,
-            args.device,
-            epoch_num,
-            num_samples=4,
-            save_dir=os.path.join(args.save_dir, 'attention_maps'),
-            comment=args.comment
-        )
-
-        # wandb 로깅 (epoch 단위)
+        # wandb logging (epoch)
         wandb.log({"train/epoch_avg_loss": epoch_losses.mean(), "epoch": epoch_num}, step=global_step)
-        logging.info(f"epoch {epoch_num:02d} time: {str(datetime.now() - epoch_start_time)[:-7]}, ")
+        logging.info(f"epoch {epoch_num:02d} time: {str(datetime.now() - epoch_start_time)[:-7]}")
 
-        # Compute recalls
+        # Evaluation
         current_epoch_r1_list = []
         for seq, test_ds in zip(test_sequences, test_ds_list):
             logging.info(f"===== Evaluating Sequence: {seq} =====")
-            args.current_epoch = epoch_num # 시각화
+            args.current_epoch = epoch_num
             recalls, recalls_str = inference.inference(args, test_ds, model, seq_name=seq)
             logging.info(f"Recalls for {seq}: {recalls_str}")
             logging.info(f"================================================")
             current_epoch_r1_list.append(recalls[0])
-            
-            # wandb 로깅 (sequence별 recall)
+
+            # wandb logging (per sequence)
             wandb.log({f"val/{seq}_R@1": recalls[0], f"val/{seq}_R@5": recalls[1]}, step=global_step)
 
         current_avg_r1 = np.mean(current_epoch_r1_list)
         is_best = current_avg_r1 > best_r1
 
-        # wandb 로깅 (평균 recall)
+        # wandb logging (average recall)
         wandb.log({"val/avg_R@1": current_avg_r1, "val/best_R@1": best_r1}, step=global_step)
 
-        utils.save_checkpoint(args, {"epoch_num": epoch_num, "model_state_dict": model.state_dict(),
-                                    "optimizer_state_dict": optimizer.state_dict(), "recalls": recalls, "best_r1": best_r1,
-                                    "not_improved_num": not_improved_num
-                                    }, is_best, filename="last_model.pth")
+        utils.save_checkpoint(args, {
+            "epoch_num": epoch_num,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "recalls": recalls,
+            "best_r1": best_r1,
+            "not_improved_num": not_improved_num
+        }, is_best, filename="last_model_stage2.pth")
 
         if is_best:
-            logging.info(f"Improved: previous best R@1 = {best_r1:.1f}, current R@1 = {(current_avg_r1):.1f}")
+            logging.info(f"Improved: previous best R@1 = {best_r1:.1f}, current R@1 = {current_avg_r1:.1f}")
             best_r1 = current_avg_r1
             not_improved_num = 0
         else:
             not_improved_num += 1
-            logging.info(
-                f"Not improved: {not_improved_num} / {args.patience}: best R@1 = {best_r1:.1f}, current R@1 = {(current_avg_r1):.1f}")
+            logging.info(f"Not improved: {not_improved_num} / {args.patience}: best R@1 = {best_r1:.1f}, current R@1 = {current_avg_r1:.1f}")
             if not_improved_num >= args.patience:
                 print(f"Performance did not improve for {not_improved_num} epochs.")
                 logging.info(f"Performance did not improve for {not_improved_num} epochs.")
-        
-        print(f"Comment: {args.comment} :: Epoch {epoch_num:02d}")
+
+        print(f"Comment: {args.comment} :: Stage2 Epoch {epoch_num:02d}")
         import gc
-        del recalls, recalls_str # 필요 없다면 삭제
-        if 'current_epoch_r1_list' in locals(): del current_epoch_r1_list
-        
-        gc.collect()            # Python 가비지 컬렉션 (참조 잃은 변수 제거)
-        torch.cuda.empty_cache() # PyTorch VRAM 캐시 비우기 (OS로 반환)
-        
+        del recalls, recalls_str
+        if 'current_epoch_r1_list' in locals():
+            del current_epoch_r1_list
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
     logging.info(f"Best R@1: {best_r1:.2f}")
-    logging.info(f"Trained for {epoch_num + 1:02d} epochs, in total in {str(datetime.now() - start_time)[:-7]}")
+    logging.info(f"Stage2 trained for {epoch_num + 1:02d} epochs, in total {str(datetime.now() - start_time)[:-7]}")
 
     for seq, test_ds in zip(test_sequences, test_ds_list):
-        logging.info(f"===== Evaluating Sequence: {seq} =====")
+        logging.info(f"===== Final Evaluation - {seq} =====")
         recalls, recalls_str = inference.inference(args, test_ds, model)
         logging.info(f"Recalls for {seq}: {recalls_str}")
         logging.info(f"================================================")

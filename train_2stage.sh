@@ -6,30 +6,27 @@ CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
 python3 train_wandb_2stage.py \
     --train_batch_size 4 \
     --save_dir './logs' \
-    --sequences KAIST \
+    --train_seq Campus \
+    --test_seq Urban Residential \
     --cuda_device $CUDA_VISIBLE_DEVICES \
     --foundation_model_path /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/backbone/dinov2/pretrained/dinov2_vits14_pretrain.pth \
-    --resume "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/224x224-ViTs-numBlock0-reconWeight2.5-sharedDecoder-recurDinoDecoder(6-12)-decAdapter-GELUlinear/260210_090650/best_model.pth" \
+    --resume "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/biRecon(w10,l1,dep8,r0.6)-attnMask(stage1, 1e-4)/260217_062526/last_model.pth" \
     --queries_per_epoch 2000 \
     --soft_positives_dist_threshold 10 \
     --hard_positives_dist_threshold 10 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
-    --comment "224x224-twoStage-CroCo-ViTs-numBlock0-sharedDecoder-pairVPR-unfreezed" \
+    --comment "twoStage-CroCo-ViTs-numBlock0-clsAttn(GeM)-3e-5" \
     --margin 0.1 \
     --epochs_num 200 \
     --negs_num_per_query 10 \
     --croco_mask_ratio 0.8 \
-    --recon_weight 2.5 \
+    --recon_weight 10 \
     --use_recon_loss \
-    --recon_loss_type 'mse+ssim' \
+    --recon_loss_type 'l1' \
+    --masking_method 'GeM' \
     --lr 3e-5 \
-    --use_reranking 'reconPairVPR' \
-    --use_dino_decoder \
-    --dino_decoder_layer_start 6 \
-    --dino_decoder_layer_end 12 \
-    --unfreeze_dino_decoder \
-    --is_dino_dec_stage2
+    --use_reranking 'recon' \
 
     # --use_reranking 'diffGeM' \
     # --use_diff_loss \

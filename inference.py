@@ -14,7 +14,7 @@ cv2.ocl.setUseOpenCL(False)
 torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = True
 
-from croco.models.masking import RandomMask
+from croco.models.masking import RandomMask, AttentionMask
 from croco.models.criterion import MaskedMSE
 from local_matching import *
 
@@ -148,22 +148,28 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
             
             use_selaVPR = args.use_reranking in ['selaVPR', 'reconSelaVPR']
             use_penultimate = args.r2_penultimate_layer
+            use_recon = args.use_reranking == 'recon'
             print(f"Using SelaVPR features: {use_selaVPR}")
             print(f"Using penultimate: {use_penultimate}")
+            print(f"Using recon (saving target_patches): {use_recon}")
             for inputs, indices, flags in tqdm(database_dataloader, ncols=100):
                 flags_int = [1 if f == 'rgb' else 0 for f in flags]
                 flags = torch.tensor(flags_int, dtype=torch.long, device=args.device)
                 outputs = model(inputs.to(args.device), flags)
                 features = outputs[0].view(-1, args.features_dim)
                 patch_features = outputs[1].view(-1, patch_W*patch_H, args.features_dim)
-                
+
                 indices_npy = indices.numpy()
                 database_features[indices_npy,:] = features.cpu().numpy() # [B, C] # 이건 저장 x
                 if args.use_reranking != 'none':
                     database_attn_map[indices_npy,:] = outputs[4].cpu().numpy() # [B, N] # 이것도 저장 x
+                    # target_patches for recon reranking
+                    if use_recon:
+                        target_patches = patchify(inputs.to(args.device))  # [B, N, 588]
                     for num, idx in enumerate(indices_npy):
                         if use_penultimate: save_npy(outputs[5][num].cpu().numpy(), f"Db_{seq_name}_penultimate_{idx}")
                         if use_selaVPR: save_npy(outputs[6][num].cpu().numpy(), f"Db_{seq_name}_sela_{idx}")
+                        if use_recon: save_npy(target_patches[num].cpu().numpy(), f"Db_{seq_name}_target_{idx}")
                         save_npy(patch_features[num].cpu().numpy(), f"Db_{seq_name}_{idx}")
                 # if args.use_fast_track: break
                 
@@ -185,15 +191,18 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 outputs = model(inputs.to(args.device), flags)
                 features = outputs[0].view(-1, args.features_dim)
                 patch_features = outputs[1].view(-1, patch_W*patch_H, args.features_dim)
-                
+
                 indices_npy = indices.numpy()-eval_ds.database_num
                 queries_features[indices.numpy()-eval_ds.database_num,:] = features.cpu().numpy()
                 if args.use_reranking != 'none':
                     queries_attn_map[indices.numpy()-eval_ds.database_num,:] = outputs[4].cpu().numpy()
-                    
+                    # target_patches for recon reranking
+                    if use_recon:
+                        target_patches = patchify(inputs.to(args.device))  # [B, N, 588]
                     for num, idx in enumerate(indices_npy):
                         if use_penultimate: save_npy(outputs[5][num].cpu().numpy(), f"Query_{seq_name}_penultimate_{idx}")
                         if use_selaVPR: save_npy(outputs[6][num].cpu().numpy(), f"Query_{seq_name}_sela_{idx}")
+                        if use_recon: save_npy(target_patches[num].cpu().numpy(), f"Query_{seq_name}_target_{idx}")
                         save_npy(patch_features[num].cpu().numpy(), f"Query_{seq_name}_{idx}")
                 # if args.use_fast_track: break
                     
@@ -344,11 +353,8 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                         del encoded_dbs_features, encoded_dbs_attn_map, encoded_dbs_descriptor, concated_db_patches_flat, concated_db_attn_map_flat
                         # if args.use_fast_track: break
             elif args.use_reranking == 'recon':
-                # Bidirectional reconstruction loss reranking
-                logging.info("Using bidirectional reconstruction loss reranking")
-
-                from torchvision.transforms import v2
-                from datasets_T2R import base_transform
+                # Bidirectional reconstruction loss reranking (optimized: no image load, no encoder)
+                logging.info("Using bidirectional reconstruction loss reranking (NPY-based)")
 
                 predictions_list = []
                 rerank_scores_dict = {}
@@ -359,34 +365,35 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 # Check if using DINO decoder
                 use_dino_decoder = model.module.args.use_dino_decoder
 
+                H_feat, W_feat = int(args.resize[0]/14), int(args.resize[1]/14)
+
                 with torch.no_grad():
                     for query_index, pred in enumerate(tqdm(prev_predictions, desc="Recon Reranking")):
                         top_k_indices = pred[:RERANKING_TOP_K]
 
-                        # ===== 1. Load raw images =====
-                        query_img_raw = eval_ds.get_thermal_img(eval_ds.t_queries_paths[query_index])
-                        query_img = base_transform(query_img_raw)
-                        query_img = v2.functional.resize(query_img, args.resize).unsqueeze(0).cuda()
+                        # ===== 1. Load pre-extracted features from NPY (no image load, no encoder) =====
+                        # Query features: [N, D] -> expand to [K, N, D]
+                        query_feat = torch.from_numpy(load_npy(f"Query_{seq_name}_{query_index}")).float().cuda()
+                        thermal_feat = query_feat.unsqueeze(0).expand(RERANKING_TOP_K, -1, -1).contiguous()  # [K, N, D]
 
-                        candidate_imgs = []
+                        # Candidate features: [K, N, D]
+                        candidate_feats = []
                         for db_idx in top_k_indices:
-                            cand_img_raw = eval_ds.get_rgb_img(eval_ds.rgb_database_paths[db_idx])
-                            cand_img = base_transform(cand_img_raw)
-                            cand_img = v2.functional.resize(cand_img, args.resize)
-                            candidate_imgs.append(cand_img)
-                        candidate_imgs = torch.stack(candidate_imgs).cuda()  # [K, 3, H, W]
+                            candidate_feats.append(torch.from_numpy(load_npy(f"Db_{seq_name}_{db_idx}")))
+                        rgb_feat = torch.stack(candidate_feats).float().cuda()  # [K, N, D]
 
-                        # ===== 2. Get encoder features =====
-                        query_batch = query_img.expand(RERANKING_TOP_K, -1, -1, -1)  # [K, 3, H, W]
+                        # ===== 2. Load pre-extracted target patches from NPY =====
+                        # Query target: [N, 588] -> expand to [K, N, 588]
+                        query_target = torch.from_numpy(load_npy(f"Query_{seq_name}_target_{query_index}")).float().cuda()
+                        thermal_target = query_target.unsqueeze(0).expand(RERANKING_TOP_K, -1, -1).contiguous()  # [K, N, 588]
 
-                        thermal_out = model.module.shared_backbone(query_batch, return_attention=True)
-                        rgb_out = model.module.shared_backbone(candidate_imgs, return_attention=True)
-
-                        thermal_feat = thermal_out["x_norm_patchtokens"]  # [K, N, D]
-                        rgb_feat = rgb_out["x_norm_patchtokens"]  # [K, N, D]
+                        # Candidate targets: [K, N, 588]
+                        candidate_targets = []
+                        for db_idx in top_k_indices:
+                            candidate_targets.append(torch.from_numpy(load_npy(f"Db_{seq_name}_target_{db_idx}")))
+                        rgb_target = torch.stack(candidate_targets).float().cuda()  # [K, N, 588]
 
                         B, N, D = thermal_feat.shape
-                        H_feat, W_feat = int(args.resize[0]/14), int(args.resize[1]/14)
 
                         # ===== 3. Compute GeM attention scores =====
                         thermal_spatial = thermal_feat.permute(0, 2, 1).view(B, D, H_feat, W_feat)
@@ -467,11 +474,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                         thermal_recon = model.module.prediction_thermal_head(thermal_dec)  # [K, N, 588]
                         rgb_recon = model.module.prediction_rgb_head(rgb_dec)  # [K, N, 588]
 
-                        # ===== 8. Target patches =====
-                        thermal_target = patchify(query_batch)  # [K, N, 588]
-                        rgb_target = patchify(candidate_imgs)   # [K, N, 588]
-
-                        # ===== 9. Compute losses per candidate =====
+                        # ===== 8. Compute losses per candidate =====
                         recon_losses = []
                         for k in range(RERANKING_TOP_K):
                             loss_thermal = recon_criterion(
@@ -489,7 +492,7 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
 
                         recon_losses = np.array(recon_losses)
 
-                        # ===== 10. Rerank (lower loss = better match) =====
+                        # ===== 9. Rerank (lower loss = better match) =====
                         rerank_index = recon_losses.argsort()
                         rerank_scores_dict[query_index] = recon_losses[rerank_index].tolist()
                         predictions_list.append(pred[rerank_index])
@@ -918,13 +921,55 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                         # Expand query to batch: [K, 256, 768]
                         query_batch = query_enc_features.unsqueeze(0).expand(RERANKING_TOP_K, -1, -1)
                         rerank_scores = model.module.stage2_inference(query_batch, candidates_features)
-                        
+
                         # Sort and reorder
                         rerank_scores_np = rerank_scores.cpu().numpy()
                         rerank_index = rerank_scores_np.argsort()[::-1]
                         rerank_scores_dict[query_index] = rerank_scores_np[rerank_index].tolist()
                         predictions.append(pred[rerank_index])
                 predictions = np.array(predictions)
+
+            elif args.use_reranking == 'reconAttn':
+                # Attention-based masking + Reconstruction loss reranking
+                logging.info("Using reconAttn reranking (attention-based masking + reconstruction loss)")
+
+                from torchvision.transforms import v2
+                from datasets_T2R import base_transform
+                from croco.models.masking import AttentionMask
+
+                predictions_list = []
+                rerank_scores_dict = {}
+
+                with torch.no_grad():
+                    for query_index, pred in enumerate(tqdm(prev_predictions, desc="ReconAttn Reranking")):
+                        top_k_indices = pred[:RERANKING_TOP_K]
+
+                        # ===== 1. Load raw images =====
+                        query_img_raw = eval_ds.get_thermal_img(eval_ds.t_queries_paths[query_index])
+                        query_img = base_transform(query_img_raw)
+                        query_img = v2.functional.resize(query_img, args.resize).unsqueeze(0).cuda()
+
+                        candidate_imgs = []
+                        for db_idx in top_k_indices:
+                            cand_img_raw = eval_ds.get_rgb_img(eval_ds.rgb_database_paths[db_idx])
+                            cand_img = base_transform(cand_img_raw)
+                            cand_img = v2.functional.resize(cand_img, args.resize)
+                            candidate_imgs.append(cand_img)
+                        candidate_imgs = torch.stack(candidate_imgs).cuda()  # [K, 3, H, W]
+
+                        # ===== 2. Use stage2_inference_recon_batch =====
+                        recon_scores = model.module.stage2_inference_recon_batch(
+                            query_img,       # [1, C, H, W]
+                            candidate_imgs   # [K, C, H, W]
+                        )
+
+                        # ===== 3. Rerank (lower loss = better match) =====
+                        recon_scores_np = recon_scores.cpu().numpy()
+                        rerank_index = recon_scores_np.argsort()  # ascending: lower loss is better
+                        rerank_scores_dict[query_index] = recon_scores_np[rerank_index].tolist()
+                        predictions_list.append(pred[rerank_index])
+
+                predictions = np.array(predictions_list)
 
             del queries_features
             del database_features

@@ -13,7 +13,7 @@ from timm.models.vision_transformer import VisionTransformer, _cfg, PatchEmbed, 
 from sklearn.neighbors import NearestNeighbors
 from timm.models.layers import trunc_normal_
 
-from croco.models.masking import RandomMask
+from croco.models.masking import RandomMask, AttentionMask
 from croco.models.criterion import MaskedMSE
 from pathlib import Path
 from swin_transformer import *
@@ -781,9 +781,226 @@ class CrossModalVPR_Net(nn.Module):
         all_scores = F.sigmoid(self.similarity_score_head(cls_tokens).squeeze(1))
         # print(all_scores.reshape(2, TOP_K_SIZE).t())
         all_scores = all_scores.reshape(2, TOP_K_SIZE).t().mean(dim=1)
-        
+
         return all_scores.reshape(-1)
-    
+
+    def stage2_forward_recon(self, thermal_imgs, rgb_imgs):
+        """
+        Stage2 training with attention-based masking and reconstruction loss.
+        Uses CroCo decoder for cross-modal reconstruction.
+
+        Flow:
+        1. Forward without masking to get attention maps
+        2. Mask HIGH attention patches (50%)
+        3. Compute bidirectional reconstruction loss (thermal↔RGB)
+
+        Args:
+            thermal_imgs: [B, C, H, W] thermal query images
+            rgb_imgs: [B, C, H, W] positive RGB images
+        """
+        B = thermal_imgs.shape[0]
+        device = thermal_imgs.device
+        patch_N = self.patch_count
+
+        # 1. Forward without masking to get attention maps
+        with torch.no_grad():
+            thermal_out = self.shared_backbone(thermal_imgs, return_attention=True)
+            rgb_out = self.shared_backbone(rgb_imgs, return_attention=True)
+
+            # CLS attention: [B, num_heads, N] -> [B, N] (sum over heads)
+            thermal_cls_attn = thermal_out["cls_attention"].sum(dim=1)  # [B, 256]
+            rgb_cls_attn = rgb_out["cls_attention"].sum(dim=1)  # [B, 256]
+
+        # Full features (no masking)
+        thermal_full = thermal_out["x_norm_patchtokens"]  # [B, 256, D]
+        rgb_full = rgb_out["x_norm_patchtokens"]  # [B, 256, D]
+
+        # 2. Create attention-based masks (mask HIGH attention patches)
+        attn_masker = AttentionMask(self.patch_count, mask_ratio=0.5)
+        mask_thermal = attn_masker(thermal_cls_attn)  # [B, 256] True=masked
+        mask_rgb = attn_masker(rgb_cls_attn)  # [B, 256] True=masked
+
+        # 3. Apply masking (replace masked positions with mask token)
+        thermal_masked = self.mask_token.expand(B, patch_N, -1).clone()
+        thermal_masked[~mask_thermal] = thermal_full[~mask_thermal]
+
+        rgb_masked = self.mask_token.expand(B, patch_N, -1).clone()
+        rgb_masked[~mask_rgb] = rgb_full[~mask_rgb]
+
+        # 4. Add positional embedding
+        thermal_masked = thermal_masked + self.decoder_pos_embed
+        rgb_masked = rgb_masked + self.decoder_pos_embed
+
+        # Reference features (full, with positional embedding)
+        thermal_ref = thermal_full + self.decoder_pos_embed
+        rgb_ref = rgb_full + self.decoder_pos_embed
+
+        # 5. CroCo Decoder forward (cross-modal reconstruction)
+        # Thermal masked -> decode with RGB reference -> reconstruct thermal
+        thermal_decoded = thermal_masked
+        for blk in self.decoder_blocks:
+            thermal_decoded = blk(thermal_decoded, rgb_ref)
+        thermal_decoded = self.decoder_norm(thermal_decoded)
+
+        # RGB masked -> decode with thermal reference -> reconstruct RGB
+        rgb_decoded = rgb_masked
+        for blk in self.decoder_blocks:
+            rgb_decoded = blk(rgb_decoded, thermal_ref)
+        rgb_decoded = self.decoder_norm(rgb_decoded)
+
+        # 6. Prediction heads
+        reconstructed_thermal = self.prediction_thermal_head(thermal_decoded)
+        reconstructed_rgb = self.prediction_rgb_head(rgb_decoded)
+
+        # 7. Target patches
+        target_thermal = self.patchify(thermal_imgs)
+        target_rgb = self.patchify(rgb_imgs)
+
+        # 8. Compute reconstruction loss (only on masked regions)
+        recon_loss_thermal = self.calculate_recon_loss(reconstructed_thermal, mask_thermal, target_thermal)
+        recon_loss_rgb = self.calculate_recon_loss(reconstructed_rgb, mask_rgb, target_rgb)
+
+        total_recon_loss = (recon_loss_thermal + recon_loss_rgb) / 2.0
+
+        return total_recon_loss, recon_loss_thermal, recon_loss_rgb
+
+    @torch.no_grad()
+    def stage2_inference_recon(self, query_img, candidate_imgs):
+        """
+        Stage2 inference: compute reconstruction loss for reranking.
+        Uses CroCo decoder for cross-modal reconstruction.
+
+        Args:
+            query_img: [1, C, H, W] thermal query image
+            candidate_imgs: [K, C, H, W] top-K RGB candidate images
+
+        Returns:
+            recon_scores: [K] reconstruction scores (lower = better match)
+        """
+        K = candidate_imgs.shape[0]
+        device = query_img.device
+        patch_N = self.patch_count
+
+        # 1. Get query features and attention map (once)
+        query_out = self.shared_backbone(query_img, return_attention=True)
+        query_cls_attn = query_out["cls_attention"].sum(dim=1)  # [1, 256]
+        query_full = query_out["x_norm_patchtokens"]  # [1, 256, D]
+
+        # Create attention-based mask for query
+        attn_masker = AttentionMask(self.patch_count, mask_ratio=0.5)
+        mask_query = attn_masker(query_cls_attn)  # [1, 256]
+
+        # Prepare masked query
+        query_masked = self.mask_token.expand(1, patch_N, -1).clone()
+        query_masked[~mask_query] = query_full[~mask_query]
+        query_masked = query_masked + self.decoder_pos_embed
+
+        # Target patches for query
+        target_query = self.patchify(query_img)
+
+        recon_scores = []
+
+        # 2. For each candidate, compute reconstruction loss
+        for i in range(K):
+            candidate_img = candidate_imgs[i:i+1]  # [1, C, H, W]
+
+            cand_out = self.shared_backbone(candidate_img, return_attention=True)
+            cand_full = cand_out["x_norm_patchtokens"]  # [1, 256, D]
+
+            # Reference features with positional embedding
+            cand_ref = cand_full + self.decoder_pos_embed
+
+            # CroCo Decoder: query_masked with candidate reference
+            query_decoded = query_masked
+            for blk in self.decoder_blocks:
+                query_decoded = blk(query_decoded, cand_ref)
+            query_decoded = self.decoder_norm(query_decoded)
+
+            # Reconstruct and compute loss
+            reconstructed_query = self.prediction_thermal_head(query_decoded)
+            recon_loss = self.calculate_recon_loss(reconstructed_query, mask_query, target_query)
+
+            recon_scores.append(recon_loss.item())
+
+        # Lower reconstruction loss = better match
+        recon_scores = torch.tensor(recon_scores, device=device)
+
+        return recon_scores
+
+    @torch.no_grad()
+    def stage2_inference_recon_batch(self, query_img, candidate_imgs):
+        """
+        Batched version of stage2_inference_recon for efficiency.
+        Uses CroCo decoder for cross-modal reconstruction.
+
+        Args:
+            query_img: [1, C, H, W] thermal query image
+            candidate_imgs: [K, C, H, W] top-K RGB candidate images
+
+        Returns:
+            recon_scores: [K] reconstruction scores (lower = better match)
+        """
+        K = candidate_imgs.shape[0]
+        device = query_img.device
+        patch_N = self.patch_count
+
+        # 1. Get query features and attention map
+        query_out = self.shared_backbone(query_img, return_attention=True)
+        query_cls_attn = query_out["cls_attention"].sum(dim=1)  # [1, 256]
+        query_full = query_out["x_norm_patchtokens"]  # [1, 256, D]
+
+        # Get all candidate features at once
+        cand_out = self.shared_backbone(candidate_imgs, return_attention=True)
+        cand_full = cand_out["x_norm_patchtokens"]  # [K, 256, D]
+
+        # Create attention-based mask for query
+        attn_masker = AttentionMask(self.patch_count, mask_ratio=0.5)
+        mask_query = attn_masker(query_cls_attn)  # [1, 256]
+
+        # Prepare masked query (expand for K candidates)
+        query_masked = self.mask_token.expand(1, patch_N, -1).clone()
+        query_masked[~mask_query] = query_full[~mask_query]
+        query_masked = query_masked + self.decoder_pos_embed
+        query_masked_expanded = query_masked.expand(K, -1, -1).clone()  # [K, 256, D]
+
+        # Expand mask for loss computation
+        mask_query_expanded = mask_query.expand(K, -1)  # [K, 256]
+
+        # Reference features with positional embedding
+        cand_ref = cand_full + self.decoder_pos_embed  # [K, 256, D]
+
+        # CroCo Decoder: each query[i] attends to cand[i]
+        query_decoded = query_masked_expanded
+        for blk in self.decoder_blocks:
+            query_decoded = blk(query_decoded, cand_ref)
+        query_decoded = self.decoder_norm(query_decoded)
+
+        # Reconstruct
+        reconstructed_query = self.prediction_thermal_head(query_decoded)  # [K, 256, patch_dim]
+
+        # Target patches (expand for K)
+        target_query = self.patchify(query_img)  # [1, 256, patch_dim]
+        target_query_expanded = target_query.expand(K, -1, -1)  # [K, 256, patch_dim]
+
+        # Compute per-sample reconstruction loss
+        recon_scores = []
+        for i in range(K):
+            loss = self.calculate_recon_loss(
+                reconstructed_query[i:i+1],
+                mask_query_expanded[i:i+1],
+                target_query_expanded[i:i+1]
+            )
+            recon_scores.append(loss.item())
+
+        recon_scores = torch.tensor(recon_scores, device=device)
+
+        return recon_scores
+
+    def inference_masked_patches(self, x, paired_rgb):
+        thermal_visible, mask_thermal, patch_B, patch_N, patch_D, thermal_cls = self.croco_like_encoder(x, modality='thermal')
+        rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb, rgb_cls = self.croco_like_encoder(paired_rgb, modality='rgb')
+        return thermal_visible, rgb_visible, mask_thermal, mask_rgb
+
     def forward_model(self, x, paired_rgb=None, modality='rgb', return_masked_patch=False):
         """단일 모달리티에 대한 Forward"""
         # self.use_masked_inference: rerank를 위해, decoder에 들어가기 바로 전 단계를 뱉는다
