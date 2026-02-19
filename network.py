@@ -786,13 +786,14 @@ class CrossModalVPR_Net(nn.Module):
 
     def stage2_forward_recon(self, thermal_imgs, rgb_imgs):
         """
-        Stage2 training with attention-based masking and reconstruction loss.
+        Stage2 training with attention-based masking and GeM-weighted reconstruction loss.
         Uses CroCo decoder for cross-modal reconstruction.
 
         Flow:
         1. Forward without masking to get attention maps
         2. Mask HIGH attention patches (50%)
-        3. Compute bidirectional reconstruction loss (thermal↔RGB)
+        3. Compute GeM attention scores for loss weighting
+        4. Compute bidirectional reconstruction loss (thermal↔RGB) with GeM weighting
 
         Args:
             thermal_imgs: [B, C, H, W] thermal query images
@@ -801,6 +802,8 @@ class CrossModalVPR_Net(nn.Module):
         B = thermal_imgs.shape[0]
         device = thermal_imgs.device
         patch_N = self.patch_count
+        H_feat = int(thermal_imgs.shape[2] / 14)
+        W_feat = int(thermal_imgs.shape[3] / 14)
 
         # 1. Forward without masking to get attention maps
         with torch.no_grad():
@@ -814,20 +817,35 @@ class CrossModalVPR_Net(nn.Module):
         # Full features (no masking)
         thermal_full = thermal_out["x_norm_patchtokens"]  # [B, 256, D]
         rgb_full = rgb_out["x_norm_patchtokens"]  # [B, 256, D]
+        D = thermal_full.shape[-1]
 
-        # 2. Create attention-based masks (mask HIGH attention patches)
+        # 2. Compute GeM attention scores for loss weighting
+        with torch.no_grad():
+            # Thermal GeM score
+            thermal_spatial = thermal_full.permute(0, 2, 1).view(B, D, H_feat, W_feat)
+            thermal_gem = self.thermal_aggregation(thermal_spatial)  # [B, D]
+            thermal_gem_weight = torch.einsum('bd,bnd->bn', thermal_gem, thermal_full)  # [B, 256]
+            thermal_gem_weight = F.softmax(thermal_gem_weight, dim=-1)  # Normalize to [0, 1]
+
+            # RGB GeM score
+            rgb_spatial = rgb_full.permute(0, 2, 1).view(B, D, H_feat, W_feat)
+            rgb_gem = self.rgb_aggregation(rgb_spatial)  # [B, D]
+            rgb_gem_weight = torch.einsum('bd,bnd->bn', rgb_gem, rgb_full)  # [B, 256]
+            rgb_gem_weight = F.softmax(rgb_gem_weight, dim=-1)  # Normalize to [0, 1]
+
+        # 3. Create attention-based masks (mask HIGH attention patches)
         attn_masker = AttentionMask(self.patch_count, mask_ratio=0.5)
         mask_thermal = attn_masker(thermal_cls_attn)  # [B, 256] True=masked
         mask_rgb = attn_masker(rgb_cls_attn)  # [B, 256] True=masked
 
-        # 3. Apply masking (replace masked positions with mask token)
+        # 4. Apply masking (replace masked positions with mask token)
         thermal_masked = self.mask_token.expand(B, patch_N, -1).clone()
         thermal_masked[~mask_thermal] = thermal_full[~mask_thermal]
 
         rgb_masked = self.mask_token.expand(B, patch_N, -1).clone()
         rgb_masked[~mask_rgb] = rgb_full[~mask_rgb]
 
-        # 4. Add positional embedding
+        # 5. Add positional embedding
         thermal_masked = thermal_masked + self.decoder_pos_embed
         rgb_masked = rgb_masked + self.decoder_pos_embed
 
@@ -835,7 +853,7 @@ class CrossModalVPR_Net(nn.Module):
         thermal_ref = thermal_full + self.decoder_pos_embed
         rgb_ref = rgb_full + self.decoder_pos_embed
 
-        # 5. CroCo Decoder forward (cross-modal reconstruction)
+        # 6. CroCo Decoder forward (cross-modal reconstruction)
         # Thermal masked -> decode with RGB reference -> reconstruct thermal
         thermal_decoded = thermal_masked
         for blk in self.decoder_blocks:
@@ -848,17 +866,29 @@ class CrossModalVPR_Net(nn.Module):
             rgb_decoded = blk(rgb_decoded, thermal_ref)
         rgb_decoded = self.decoder_norm(rgb_decoded)
 
-        # 6. Prediction heads
+        # 7. Prediction heads
         reconstructed_thermal = self.prediction_thermal_head(thermal_decoded)
         reconstructed_rgb = self.prediction_rgb_head(rgb_decoded)
 
-        # 7. Target patches
+        # 8. Target patches
         target_thermal = self.patchify(thermal_imgs)
         target_rgb = self.patchify(rgb_imgs)
 
-        # 8. Compute reconstruction loss (only on masked regions)
-        recon_loss_thermal = self.calculate_recon_loss(reconstructed_thermal, mask_thermal, target_thermal)
-        recon_loss_rgb = self.calculate_recon_loss(reconstructed_rgb, mask_rgb, target_rgb)
+        # 9. Compute reconstruction loss (optionally with GeM weighting)
+        if self.args.use_gem_recon_weight:
+            recon_loss_thermal = self.calculate_recon_loss(
+                reconstructed_thermal, mask_thermal, target_thermal, weight=thermal_gem_weight
+            )
+            recon_loss_rgb = self.calculate_recon_loss(
+                reconstructed_rgb, mask_rgb, target_rgb, weight=rgb_gem_weight
+            )
+        else:
+            recon_loss_thermal = self.calculate_recon_loss(
+                reconstructed_thermal, mask_thermal, target_thermal, weight=None
+            )
+            recon_loss_rgb = self.calculate_recon_loss(
+                reconstructed_rgb, mask_rgb, target_rgb, weight=None
+            )
 
         total_recon_loss = (recon_loss_thermal + recon_loss_rgb) / 2.0
 
@@ -1366,11 +1396,21 @@ class CrossModalVPR_Net(nn.Module):
         else:
             return final_emb, patch_emb, recon_losses, masks, cls_attn_map, penultimate_patch_emb, sela_local_emb, gem_attn_map
 
-    def calculate_recon_loss(self, pred, mask, target, confidence_map=None):
+    def calculate_recon_loss(self, pred, mask, target, weight=None):
+        """
+        Calculate reconstruction loss with optional GeM-based weighting.
+
+        Args:
+            pred: [B, 256, 588] - predicted patches
+            mask: [B, 256] - binary mask
+            target: [B, 256, 588] - target patches
+            weight: [B, 256] - optional per-patch weight (e.g., GeM attention score)
+        """
         recon_loss = self.reconstruction_criterion(
-            pred=pred,        # [B, 256, 768]
-            mask=mask,        # [B, 256]
-            target=target,    # [B, 3, 256, 768]
+            pred=pred,
+            mask=mask,
+            target=target,
+            weight=weight,
         )
         return recon_loss
 

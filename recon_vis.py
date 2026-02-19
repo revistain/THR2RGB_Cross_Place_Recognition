@@ -1369,3 +1369,284 @@ def visualize_selaVPR_reranking(args, eval_ds,
     print(f"Saved summary: {summary_path}")
 
     return improved_queries, worsened_queries, unchanged_queries
+
+
+def visualize_recon_reranking(args, eval_ds, model, query_indices,
+                               top_k_db_indices_list, recon_losses_list,
+                               thermal_recon_list, rgb_recon_list,
+                               thermal_masks_list, rgb_masks_list,
+                               thermal_gem_attn_list, rgb_gem_attn_list,
+                               positives_per_query,
+                               save_dir='./recon_reranking_vis',
+                               seq_name=""):
+    """
+    Visualize recon reranking results.
+
+    Shows for each query:
+    - Original thermal query
+    - Top-K RGB candidates with recon loss scores
+    - Bidirectional reconstruction results (thermal & RGB)
+    - GeM attention maps
+    - Correct/Wrong labels
+
+    Args:
+        args: training arguments
+        eval_ds: evaluation dataset
+        model: trained model
+        query_indices: list of query indices to visualize (5 random)
+        top_k_db_indices_list: list of [K] arrays - DB indices for each query
+        recon_losses_list: list of [K] arrays - recon loss for each candidate
+        thermal_recon_list: list of [K, N, 588] tensors - thermal reconstruction
+        rgb_recon_list: list of [K, N, 588] tensors - RGB reconstruction
+        thermal_masks_list: list of [K, N] tensors - thermal masks
+        rgb_masks_list: list of [K, N] tensors - RGB masks
+        thermal_gem_attn_list: list of [K, N] tensors - thermal GeM attention
+        rgb_gem_attn_list: list of [K, N] tensors - RGB GeM attention
+        positives_per_query: dict mapping query_idx -> set of positive db indices
+        save_dir: save directory
+        seq_name: sequence name
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+    from matplotlib.gridspec import GridSpec
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Image params
+    orig_H, orig_W = args.resize
+    patch_size = 14
+    h_patches = int(orig_H / patch_size)
+    w_patches = int(orig_W / patch_size)
+
+    # Denormalization
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+
+    def denormalize(img_tensor):
+        """[3, H, W] -> [H, W, 3] numpy, range [0, 1]"""
+        if img_tensor.dim() == 4:
+            img_tensor = img_tensor.squeeze(0)
+        img = (img_tensor.cpu() * std + mean).permute(1, 2, 0).numpy()
+        return np.clip(img, 0, 1)
+
+    def unpatchify_to_img(patches_tensor, h=h_patches, w=w_patches):
+        """[N, 588] -> [3, H, W]"""
+        if patches_tensor.dim() == 3:
+            patches_tensor = patches_tensor.squeeze(0)  # [N, 588]
+        patches = patches_tensor.reshape(h, w, patch_size, patch_size, 3)
+        patches = torch.einsum('hwpqc->chpwq', patches)
+        img = patches.reshape(3, h * patch_size, w * patch_size)
+        return img
+
+    def mask_to_heatmap(mask_tensor, h=h_patches, w=w_patches):
+        """[N] -> [H, W] heatmap"""
+        if mask_tensor.dim() == 2:
+            mask_tensor = mask_tensor.squeeze(0)
+        heatmap = mask_tensor.cpu().numpy().reshape(h, w)
+        heatmap = cv2.resize(heatmap, (orig_W, orig_H), interpolation=cv2.INTER_NEAREST)
+        return heatmap
+
+    RERANKING_TOP_K = 5
+
+    for list_idx, query_idx in enumerate(query_indices):
+        # Get data for this query
+        top_k_indices = top_k_db_indices_list[list_idx]
+        recon_losses = recon_losses_list[list_idx]
+        thermal_recon = thermal_recon_list[list_idx]  # [K, N, 588]
+        rgb_recon = rgb_recon_list[list_idx]  # [K, N, 588]
+        thermal_mask = thermal_masks_list[list_idx]  # [K, N]
+        rgb_mask = rgb_masks_list[list_idx]  # [K, N]
+        thermal_gem = thermal_gem_attn_list[list_idx]  # [K, N]
+        rgb_gem = rgb_gem_attn_list[list_idx]  # [K, N]
+
+        # positives_per_query is a list indexed by query_idx
+        positives = positives_per_query[query_idx] if query_idx < len(positives_per_query) else set()
+
+        # ===== Create figure =====
+        # Layout:
+        # Row 0: Query image + info
+        # Row 1: Top-K RGB candidates with scores
+        # Row 2: Thermal GeM attention maps
+        # Row 3: RGB GeM attention maps
+        # Row 4: Thermal reconstruction (hybrid: visible + recon)
+        # Row 5: RGB reconstruction (hybrid: visible + recon)
+
+        fig = plt.figure(figsize=(28, 24))
+        gs = GridSpec(6, RERANKING_TOP_K + 1, figure=fig, hspace=0.35, wspace=0.2)
+
+        # ===== Row 0: Query Image =====
+        query_img_raw = eval_ds.get_thermal_img(eval_ds.t_queries_paths[query_idx])
+        query_img = cv2.resize(query_img_raw, (224, 224))
+        query_img = cv2.cvtColor(query_img, cv2.COLOR_BGR2RGB)
+
+        ax_query = fig.add_subplot(gs[0, :2])
+        ax_query.imshow(query_img)
+        ax_query.set_title(f'Query #{query_idx} (Thermal)\nPositives: {len(positives)}',
+                         fontsize=14, fontweight='bold')
+        ax_query.axis('off')
+
+        # Query info box
+        ax_info = fig.add_subplot(gs[0, 2:])
+        info_text = f"Reconstruction Reranking Analysis\n"
+        info_text += f"Sequence: {seq_name}\n"
+        info_text += f"Query Index: {query_idx}\n\n"
+
+        # Rank order by loss (lower = better)
+        rank_order = np.argsort(recon_losses)
+        info_text += "Reranking Order (by loss):\n"
+        for new_rank, old_rank in enumerate(rank_order):
+            db_idx = top_k_indices[old_rank]
+            is_correct = db_idx in positives
+            status = "✓ CORRECT" if is_correct else "✗ WRONG"
+            info_text += f"  R{new_rank+1}: DB#{db_idx} (loss={recon_losses[old_rank]:.4f}) {status}\n"
+
+        ax_info.text(0.1, 0.9, info_text, transform=ax_info.transAxes,
+                    fontsize=11, verticalalignment='top', fontfamily='monospace',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        ax_info.axis('off')
+
+        # ===== Row 1: Top-K RGB Candidates =====
+        ax_label1 = fig.add_subplot(gs[1, 0])
+        ax_label1.text(0.5, 0.5, 'RGB\nCandidates', fontsize=12,
+                      fontweight='bold', ha='center', va='center')
+        ax_label1.axis('off')
+
+        for k in range(RERANKING_TOP_K):
+            ax = fig.add_subplot(gs[1, k + 1])
+
+            db_idx = top_k_indices[k]
+            db_img_raw = eval_ds.get_rgb_img(eval_ds.rgb_database_paths[db_idx])
+            db_img = cv2.resize(db_img_raw, (224, 224))
+            db_img = cv2.cvtColor(db_img, cv2.COLOR_BGR2RGB)
+
+            is_correct = db_idx in positives
+            border_color = 'lime' if is_correct else 'red'
+
+            ax.imshow(db_img)
+
+            # Add border
+            for spine in ax.spines.values():
+                spine.set_edgecolor(border_color)
+                spine.set_linewidth(4)
+                spine.set_visible(True)
+
+            # Rank after reranking
+            new_rank = np.where(rank_order == k)[0][0] + 1
+            status = "✓" if is_correct else "✗"
+            title = f'Cand {k+1} → R{new_rank} {status}\nLoss: {recon_losses[k]:.4f}'
+            ax.set_title(title, fontsize=11, fontweight='bold', color=border_color)
+            ax.axis('off')
+
+        # ===== Row 2: Thermal GeM Attention =====
+        ax_label2 = fig.add_subplot(gs[2, 0])
+        ax_label2.text(0.5, 0.5, 'Thermal\nGeM Attn', fontsize=12,
+                      fontweight='bold', ha='center', va='center')
+        ax_label2.axis('off')
+
+        for k in range(RERANKING_TOP_K):
+            ax = fig.add_subplot(gs[2, k + 1])
+
+            gem_attn = thermal_gem[k].cpu().numpy().reshape(h_patches, w_patches)
+            gem_attn_vis = cv2.resize(gem_attn, (224, 224), interpolation=cv2.INTER_LINEAR)
+
+            # Normalize for visualization
+            gem_attn_vis = (gem_attn_vis - gem_attn_vis.min()) / (gem_attn_vis.max() - gem_attn_vis.min() + 1e-8)
+
+            im = ax.imshow(gem_attn_vis, cmap='hot', vmin=0, vmax=1)
+            ax.set_title(f'Thermal GeM {k+1}', fontsize=10)
+            ax.axis('off')
+            plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+        # ===== Row 3: RGB GeM Attention =====
+        ax_label3 = fig.add_subplot(gs[3, 0])
+        ax_label3.text(0.5, 0.5, 'RGB\nGeM Attn', fontsize=12,
+                      fontweight='bold', ha='center', va='center')
+        ax_label3.axis('off')
+
+        for k in range(RERANKING_TOP_K):
+            ax = fig.add_subplot(gs[3, k + 1])
+
+            gem_attn = rgb_gem[k].cpu().numpy().reshape(h_patches, w_patches)
+            gem_attn_vis = cv2.resize(gem_attn, (224, 224), interpolation=cv2.INTER_LINEAR)
+
+            # Normalize for visualization
+            gem_attn_vis = (gem_attn_vis - gem_attn_vis.min()) / (gem_attn_vis.max() - gem_attn_vis.min() + 1e-8)
+
+            im = ax.imshow(gem_attn_vis, cmap='hot', vmin=0, vmax=1)
+            ax.set_title(f'RGB GeM {k+1}', fontsize=10)
+            ax.axis('off')
+            plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+        # ===== Row 4: Thermal Reconstruction (masked + reconstructed) =====
+        ax_label4 = fig.add_subplot(gs[4, 0])
+        ax_label4.text(0.5, 0.5, 'Thermal\nRecon', fontsize=12,
+                      fontweight='bold', ha='center', va='center')
+        ax_label4.axis('off')
+
+        for k in range(RERANKING_TOP_K):
+            ax = fig.add_subplot(gs[4, k + 1])
+
+            # Get reconstructed thermal image
+            recon_patches = thermal_recon[k]  # [N, 588]
+            recon_img = unpatchify_to_img(recon_patches)  # [3, H, W]
+            recon_img_denorm = denormalize(recon_img.unsqueeze(0))
+
+            # Get mask
+            mask = thermal_mask[k].cpu().numpy().reshape(h_patches, w_patches)  # True=masked
+            mask_vis = cv2.resize(mask.astype(float), (224, 224), interpolation=cv2.INTER_NEAREST)
+
+            # Show reconstruction with mask overlay
+            ax.imshow(recon_img_denorm)
+            ax.imshow(mask_vis, cmap='Blues', alpha=0.3)  # Overlay mask
+
+            mask_ratio = mask.mean() * 100
+            ax.set_title(f'Thermal Recon {k+1}\n{mask_ratio:.0f}% masked', fontsize=10)
+            ax.axis('off')
+
+        # ===== Row 5: RGB Reconstruction (masked + reconstructed) =====
+        ax_label5 = fig.add_subplot(gs[5, 0])
+        ax_label5.text(0.5, 0.5, 'RGB\nRecon', fontsize=12,
+                      fontweight='bold', ha='center', va='center')
+        ax_label5.axis('off')
+
+        for k in range(RERANKING_TOP_K):
+            ax = fig.add_subplot(gs[5, k + 1])
+
+            # Get reconstructed RGB image
+            recon_patches = rgb_recon[k]  # [N, 588]
+            recon_img = unpatchify_to_img(recon_patches)  # [3, H, W]
+            recon_img_denorm = denormalize(recon_img.unsqueeze(0))
+
+            # Get mask
+            mask = rgb_mask[k].cpu().numpy().reshape(h_patches, w_patches)  # True=masked
+            mask_vis = cv2.resize(mask.astype(float), (224, 224), interpolation=cv2.INTER_NEAREST)
+
+            # Show reconstruction with mask overlay
+            ax.imshow(recon_img_denorm)
+            ax.imshow(mask_vis, cmap='Blues', alpha=0.3)  # Overlay mask
+
+            mask_ratio = mask.mean() * 100
+            ax.set_title(f'RGB Recon {k+1}\n{mask_ratio:.0f}% masked', fontsize=10)
+            ax.axis('off')
+
+        # ===== Overall Title =====
+        # Determine overall status
+        best_idx = rank_order[0]
+        best_db_idx = top_k_indices[best_idx]
+        is_top1_correct = best_db_idx in positives
+
+        status_str = "TOP-1 CORRECT" if is_top1_correct else "TOP-1 WRONG"
+        title_color = 'darkgreen' if is_top1_correct else 'darkred'
+
+        fig.suptitle(f'Recon Reranking Visualization - Query #{query_idx} [{status_str}]\n'
+                    f'Lower reconstruction loss = better match',
+                    fontsize=16, fontweight='bold', color=title_color, y=0.98)
+
+        # Save
+        save_path = os.path.join(save_dir, f'query_{query_idx:05d}_recon_reranking.png')
+        plt.savefig(save_path, dpi=120, bbox_inches='tight')
+        plt.close()
+
+        print(f"Saved: {save_path}")
+
+    print(f"Visualization complete: {len(query_indices)} queries saved to {save_dir}")

@@ -91,12 +91,13 @@ class MaskedMSE(torch.nn.Module):
         if 'GV' in args.recon_loss_type:
             self.grad_criterion = GradientVariance(patch_size=14).to('cuda')
         
-    def forward(self, pred, mask, target):
+    def forward(self, pred, mask, target, weight=None):
         """
         Args:
             pred: [B, 256, 588] - predicted patches
             mask: [B, 256] - binary mask
             target: [B, 256, 588] - target patches
+            weight: [B, 256] - optional per-patch weight (e.g., GeM attention score)
         Returns:
             loss: scalar or [B] depending on reduction
         """
@@ -252,9 +253,20 @@ class MaskedMSE(torch.nn.Module):
         # MSE, L1은 patch-level이므로 mask 적용
         if self.loss_type in ['mse', 'l1', 'GV', 'GV+l1']:
             if self.masked:
-                loss = (loss * mask).sum(dim=-1) / mask.sum(dim=-1)  # [B]
+                if weight is not None:
+                    # Apply weight (e.g., GeM attention score) to loss
+                    # Normalize weight to avoid scale issues
+                    weight_masked = weight * mask.float()  # [B, 256]
+                    weight_norm = weight_masked / (weight_masked.sum(dim=-1, keepdim=True) + 1e-8)  # [B, 256]
+                    loss = (loss * weight_norm).sum(dim=-1)  # [B] - weighted sum
+                else:
+                    loss = (loss * mask).sum(dim=-1) / mask.sum(dim=-1)  # [B]
             else:
-                loss = loss.mean(dim=-1)  # [B]
+                if weight is not None:
+                    weight_norm = weight / (weight.sum(dim=-1, keepdim=True) + 1e-8)
+                    loss = (loss * weight_norm).sum(dim=-1)  # [B]
+                else:
+                    loss = loss.mean(dim=-1)  # [B]
 
             if self.reduction == 'none':
                 return loss  # [B]

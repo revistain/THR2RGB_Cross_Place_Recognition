@@ -8,7 +8,7 @@ python3 fast_inference.py \
     --test_seq Urban Residential \
     --cuda_device $CUDA_VISIBLE_DEVICES \
     --foundation_model_path /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/backbone/dinov2/pretrained/dinov2_vits14_pretrain.pth \
-    --resume "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/biRecon(10,l1)-warmup(3e-5)/260213_021641/best_model.pth" \
+    --resume "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/biRecon(w10,l1,dep8,r0.6)-attnMask(stage1, 1e-4)/260217_062526/last_model.pth" \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
@@ -21,12 +21,19 @@ python3 fast_inference.py \
     --croco_mask_ratio 0.8 \
     --recon_weight 10 \
     --use_recon_loss \
+    --use_reranking 'recon' \
     --recon_loss_type 'l1' \
+    --masking_method 'random' \
     --num_decoder_depth 8 \
     --visualize_attention
 
     # --selaVPR_rerank_score_type 'none' \
     # --use_reranking 'reconSelaVPR' \
+
+    #### Recon Reranking (bidirectional reconstruction loss)
+    # --use_reranking 'recon' \
+    # --use_gem_recon_weight \  # Enable GeM-weighted loss (default: off)
+
     #### Croco
     # --croco_mask_ratio 0.8 \
     # --recon_weight 10 \

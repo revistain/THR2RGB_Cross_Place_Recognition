@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=1
+CUDA_VISIBLE_DEVICES=3
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
@@ -16,7 +16,7 @@ python3 train_wandb_2stage.py \
     --hard_positives_dist_threshold 10 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
-    --comment "twoStage-CroCo-ViTs-numBlock0-clsAttn(GeM)-3e-5" \
+    --comment "twoStage-CroCo-ViTs-numBlock0-clsAttn(random, GeMLoss)-3e-5" \
     --margin 0.1 \
     --epochs_num 200 \
     --negs_num_per_query 10 \
@@ -24,7 +24,7 @@ python3 train_wandb_2stage.py \
     --recon_weight 10 \
     --use_recon_loss \
     --recon_loss_type 'l1' \
-    --masking_method 'GeM' \
+    --masking_method 'random' \
     --lr 3e-5 \
     --use_reranking 'recon' \
 
