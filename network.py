@@ -939,49 +939,54 @@ class CrossModalVPR_Net(nn.Module):
 
     def stage2_forward_distance(self, thermal_feat, rgb_feat, distance_gt=None, tau=10.0):
         """
-        Stage 2: Distance-based geometric matching using decoder CLS token.
+        Stage 2: Bidirectional distance-based geometric matching using decoder CLS token.
 
-        The decoder processes thermal features with RGB as cross-attention reference,
-        and the CLS token output is used to predict a matching score.
+        Computes matching scores in both directions in a single batched forward:
+        1. thermal → RGB (thermal attends to RGB)
+        2. RGB → thermal (RGB attends to thermal)
+        Final score is the average of both directions.
 
         Args:
             thermal_feat: [B, 256, D] - query (thermal) encoder features
             rgb_feat: [B, 256, D] - candidates (RGB) encoder features
             distance_gt: [B] - GT distance in meters (None for inference)
-            tau: temperature for distance→score conversion (default: 20m)
+            tau: temperature for distance→score conversion (default: 10m)
 
         Returns:
             loss: BCE loss if distance_gt is provided, else None
             pred_score: [B] predicted matching scores (0~1, higher = closer)
         """
         B = thermal_feat.shape[0]
-        device = thermal_feat.device
 
-        # 1. Prepend CLS token to thermal features
-        cls_tokens = self.decoder_cls_token.expand(B, -1, -1)  # [B, 1, D]
-        thermal_with_cls = torch.cat([cls_tokens, thermal_feat], dim=1)  # [B, 257, D]
+        # ===== Batch both directions together: [2B, ...] =====
+        cls_tokens = self.decoder_cls_token.expand(2 * B, -1, -1)  # [2B, 1, D]
 
-        # 2. Add positional embedding
-        thermal_with_cls = thermal_with_cls + self.decoder_pos_embed_with_cls  # [B, 257, D]
-        rgb_ref = rgb_feat + self.decoder_pos_embed  # [B, 256, D]
+        # Concat: [thermal; rgb] for query, [rgb; thermal] for reference
+        query_feat = torch.cat([thermal_feat, rgb_feat], dim=0)  # [2B, 256, D]
+        ref_feat = torch.cat([rgb_feat, thermal_feat], dim=0)    # [2B, 256, D]
 
-        # 3. Decoder forward (thermal attends to RGB)
-        x = thermal_with_cls
+        query_with_cls = torch.cat([cls_tokens, query_feat], dim=1)  # [2B, 257, D]
+        query_with_cls = query_with_cls + self.decoder_pos_embed_with_cls
+        ref_with_pos = ref_feat + self.decoder_pos_embed  # [2B, 256, D]
+
+        # Single batched decoder forward
+        x = query_with_cls
         for blk in self.decoder_blocks:
-            x = blk(x, rgb_ref)
+            x = blk(x, ref_with_pos)
         x = self.decoder_norm(x)
 
-        # 4. Extract CLS token output and predict score
-        cls_output = x[:, 0, :]  # [B, D]
-        pred_score = torch.sigmoid(self.distance_head(cls_output).squeeze(-1))  # [B], 0~1
+        # Extract CLS and predict scores
+        cls_output = x[:, 0, :]  # [2B, D]
+        pred_scores = torch.sigmoid(self.distance_head(cls_output).squeeze(-1))  # [2B]
 
-        # 5. Compute loss if ground truth is provided
+        # Split and average both directions
+        pred_score_1 = pred_scores[:B]   # thermal → RGB
+        pred_score_2 = pred_scores[B:]   # RGB → thermal
+        pred_score = (pred_score_1 + pred_score_2) / 2  # [B]
+
+        # Compute loss if ground truth is provided
         if distance_gt is not None:
-            # Convert distance to target score (exponential decay)
-            # tau=10: 5m→0.61, 10m→0.37, 100m→~0
             target_score = self.distance_to_score(distance_gt, tau=tau)  # [B], 0~1
-
-            # BCE loss
             loss = F.binary_cross_entropy(pred_score, target_score)
             return loss, pred_score
 

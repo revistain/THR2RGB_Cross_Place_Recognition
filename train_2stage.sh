@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=6
+CUDA_VISIBLE_DEVICES=5
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
@@ -16,7 +16,7 @@ python3 train_wandb_2stage.py \
     --hard_positives_dist_threshold 10 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
-    --comment "twoStage-CroCo-ViTs-numBlock0-distanceDecoder-1e-4(neg,tau10)_warmup" \
+    --comment "twoStage-CroCo-ViTs-numBlock0-distanceDecoder-1e-4(neg,tau10)_warmup_bidirection" \
     --margin 0.1 \
     --epochs_num 200 \
     --negs_num_per_query 10 \
