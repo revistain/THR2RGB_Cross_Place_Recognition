@@ -193,6 +193,71 @@ def batched_recon_reranking(
     return predictions, rerank_scores_dict, vis_data
 
 
+def batched_distance_reranking(
+    model,
+    dataloader,
+    prev_predictions,
+    reranking_top_k=5
+):
+    """
+    DataLoader 기반 배치 distance reranking.
+
+    여러 쿼리를 한 번에 처리하여 GPU 활용도를 높입니다.
+
+    Args:
+        model: CrossModalVPR_Net 모델
+        dataloader: RerankingDataset을 위한 DataLoader (load_targets=False)
+        prev_predictions: 원본 predictions [num_queries, max_recall]
+        reranking_top_k: reranking할 top-K 수
+
+    Returns:
+        predictions: [num_queries, max_recall] reranked predictions
+        rerank_scores_dict: {query_idx: scores} dictionary
+    """
+    predictions_list = []
+    rerank_scores_dict = {}
+
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Batched Distance Reranking"):
+            B = batch['batch_size']
+            K = batch['top_k']
+            BK = B * K
+
+            # GPU로 전송: [BK, N, D]
+            thermal_feat = batch['thermal_feat'].float().cuda()
+            rgb_feat = batch['rgb_feat'].float().cuda()
+
+            # ===== Bidirectional distance scoring (batched) =====
+            # stage2_forward_distance는 이미 bidirectional + batched
+            _, pred_scores = model.module.stage2_forward_distance(
+                thermal_feat, rgb_feat, distance_gt=None
+            )  # [BK]
+
+            # Reshape to [B, K]
+            pred_scores = pred_scores.view(B, K)
+
+            # Rerank (higher score = better)
+            rerank_indices = pred_scores.argsort(dim=1, descending=True)  # [B, K]
+
+            # 결과 저장
+            top_k_indices = batch['top_k_indices']  # [B, K] numpy
+            query_indices = batch['query_indices']
+
+            for i, query_idx in enumerate(query_indices):
+                reranked_order = rerank_indices[i].cpu().numpy()
+                reranked_top_k = top_k_indices[i][reranked_order]
+
+                # 전체 predictions 업데이트 (top-K만 rerank, 나머지 유지)
+                full_pred = prev_predictions[query_idx].copy()
+                full_pred[:reranking_top_k] = reranked_top_k
+                predictions_list.append(full_pred)
+
+                rerank_scores_dict[query_idx] = pred_scores[i, reranked_order].cpu().numpy().tolist()
+
+    predictions = np.array(predictions_list)
+    return predictions, rerank_scores_dict
+
+
 def visualize_distance_reranking(vis_data, save_dir, seq_name, num_samples=20):
     """
     Visualize distance reranking results to verify geometric matching quality.
@@ -1167,80 +1232,40 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 predictions = np.array(predictions_list)
 
             elif args.use_reranking == 'distance':
-                # Distance-based geometric matching reranking
-                logging.info("Using distance-based reranking (geometric matching)")
+                # Distance-based geometric matching reranking (DataLoader-based)
+                logging.info("Using distance-based reranking (DataLoader-based, batched)")
 
-                # Verify saved patch features exist
-                saved_files = os.listdir(NPY_ROOTPATH)
-                db_files = [f for f in saved_files if f.startswith(f"Db_{seq_name}_")
-                            and "sela" not in f and "penultimate" not in f]
-                query_files = [f for f in saved_files if f.startswith(f"Query_{seq_name}_")
-                               and "sela" not in f and "penultimate" not in f]
+                # ===== DataLoader 설정 =====
+                reranking_dataset = RerankingDataset(
+                    predictions=prev_predictions,
+                    seq_name=seq_name,
+                    npy_root_path=NPY_ROOTPATH,
+                    reranking_top_k=RERANKING_TOP_K,
+                    load_targets=False  # distance reranking은 target 불필요
+                )
 
-                if len(db_files) == 0 or len(query_files) == 0:
-                    logging.warning(f"NPY features not found in {NPY_ROOTPATH}. Run with feature extraction first.")
-                    logging.warning("Falling back to no reranking.")
-                    predictions = prev_predictions
-                else:
-                    predictions_list = []
-                    rerank_scores_dict = {}
-                    vis_data = []  # For visualization
+                reranking_batch_size = getattr(args, 'reranking_batch_size', 32)
+                reranking_num_workers = getattr(args, 'reranking_num_workers', 8)
 
-                    # Get positives for visualization
-                    positives_per_query_vis = eval_ds.get_positives()
+                reranking_dataloader = DataLoader(
+                    dataset=reranking_dataset,
+                    batch_size=reranking_batch_size,
+                    shuffle=False,
+                    num_workers=reranking_num_workers,
+                    collate_fn=reranking_collate_fn,
+                    pin_memory=True,
+                    prefetch_factor=2
+                )
 
-                    with torch.no_grad():
-                        for query_index, pred in enumerate(tqdm(prev_predictions, desc="Distance Reranking")):
-                            top_k_indices = pred[:RERANKING_TOP_K]
+                logging.info(f"Distance Reranking DataLoader: batch_size={reranking_batch_size}, num_workers={reranking_num_workers}")
 
-                            # Load query features using load_npy
-                            query_feat = load_npy(f"Query_{seq_name}_{query_index}")  # [256, D]
-                            query_feat = torch.from_numpy(query_feat).cuda().unsqueeze(0)  # [1, 256, D]
-
-                            # Load candidate features
-                            candidate_feats = []
-                            for db_idx in top_k_indices:
-                                db_feat = load_npy(f"Db_{seq_name}_{db_idx}")  # [256, D]
-                                candidate_feats.append(torch.from_numpy(db_feat))
-                            rgb_feats = torch.stack(candidate_feats).cuda()  # [K, 256, D]
-
-                            # Get distance-based matching scores
-                            pred_scores = model.module.stage2_inference_distance(
-                                query_feat,   # [1, 256, D]
-                                rgb_feats     # [K, 256, D]
-                            )
-
-                            # Rerank (higher score = closer = better match)
-                            scores_np = pred_scores.cpu().numpy()
-                            rerank_index = scores_np.argsort()[::-1]  # descending: higher score is better
-                            rerank_scores_dict[query_index] = scores_np[rerank_index].tolist()
-                            predictions_list.append(pred[rerank_index])
-
-                            # Collect visualization data
-                            query_utm = eval_ds.queries_utms[query_index]
-                            gt_distances = [np.linalg.norm(query_utm - eval_ds.database_utms[idx])
-                                            for idx in top_k_indices]
-                            positives = positives_per_query_vis[query_index]
-                            is_positive = [idx in positives for idx in top_k_indices]
-
-                            vis_data.append({
-                                'query_idx': query_index,
-                                'top_k_indices': top_k_indices.tolist(),
-                                'pred_scores': scores_np.tolist(),
-                                'gt_distances': gt_distances,
-                                'is_positive': is_positive,
-                                'reranked_indices': pred[rerank_index].tolist()
-                            })
-
-                    predictions = np.array(predictions_list)
-
-                    # Visualize distance reranking results
-                    if args.visualize_attention:
-                        visualize_distance_reranking(
-                            vis_data,
-                            save_dir=os.path.join(args.save_dir, 'distance_reranking_vis'),
-                            seq_name=seq_name
-                        )
+                # ===== Batched Distance Reranking 실행 =====
+                predictions, rerank_scores_dict = batched_distance_reranking(
+                    model=model,
+                    dataloader=reranking_dataloader,
+                    prev_predictions=prev_predictions,
+                    reranking_top_k=RERANKING_TOP_K
+                )
 
             del queries_features
             del database_features
