@@ -43,34 +43,43 @@ base_transform = v2.Compose([
 
 def collate_fn(batch):
     """Creates mini-batch tensors from the list of tuples (images,
-        triplets_local_indexes, triplets_global_indexes).
+        triplets_local_indexes, triplets_global_indexes, aligned_rgb, distances).
         triplets_local_indexes are the indexes referring to each triplet within images.
         triplets_global_indexes are the global indexes of each image.
     Args:
-        batch: list of tuple (images, triplets_local_indexes, triplets_global_indexes).
+        batch: list of tuple (images, triplets_local_indexes, triplets_global_indexes, aligned_rgb, distances).
             considering each query to have 10 negatives (negs_num_per_query=10):
             - images: torch tensor of shape (12, 3, h, w).
             - triplets_local_indexes: torch tensor of shape (10, 3).
             - triplets_global_indexes: torch tensor of shape (12).
+            - aligned_rgb: torch tensor or None.
+            - distances: torch tensor of shape (1 + negs_num,).
     Returns:
         images: torch tensor of shape (batch_size*12, 3, h, w).
         triplets_local_indexes: torch tensor of shape (batch_size*10, 3).
         triplets_global_indexes: torch tensor of shape (batch_size, 12).
-        # added
+        aligned_rgbs: torch tensor or None.
+        distances: torch tensor of shape (batch_size, 1 + negs_num).
     """
     images                  = torch.cat([e[0] for e in batch])
     triplets_local_indexes  = torch.cat([e[1][None] for e in batch])
     triplets_global_indexes = torch.cat([e[2][None] for e in batch])
     for i, (local_indexes, global_indexes) in enumerate(zip(triplets_local_indexes, triplets_global_indexes)):
-        local_indexes += len(global_indexes) * i 
-    
+        local_indexes += len(global_indexes) * i
+
     # aligned_rgb 처리
     if batch[0][3] is not None:
         aligned_rgbs = torch.stack([e[3] for e in batch], 0)
     else:
         aligned_rgbs = None
-         
-    return images, torch.cat(tuple(triplets_local_indexes)), triplets_global_indexes, aligned_rgbs
+
+    # distances 처리 (Stage 2 distance-based training)
+    if len(batch[0]) > 4 and batch[0][4] is not None:
+        distances = torch.stack([e[4] for e in batch], 0)  # [batch_size, 1+negs_num]
+    else:
+        distances = None
+
+    return images, torch.cat(tuple(triplets_local_indexes)), triplets_global_indexes, aligned_rgbs, distances
 
 
 class BaseSTheReODual(data.Dataset):
@@ -390,6 +399,8 @@ class TripletsSTheReODual(BaseSTheReODual):
         ]
         self.rgb_queries_paths = np.delete(self.rgb_queries_paths, queries_without_any_hard_positive)
         self.t_queries_paths = np.delete(self.t_queries_paths, queries_without_any_hard_positive)
+        # Also filter queries_utms to match filtered queries
+        self.queries_utms = np.delete(self.queries_utms, queries_without_any_hard_positive, axis=0)
 
         self.queries_num = len(self.rgb_queries_paths)
         self.use_align_rgb = use_align_rgb
@@ -421,12 +432,12 @@ class TripletsSTheReODual(BaseSTheReODual):
     def __getitem__(self, index):
         if self.is_inference:
             return super().__getitem__(index)
-        
+
         query_index, best_positive_index, neg_indexes = torch.split(
             self.triplets_global_indexes[index],
             (1, 1, self.negs_num_per_query)
         )
-        
+
         if self.use_align_rgb:
             query = self.transform(self.get_thermal_img(self.t_queries_paths[query_index]))
             # query = self.resized_transform(self.get_thermal_img(self.t_queries_paths[query_index]))
@@ -435,14 +446,31 @@ class TripletsSTheReODual(BaseSTheReODual):
             query = self.transform(self.get_thermal_img(self.t_queries_paths[query_index]))
             # query = self.resized_transform(self.get_thermal_img(self.t_queries_paths[query_index]))
             aligned_rgb = None
-        
+
         positive = self.transform(self.get_rgb_img(self.rgb_database_paths[best_positive_index]))
         negatives = [self.transform(self.get_rgb_img(self.rgb_database_paths[i])) for i in neg_indexes]
 
         images = torch.stack((query, positive, *negatives), 0)
         triplets_local_indexes = torch.tensor([[0, 1, neg_num + 2] for neg_num in range(len(neg_indexes))])
-        
-        return images, triplets_local_indexes, self.triplets_global_indexes[index], aligned_rgb
+
+        # Calculate distances for Stage 2 distance-based training
+        # Query UTM
+        query_utm = self.queries_utms[query_index.item()]  # [2] or [3]
+
+        # Positive distance
+        pos_utm = self.database_utms[best_positive_index.item()]
+        pos_distance = np.linalg.norm(query_utm - pos_utm)
+
+        # Negative distances
+        neg_distances = []
+        for neg_idx in neg_indexes:
+            neg_utm = self.database_utms[neg_idx.item()]
+            neg_distances.append(np.linalg.norm(query_utm - neg_utm))
+
+        # Stack distances: [pos_distance, neg1_distance, neg2_distance, ...]
+        distances = torch.tensor([pos_distance] + neg_distances, dtype=torch.float32)
+
+        return images, triplets_local_indexes, self.triplets_global_indexes[index], aligned_rgb, distances
 
     def __len__(self):
         if self.is_inference:

@@ -103,7 +103,7 @@ class Parser():
         self.parser.add_argument("--use_cls_for_vpr", action='store_true', default=False)
         self.parser.add_argument("--use_recon_loss", action='store_true', default=False)
         self.parser.add_argument("--use_reranking", type=str, default="none",
-                                 choices=['none', 'recon', 'r2former', 'selaVPR', 'reconSelaVPR', 'GeM_KL', 'reconDiffVPR', 'diffGeM', 'reconPairVPR', 'reconAttn'])
+                                 choices=['none', 'recon', 'r2former', 'selaVPR', 'reconSelaVPR', 'GeM_KL', 'reconDiffVPR', 'diffGeM', 'reconPairVPR', 'reconAttn', 'distance'])
         self.parser.add_argument("--features_dim", type=int, default=768)
         self.parser.add_argument("--selaVPR_rerank_score_type", type=str, default="none", choices=['none', 'quantile_attn', 'mul_cossim'])
         self.parser.add_argument("--visualize_attention", action='store_true', default=False, help="Visualize CLS and GeM attention maps during inference")
@@ -128,7 +128,14 @@ class Parser():
                                  help="Window size for Swin V2 windowed self-attention")
         self.parser.add_argument("--drop_path_rate", type=float, default=0.1,
                                  help="Stochastic depth rate for Swin decoder blocks")
-        
+
+        # Stage 2: Distance-based geometric matching
+        self.parser.add_argument("--use_distance_loss", action='store_true', default=False,
+                                 help="Use distance-based loss for Stage 2 geometric matching training")
+        self.parser.add_argument("--distance_tau", type=float, default=10.0,
+                                 help="Temperature for distance->score conversion (default: 10m)")
+        self.parser.add_argument("--train_with_negatives", action='store_true', default=False,
+                                 help="Include negative pairs in distance-based training")
 
 
     def parse_arguments(self):

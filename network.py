@@ -463,6 +463,9 @@ class CrossModalVPR_Net(nn.Module):
             loss_type=self.recon_loss_type
         )
 
+        # Stage 2: Distance prediction modules
+        self._set_distance_prediction_modules()
+
         # 2. Aggregation Layer (각각 따로 두는 것을 추천)
         self.rgb_aggregation = nn.Sequential(
             L2Norm(), 
@@ -564,7 +567,36 @@ class CrossModalVPR_Net(nn.Module):
         nn.init.zeros_(self.recursive_rgb_head[0].bias)
         nn.init.normal_(self.recursive_rgb_head[2].weight, std=0.02)
         nn.init.zeros_(self.recursive_rgb_head[2].bias)
-        
+
+    def _set_distance_prediction_modules(self):
+        """
+        Stage 2: Distance prediction modules for geometric matching
+        - decoder_cls_token: CLS token prepended to thermal features
+        - decoder_pos_embed_with_cls: positional embedding for 257 tokens (1 CLS + 256 patches)
+        - distance_head: MLP head to predict matching score from CLS output
+        """
+        # CLS token for distance prediction (different from dino_dec_cls_token)
+        self.decoder_cls_token = nn.Parameter(torch.zeros(1, 1, self.decoder_dim))
+        nn.init.trunc_normal_(self.decoder_cls_token, std=0.02)
+
+        # Positional embedding including CLS position (257 = 1 + 256 patches)
+        self.decoder_pos_embed_with_cls = nn.Parameter(
+            torch.zeros(1, self.patch_count + 1, self.decoder_dim)
+        )
+        nn.init.trunc_normal_(self.decoder_pos_embed_with_cls, std=0.02)
+
+        # Distance prediction head: CLS output -> matching score (0~1)
+        self.distance_head = nn.Sequential(
+            nn.Linear(self.decoder_dim, self.decoder_dim // 2),
+            nn.GELU(),
+            nn.Linear(self.decoder_dim // 2, 1)
+        )
+        # Initialize weights
+        nn.init.normal_(self.distance_head[0].weight, std=0.02)
+        nn.init.zeros_(self.distance_head[0].bias)
+        nn.init.normal_(self.distance_head[2].weight, std=0.02)
+        nn.init.zeros_(self.distance_head[2].bias)
+
     def patchify(self, imgs):
         """
         imgs: (B, 3, H, W)
@@ -893,6 +925,91 @@ class CrossModalVPR_Net(nn.Module):
         total_recon_loss = (recon_loss_thermal + recon_loss_rgb) / 2.0
 
         return total_recon_loss, recon_loss_thermal, recon_loss_rgb
+
+    def distance_to_score(self, distance, tau=20.0):
+        """
+        Convert distance (meters) to similarity score (0~1)
+        Using exponential decay: closer = higher score
+        - 0m → 1.0
+        - 20m → 0.37
+        - 70m → 0.03
+        - 100m → 0.007
+        """
+        return torch.exp(-distance / tau)
+
+    def stage2_forward_distance(self, thermal_feat, rgb_feat, distance_gt=None, tau=10.0):
+        """
+        Stage 2: Distance-based geometric matching using decoder CLS token.
+
+        The decoder processes thermal features with RGB as cross-attention reference,
+        and the CLS token output is used to predict a matching score.
+
+        Args:
+            thermal_feat: [B, 256, D] - query (thermal) encoder features
+            rgb_feat: [B, 256, D] - candidates (RGB) encoder features
+            distance_gt: [B] - GT distance in meters (None for inference)
+            tau: temperature for distance→score conversion (default: 20m)
+
+        Returns:
+            loss: BCE loss if distance_gt is provided, else None
+            pred_score: [B] predicted matching scores (0~1, higher = closer)
+        """
+        B = thermal_feat.shape[0]
+        device = thermal_feat.device
+
+        # 1. Prepend CLS token to thermal features
+        cls_tokens = self.decoder_cls_token.expand(B, -1, -1)  # [B, 1, D]
+        thermal_with_cls = torch.cat([cls_tokens, thermal_feat], dim=1)  # [B, 257, D]
+
+        # 2. Add positional embedding
+        thermal_with_cls = thermal_with_cls + self.decoder_pos_embed_with_cls  # [B, 257, D]
+        rgb_ref = rgb_feat + self.decoder_pos_embed  # [B, 256, D]
+
+        # 3. Decoder forward (thermal attends to RGB)
+        x = thermal_with_cls
+        for blk in self.decoder_blocks:
+            x = blk(x, rgb_ref)
+        x = self.decoder_norm(x)
+
+        # 4. Extract CLS token output and predict score
+        cls_output = x[:, 0, :]  # [B, D]
+        pred_score = torch.sigmoid(self.distance_head(cls_output).squeeze(-1))  # [B], 0~1
+
+        # 5. Compute loss if ground truth is provided
+        if distance_gt is not None:
+            # Convert distance to target score (exponential decay)
+            # tau=10: 5m→0.61, 10m→0.37, 100m→~0
+            target_score = self.distance_to_score(distance_gt, tau=tau)  # [B], 0~1
+
+            # BCE loss
+            loss = F.binary_cross_entropy(pred_score, target_score)
+            return loss, pred_score
+
+        return None, pred_score
+
+    @torch.no_grad()
+    def stage2_inference_distance(self, thermal_feat, rgb_feats):
+        """
+        Stage 2 inference: compute matching scores for reranking.
+
+        Args:
+            thermal_feat: [1, 256, D] single thermal query features
+            rgb_feats: [K, 256, D] top-K RGB candidate features
+
+        Returns:
+            pred_scores: [K] predicted matching scores (higher = better match)
+        """
+        K = rgb_feats.shape[0]
+
+        # Expand query to match candidates
+        thermal_feat_expanded = thermal_feat.expand(K, -1, -1)  # [K, 256, D]
+
+        # Use forward function without GT
+        _, pred_scores = self.stage2_forward_distance(
+            thermal_feat_expanded, rgb_feats, distance_gt=None
+        )
+
+        return pred_scores  # [K]
 
     @torch.no_grad()
     def stage2_inference_recon(self, query_img, candidate_imgs):

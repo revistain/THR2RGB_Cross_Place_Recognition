@@ -8,13 +8,13 @@ python3 fast_inference.py \
     --test_seq Urban Residential \
     --cuda_device $CUDA_VISIBLE_DEVICES \
     --foundation_model_path /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/backbone/dinov2/pretrained/dinov2_vits14_pretrain.pth \
-    --resume "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/biRecon(w10,l1,dep8,r0.6)-attnMask(stage1, 1e-4)/260217_062526/last_model.pth" \
+    --resume "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/twoStage-CroCo-ViTs-numBlock0-distanceDecoder-1e-4(neg,tau10)/260219_113028/best_model.pth" \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
     --soft_positives_dist_threshold 10 \
     --hard_positives_dist_threshold 10 \
-    --comment "224x224-Croco-ViTs-numBlock0-inference-pairVPR" \
+    --comment "2stage_distance_neg_tau10_1e-4" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \

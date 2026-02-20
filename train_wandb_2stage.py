@@ -169,8 +169,18 @@ if __name__ == "__main__":
             model = model.train()
             logging.debug(f"Start loading {len(triplets_ds)} triplets as {len(triplets_dl)} batches")
 
-            print("- Stage2 Training (Attention-based Recon)...")
-            for images, triplets_local_indexes, _, aligned_rgbs in tqdm(triplets_dl, ncols=100, desc=f"GPU{args.cuda_device}/Epoch {epoch_num:02d}"):
+            if args.use_distance_loss:
+                print("- Stage2 Training (Distance-based Geometric Matching)...")
+            else:
+                print("- Stage2 Training (Attention-based Recon)...")
+
+            for batch_data in tqdm(triplets_dl, ncols=100, desc=f"GPU{args.cuda_device}/Epoch {epoch_num:02d}"):
+                # Unpack batch data (with or without distances)
+                if len(batch_data) == 5:
+                    images, triplets_local_indexes, _, aligned_rgbs, distances = batch_data
+                else:
+                    images, triplets_local_indexes, _, aligned_rgbs = batch_data
+                    distances = None
 
                 # Extract thermal queries and positive RGBs from batch
                 # images layout: [query, pos, neg1, neg2, ...] * batch_size
@@ -187,25 +197,86 @@ if __name__ == "__main__":
 
                 optimizer.zero_grad()
 
-                # Stage2 forward: attention-based masking + reconstruction loss
-                total_recon_loss, recon_loss_thermal, recon_loss_rgb = model.module.stage2_forward_recon(
-                    thermal_imgs=thermal_imgs,
-                    rgb_imgs=pos_rgb_imgs,
-                )
+                if args.use_distance_loss:
+                    # Stage2 forward: Distance-based geometric matching
+                    # Get encoder features (frozen backbone)
+                    with torch.no_grad():
+                        thermal_feat = model.module.shared_backbone(thermal_imgs)["x_norm_patchtokens"]  # [B, 256, D]
+                        pos_rgb_feat = model.module.shared_backbone(pos_rgb_imgs)["x_norm_patchtokens"]  # [B, 256, D]
 
-                # Backward
-                total_recon_loss.backward()
-                optimizer.step()
+                    # Positive pair distances
+                    pos_distances = distances[:, 0].to(args.device) if distances is not None else torch.zeros(batch_size).to(args.device)
 
-                batch_loss = total_recon_loss.item()
-                epoch_losses = np.append(epoch_losses, batch_loss)
+                    # Forward distance prediction for positive pairs
+                    distance_loss, pred_score = model.module.stage2_forward_distance(
+                        thermal_feat=thermal_feat,
+                        rgb_feat=pos_rgb_feat,
+                        distance_gt=pos_distances,
+                        tau=args.distance_tau
+                    )
 
-                # wandb logging
-                wandb.log({
-                    "train/total_recon_loss": total_recon_loss.item(),
-                    "train/recon_loss_thermal": recon_loss_thermal.item(),
-                    "train/recon_loss_rgb": recon_loss_rgb.item(),
-                }, step=global_step)
+                    total_loss = distance_loss
+
+                    # Optionally train with negative pairs
+                    if args.train_with_negatives and distances is not None:
+                        neg_loss_list = []
+                        for neg_idx in range(args.negs_num_per_query):
+                            neg_indices = [i * size_of_bundle + 2 + neg_idx for i in range(batch_size)]
+                            neg_rgb_imgs = images[neg_indices].to(args.device)
+                            neg_distances = distances[:, 1 + neg_idx].to(args.device)
+
+                            with torch.no_grad():
+                                neg_rgb_feat = model.module.shared_backbone(neg_rgb_imgs)["x_norm_patchtokens"]
+
+                            neg_loss, _ = model.module.stage2_forward_distance(
+                                thermal_feat=thermal_feat,
+                                rgb_feat=neg_rgb_feat,
+                                distance_gt=neg_distances,
+                                tau=args.distance_tau
+                            )
+                            neg_loss_list.append(neg_loss)
+
+                        # Average negative loss
+                        neg_loss_avg = sum(neg_loss_list) / len(neg_loss_list)
+                        total_loss = (distance_loss + neg_loss_avg) / 2.0
+
+                        wandb.log({
+                            "train/pos_distance_loss": distance_loss.item(),
+                            "train/neg_distance_loss": neg_loss_avg.item(),
+                            "train/total_distance_loss": total_loss.item(),
+                        }, step=global_step)
+                    else:
+                        wandb.log({
+                            "train/distance_loss": distance_loss.item(),
+                        }, step=global_step)
+
+                    # Backward
+                    total_loss.backward()
+                    optimizer.step()
+
+                    batch_loss = total_loss.item()
+                    epoch_losses = np.append(epoch_losses, batch_loss)
+
+                else:
+                    # Stage2 forward: attention-based masking + reconstruction loss
+                    total_recon_loss, recon_loss_thermal, recon_loss_rgb = model.module.stage2_forward_recon(
+                        thermal_imgs=thermal_imgs,
+                        rgb_imgs=pos_rgb_imgs,
+                    )
+
+                    # Backward
+                    total_recon_loss.backward()
+                    optimizer.step()
+
+                    batch_loss = total_recon_loss.item()
+                    epoch_losses = np.append(epoch_losses, batch_loss)
+
+                    # wandb logging
+                    wandb.log({
+                        "train/total_recon_loss": total_recon_loss.item(),
+                        "train/recon_loss_thermal": recon_loss_thermal.item(),
+                        "train/recon_loss_rgb": recon_loss_rgb.item(),
+                    }, step=global_step)
 
                 global_step += 1
 

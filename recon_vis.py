@@ -259,7 +259,7 @@ def visualize_during_training(args, model, triplets_dl, device, epoch, save_dir=
     model.eval()
 
     # 첫 번째 batch 가져오기
-    images, _, _, aligned_rgbs = next(iter(triplets_dl))
+    images, _, _, aligned_rgbs, _ = next(iter(triplets_dl))
     # Thermal query 1개만 추출 (첫 번째 thermal)
     thermal_img = images[0:1].to(device)  # [1, 3, 224, 224]
     paired_rgb = aligned_rgbs[0:1].to(device)  # [1, 3, 224, 224]

@@ -43,6 +43,131 @@ def save_npy(data, path):
 def load_npy(path):
     return np.load(os.path.join(NPY_ROOTPATH, path)+".npy")
 
+def visualize_distance_reranking(vis_data, save_dir, seq_name, num_samples=20):
+    """
+    Visualize distance reranking results to verify geometric matching quality.
+
+    Creates:
+    1. Scatter plot: Predicted Score vs GT Distance (all candidates)
+    2. Per-query analysis: Top-K candidates with scores and distances
+    3. Success/Failure case comparison
+
+    Args:
+        vis_data: list of dicts with 'pred_scores', 'gt_distances', 'is_positive'
+        save_dir: directory to save visualizations
+        seq_name: sequence name for labeling
+        num_samples: number of sample queries to visualize in detail
+    """
+    import matplotlib.pyplot as plt
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Collect all data points
+    all_scores = []
+    all_distances = []
+    all_is_positive = []
+
+    for item in vis_data:
+        all_scores.extend(item['pred_scores'])
+        all_distances.extend(item['gt_distances'])
+        all_is_positive.extend(item['is_positive'])
+
+    all_scores = np.array(all_scores)
+    all_distances = np.array(all_distances)
+    all_is_positive = np.array(all_is_positive)
+
+    # 1. Scatter plot: Predicted Score vs GT Distance
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # All candidates
+    ax = axes[0]
+    ax.scatter(all_distances[~all_is_positive], all_scores[~all_is_positive],
+               alpha=0.3, s=10, c='blue', label='Negative')
+    ax.scatter(all_distances[all_is_positive], all_scores[all_is_positive],
+               alpha=0.8, s=30, c='red', marker='*', label='Positive')
+    ax.set_xlabel('GT Distance (m)')
+    ax.set_ylabel('Predicted Score')
+    ax.set_title(f'{seq_name}: Pred Score vs GT Distance')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # Zoomed view (0-50m)
+    ax = axes[1]
+    mask = all_distances < 50
+    ax.scatter(all_distances[mask & ~all_is_positive], all_scores[mask & ~all_is_positive],
+               alpha=0.3, s=10, c='blue', label='Negative')
+    ax.scatter(all_distances[mask & all_is_positive], all_scores[mask & all_is_positive],
+               alpha=0.8, s=30, c='red', marker='*', label='Positive')
+    ax.set_xlabel('GT Distance (m)')
+    ax.set_ylabel('Predicted Score')
+    ax.set_title(f'{seq_name}: Zoomed (0-50m)')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, f'{seq_name}_score_vs_distance.png'), dpi=150)
+    plt.close()
+
+    # 2. Correlation analysis
+    correlation = np.corrcoef(all_scores, all_distances)[0, 1]
+    logging.info(f"[{seq_name}] Score-Distance Correlation: {correlation:.4f} (should be negative)")
+
+    # 3. Per-query detailed visualization (sample)
+    fig, axes = plt.subplots(4, 5, figsize=(20, 16))
+    axes = axes.flatten()
+
+    sample_indices = np.random.choice(len(vis_data), min(num_samples, len(vis_data)), replace=False)
+
+    for i, idx in enumerate(sample_indices):
+        item = vis_data[idx]
+        ax = axes[i]
+
+        scores = np.array(item['pred_scores'])
+        distances = np.array(item['gt_distances'])
+        is_pos = np.array(item['is_positive'])
+
+        # Plot candidates
+        ax.scatter(distances[~is_pos], scores[~is_pos], c='blue', s=20, alpha=0.6, label='Neg')
+        ax.scatter(distances[is_pos], scores[is_pos], c='red', s=50, marker='*', label='Pos')
+
+        # Mark top-1 prediction
+        top1_idx = scores.argmax()
+        ax.scatter(distances[top1_idx], scores[top1_idx], c='green', s=100, marker='o',
+                   edgecolors='black', linewidths=2, label='Top1', zorder=5)
+
+        ax.set_xlabel('Distance (m)')
+        ax.set_ylabel('Score')
+        ax.set_title(f'Query {item["query_idx"]}')
+        ax.grid(True, alpha=0.3)
+
+        # Check if top1 is positive
+        if is_pos[top1_idx]:
+            ax.set_facecolor('#e6ffe6')  # Light green for success
+
+    axes[0].legend(loc='upper right')
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, f'{seq_name}_per_query_samples.png'), dpi=150)
+    plt.close()
+
+    # 4. Success vs Failure analysis
+    success_queries = [item for item in vis_data
+                       if np.array(item['is_positive'])[np.array(item['pred_scores']).argmax()]]
+    failure_queries = [item for item in vis_data
+                       if not np.array(item['is_positive'])[np.array(item['pred_scores']).argmax()]]
+
+    logging.info(f"[{seq_name}] R@1 Success: {len(success_queries)}/{len(vis_data)} = {len(success_queries)/len(vis_data)*100:.1f}%")
+
+    # Save statistics
+    stats = {
+        'seq_name': seq_name,
+        'correlation': correlation,
+        'r1_success': len(success_queries),
+        'r1_total': len(vis_data),
+        'r1_rate': len(success_queries) / len(vis_data) * 100
+    }
+    np.save(os.path.join(save_dir, f'{seq_name}_stats.npy'), stats)
+
+    logging.info(f"Distance reranking visualization saved to: {save_dir}")
+
 def visualize_top5_predictions(args, eval_ds, predictions, distances, positives_per_query, num_samples=10):
     """
     Query와 top-5 retrieved 이미지를 시각화
@@ -991,6 +1116,82 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                         predictions_list.append(pred[rerank_index])
 
                 predictions = np.array(predictions_list)
+
+            elif args.use_reranking == 'distance':
+                # Distance-based geometric matching reranking
+                logging.info("Using distance-based reranking (geometric matching)")
+
+                # Verify saved patch features exist
+                saved_files = os.listdir(NPY_ROOTPATH)
+                db_files = [f for f in saved_files if f.startswith(f"Db_{seq_name}_")
+                            and "sela" not in f and "penultimate" not in f]
+                query_files = [f for f in saved_files if f.startswith(f"Query_{seq_name}_")
+                               and "sela" not in f and "penultimate" not in f]
+
+                if len(db_files) == 0 or len(query_files) == 0:
+                    logging.warning(f"NPY features not found in {NPY_ROOTPATH}. Run with feature extraction first.")
+                    logging.warning("Falling back to no reranking.")
+                    predictions = prev_predictions
+                else:
+                    predictions_list = []
+                    rerank_scores_dict = {}
+                    vis_data = []  # For visualization
+
+                    # Get positives for visualization
+                    positives_per_query_vis = eval_ds.get_positives()
+
+                    with torch.no_grad():
+                        for query_index, pred in enumerate(tqdm(prev_predictions, desc="Distance Reranking")):
+                            top_k_indices = pred[:RERANKING_TOP_K]
+
+                            # Load query features using load_npy
+                            query_feat = load_npy(f"Query_{seq_name}_{query_index}")  # [256, D]
+                            query_feat = torch.from_numpy(query_feat).cuda().unsqueeze(0)  # [1, 256, D]
+
+                            # Load candidate features
+                            candidate_feats = []
+                            for db_idx in top_k_indices:
+                                db_feat = load_npy(f"Db_{seq_name}_{db_idx}")  # [256, D]
+                                candidate_feats.append(torch.from_numpy(db_feat))
+                            rgb_feats = torch.stack(candidate_feats).cuda()  # [K, 256, D]
+
+                            # Get distance-based matching scores
+                            pred_scores = model.module.stage2_inference_distance(
+                                query_feat,   # [1, 256, D]
+                                rgb_feats     # [K, 256, D]
+                            )
+
+                            # Rerank (higher score = closer = better match)
+                            scores_np = pred_scores.cpu().numpy()
+                            rerank_index = scores_np.argsort()[::-1]  # descending: higher score is better
+                            rerank_scores_dict[query_index] = scores_np[rerank_index].tolist()
+                            predictions_list.append(pred[rerank_index])
+
+                            # Collect visualization data
+                            query_utm = eval_ds.queries_utms[query_index]
+                            gt_distances = [np.linalg.norm(query_utm - eval_ds.database_utms[idx])
+                                            for idx in top_k_indices]
+                            positives = positives_per_query_vis[query_index]
+                            is_positive = [idx in positives for idx in top_k_indices]
+
+                            vis_data.append({
+                                'query_idx': query_index,
+                                'top_k_indices': top_k_indices.tolist(),
+                                'pred_scores': scores_np.tolist(),
+                                'gt_distances': gt_distances,
+                                'is_positive': is_positive,
+                                'reranked_indices': pred[rerank_index].tolist()
+                            })
+
+                    predictions = np.array(predictions_list)
+
+                    # Visualize distance reranking results
+                    if args.visualize_attention:
+                        visualize_distance_reranking(
+                            vis_data,
+                            save_dir=os.path.join(args.save_dir, 'distance_reranking_vis'),
+                            seq_name=seq_name
+                        )
 
             del queries_features
             del database_features
