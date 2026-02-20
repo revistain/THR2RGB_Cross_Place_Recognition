@@ -156,13 +156,16 @@ if __name__ == "__main__":
             {'params': train_params, 'lr': args.lr, 'momentum': 0.9, 'weight_decay': 0.001},
         ])
 
-    # [MODIFIED] Cosine Annealing with Warmup Scheduler
-    # - Original: Fixed LR (no scheduler)
-    warmup_epochs = 5
-    warmup_scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=warmup_epochs)
-    cosine_scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs_num - warmup_epochs, eta_min=1e-7)
-    scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_epochs])
-    # [END MODIFIED]
+    # Cosine Annealing with Warmup Scheduler
+    if args.use_warmup:
+        warmup_epochs = args.warmup_epochs
+        warmup_scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=warmup_epochs)
+        cosine_scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs_num - warmup_epochs, eta_min=1e-7)
+        scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_epochs])
+        logging.info(f"Using warmup scheduler: {warmup_epochs} warmup epochs + cosine annealing")
+    else:
+        scheduler = None
+        logging.info("Warmup scheduler disabled")
 
     thermal_flag = torch.zeros(1, dtype=torch.long)
     rgb_flags = torch.ones(1 + args.negs_num_per_query, dtype=torch.long)
@@ -379,11 +382,11 @@ if __name__ == "__main__":
         wandb.log({"train/epoch_avg_loss": epoch_losses.mean(), "epoch": epoch_num}, step=global_step)
         logging.info(f"epoch {epoch_num:02d} time: {str(datetime.now() - epoch_start_time)[:-7]}, ")
 
-        # [MODIFIED] Update learning rate scheduler
-        # - Original: (none)
-        scheduler.step()
-        current_lr = scheduler.get_last_lr()[0]
-        wandb.log({"train/learning_rate": current_lr}, step=global_step)
+        # Update learning rate scheduler
+        if scheduler is not None:
+            scheduler.step()
+            current_lr = scheduler.get_last_lr()[0]
+            wandb.log({"train/learning_rate": current_lr}, step=global_step)
         logging.info(f"Learning rate: {current_lr:.2e}")
         # [END MODIFIED]
 

@@ -21,7 +21,7 @@ python3 fast_inference.py \
     --croco_mask_ratio 0.8 \
     --recon_weight 10 \
     --use_recon_loss \
-    --use_reranking 'recon' \
+    --use_reranking 'distance' \
     --recon_loss_type 'l1' \
     --masking_method 'random' \
     --num_decoder_depth 8 \

@@ -20,7 +20,15 @@ class Parser():
         self.parser.add_argument("--train_batch_size", type=int, default=4,
                             help="Batch size for train")
         self.parser.add_argument("--patience", type=int, default=5)
-        
+
+        # Warmup scheduler settings
+        self.parser.add_argument("--use_warmup", action="store_true", default=True,
+                            help="Use warmup scheduler with cosine annealing")
+        self.parser.add_argument("--no_warmup", action="store_false", dest="use_warmup",
+                            help="Disable warmup scheduler")
+        self.parser.add_argument("--warmup_epochs", type=int, default=5,
+                            help="Number of warmup epochs")
+
         self.parser.add_argument("--soft_positives_dist_threshold", type=int, default=10, help="_")
         self.parser.add_argument("--hard_positives_dist_threshold", type=int, default=10, help="_")
 
@@ -35,6 +43,10 @@ class Parser():
         ### Inference settings
         self.parser.add_argument("--infer_batch_size", type=int, default=64,
                             help="Batch size for inference (caching and testing)")
+        self.parser.add_argument("--reranking_batch_size", type=int, default=32,
+                            help="Batch size for reranking (number of queries per batch)")
+        self.parser.add_argument("--reranking_num_workers", type=int, default=8,
+                            help="Number of workers for reranking DataLoader")
         self.parser.add_argument('--test_method', type=str, default="hard_resize",
                             choices=["hard_resize", "single_query", "central_crop", "five_crops", "nearest_crop", "maj_voting"],
                             help="This includes pre/post-processing methods and prediction refinement")

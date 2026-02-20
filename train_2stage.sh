@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=4
+CUDA_VISIBLE_DEVICES=6
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
@@ -10,13 +10,13 @@ python3 train_wandb_2stage.py \
     --test_seq Urban Residential \
     --cuda_device $CUDA_VISIBLE_DEVICES \
     --foundation_model_path /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/backbone/dinov2/pretrained/dinov2_vits14_pretrain.pth \
-    --resume "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/biRecon(w10,l1,dep8,r0.8)-1e4-posAfter30/260215_164530/last_model.pth" \
+    --resume "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/biRecon(w10,l1,dep8,r0.6)-attnMask(stage1, 1e-4)/260217_062526/last_model.pth" \
     --queries_per_epoch 2000 \
     --soft_positives_dist_threshold 10 \
     --hard_positives_dist_threshold 10 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
-    --comment "twoStage-CroCo-ViTs-numBlock0-distanceDecoder-1e-4(neg,tau20)(pth_posAfter30)" \
+    --comment "twoStage-CroCo-ViTs-numBlock0-distanceDecoder-1e-4(neg,tau10)_warmup" \
     --margin 0.1 \
     --epochs_num 200 \
     --negs_num_per_query 10 \
@@ -29,7 +29,8 @@ python3 train_wandb_2stage.py \
     --use_reranking 'distance' \
     --use_distance_loss \
     --train_with_negatives \
-    --distance_tau 20.0
+    --use_warmup \
+    --distance_tau 10.0
     # --resume "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/biRecon(w10,l1,dep8,r0.8)-1e4-posAfter30/260215_164530/last_model.pth"
     # --resume "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/biRecon(w10,l1,dep8,r0.6)-attnMask(stage1, 1e-4)/260217_062526/last_model.pth" \
     # --use_reranking 'diffGeM' \

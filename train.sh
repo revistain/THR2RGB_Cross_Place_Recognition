@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=3
+CUDA_VISIBLE_DEVICES=7
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
@@ -16,15 +16,16 @@ python3 train_wandb.py \
     --hard_positives_dist_threshold 10 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
-    --comment "biRecon(w10,l1,dep8,r0.6)-attnMask(stage1, 1e-4)" \
+    --comment "biRecon(w10,l1,dep4,r0.8)-(stage1, 1e-4)" \
     --margin 0.1 \
     --epochs_num 100 \
     --negs_num_per_query 10 \
     --croco_mask_ratio 0.8 \
     --recon_weight 10 \
     --use_recon_loss \
-    --num_decoder_depth 8 \
+    --num_decoder_depth 4 \
     --recon_loss_type 'l1' \
+    --use_warmup \
     --masking_method 'random'
 
     # --masking_method 'GeM'
