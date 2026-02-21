@@ -161,6 +161,14 @@ class Parser():
         self.parser.add_argument("--inference_cls_only", action='store_true', default=False,
                                  help="Use only CLS score for inference (ignore Sinkhorn aux score)")
 
+        # Distance-Aware Margin Loss
+        self.parser.add_argument("--use_margin_loss", action='store_true', default=False,
+                                 help="Use Distance-Aware Margin Loss for relative ranking")
+        self.parser.add_argument("--margin_loss_weight", type=float, default=0.5,
+                                 help="Weight for margin loss (default: 0.5)")
+        self.parser.add_argument("--min_margin", type=float, default=0.1,
+                                 help="Minimum margin to prevent gradient vanishing (default: 0.1)")
+
 
     def parse_arguments(self):
         args = self.parser.parse_args()

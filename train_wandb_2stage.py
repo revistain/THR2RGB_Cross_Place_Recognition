@@ -260,6 +260,9 @@ if __name__ == "__main__":
                     if args.train_with_negatives and distances is not None:
                         neg_loss_list = []
                         neg_aux_score_list = []
+                        neg_scores_list = []  # For margin loss
+                        neg_target_scores_list = []  # For margin loss
+
                         for neg_idx in range(args.negs_num_per_query):
                             neg_indices = [i * size_of_bundle + 2 + neg_idx for i in range(batch_size)]
                             neg_rgb_imgs = images[neg_indices].to(args.device)
@@ -269,7 +272,7 @@ if __name__ == "__main__":
                                 neg_rgb_feat = model.module.shared_backbone(neg_rgb_imgs)["x_norm_patchtokens"]
 
                             if args.use_distance_loss_v2:
-                                neg_loss, _, neg_aux_score, _ = model.module.stage2_forward_distance_v2(
+                                neg_loss, neg_main_score, neg_aux_score, _ = model.module.stage2_forward_distance_v2(
                                     thermal_feat=thermal_feat,
                                     rgb_feat=neg_rgb_feat,
                                     distance_gt=neg_distances,
@@ -278,34 +281,63 @@ if __name__ == "__main__":
                                     sinkhorn_iters=args.sinkhorn_iters
                                 )
                                 neg_aux_score_list.append(neg_aux_score.mean().item())
+                                neg_scores_list.append(neg_main_score)
                             else:
-                                neg_loss, _ = model.module.stage2_forward_distance(
+                                neg_loss, neg_pred_score = model.module.stage2_forward_distance(
                                     thermal_feat=thermal_feat,
                                     rgb_feat=neg_rgb_feat,
                                     distance_gt=neg_distances,
                                     tau=args.distance_tau
                                 )
-                            neg_loss_list.append(neg_loss)
+                                neg_scores_list.append(neg_pred_score)
 
-                        # Average negative loss
+                            neg_loss_list.append(neg_loss)
+                            # Store target scores for margin loss
+                            neg_target_scores_list.append(model.module.distance_to_score(neg_distances, tau=args.distance_tau))
+
+                        # Average negative loss (regression)
                         neg_loss_avg = sum(neg_loss_list) / len(neg_loss_list)
                         total_loss = (distance_loss + neg_loss_avg) / 2.0
 
+                        # Distance-Aware Margin Loss
+                        margin_loss = torch.tensor(0.0, device=args.device)
+                        if args.use_margin_loss:
+                            pos_target_score = model.module.distance_to_score(pos_distances, tau=args.distance_tau)
+
+                            margin_losses = []
+                            for neg_score, neg_target_score in zip(neg_scores_list, neg_target_scores_list):
+                                # Dynamic margin: difference between target scores
+                                margin = (pos_target_score - neg_target_score).clamp(min=args.min_margin)
+                                # Hinge loss: S_neg - S_pos + margin should be <= 0
+                                m_loss = torch.relu(neg_score - pred_score + margin).mean()
+                                margin_losses.append(m_loss)
+
+                            margin_loss = sum(margin_losses) / len(margin_losses)
+                            total_loss = total_loss + args.margin_loss_weight * margin_loss
+
                         if args.use_distance_loss_v2:
                             neg_aux_score_avg = sum(neg_aux_score_list) / len(neg_aux_score_list)
-                            wandb.log({
+                            log_dict = {
                                 "train/pos_distance_loss": distance_loss.item(),
                                 "train/neg_distance_loss": neg_loss_avg.item(),
                                 "train/total_distance_loss": total_loss.item(),
                                 "train/pos_aux_score": aux_score.mean().item(),  # should → 1
                                 "train/neg_aux_score": neg_aux_score_avg,         # should → 0
-                            }, step=global_step)
+                            }
                         else:
-                            wandb.log({
+                            log_dict = {
                                 "train/pos_distance_loss": distance_loss.item(),
                                 "train/neg_distance_loss": neg_loss_avg.item(),
                                 "train/total_distance_loss": total_loss.item(),
-                            }, step=global_step)
+                            }
+
+                        # Log margin loss if enabled
+                        if args.use_margin_loss:
+                            log_dict["train/margin_loss"] = margin_loss.item()
+                            log_dict["train/pos_score_mean"] = pred_score.mean().item()
+                            log_dict["train/neg_score_mean"] = torch.stack(neg_scores_list).mean().item()
+
+                        wandb.log(log_dict, step=global_step)
                     else:
                         log_dict = {"train/distance_loss": distance_loss.item()}
                         if args.use_distance_loss_v2:
