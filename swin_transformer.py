@@ -345,20 +345,21 @@ class CroCoDecoderBlock(nn.Module):
             return_attention: bool - attention map 반환 여부
         Returns:
             x: [B, N, D] - updated decoder features
+            cross_attn_weights: [B, N, M] - cross attention weights (if return_attention=True)
         """
         # Step 1: Self-Attention
         x_norm = self.norm1(x)
         if return_attention:
             self_out, self_attn_weights = self.self_attn(
-                x_norm, x_norm, x_norm, 
-                need_weights=True, 
+                x_norm, x_norm, x_norm,
+                need_weights=True,
                 average_attn_weights=True  # [B, N, N]
             )
             self.self_attn_weights = self_attn_weights
         else:
             self_out = self.self_attn(x_norm, x_norm, x_norm)[0]
         x = x + self_out
-        
+
         # Step 2: Cross-Attention
         x_norm = self.norm2(x)
         encoder_norm = self.norm_cross(y)
@@ -378,10 +379,12 @@ class CroCoDecoderBlock(nn.Module):
                 value=encoder_norm
             )[0]
         x = x + cross_out
-        
+
         # Step 3: MLP
         x = x + self.mlp(self.norm3(x))
 
+        if return_attention:
+            return x, self.cross_attn_weights
         return x
 
 

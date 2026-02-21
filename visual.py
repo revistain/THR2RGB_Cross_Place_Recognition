@@ -1108,3 +1108,175 @@ def visualize_mnn_matches(
 
     model.train()
     print(f"MNN visualization complete for epoch {epoch}")
+
+
+def visualize_sinkhorn_assignment(
+    thermal_img,
+    rgb_img,
+    P,
+    save_path,
+    top_k=20,
+    grid_size=16,
+    patch_size=14,
+    title="Sinkhorn Assignment",
+    gt_distance=None,
+    pred_score=None
+):
+    """
+    Sinkhorn assignment matrix를 시각화합니다.
+
+    Args:
+        thermal_img: [3, H, W] thermal image tensor (normalized)
+        rgb_img: [3, H, W] RGB image tensor (normalized)
+        P: [257, 257] or [256, 256] Sinkhorn assignment matrix
+        save_path: 저장 경로
+        top_k: 시각화할 top-k correspondence 수
+        grid_size: patch grid size (16x16 = 256 patches)
+        patch_size: 각 patch의 pixel size (14x14 for DINOv2)
+        title: 시각화 제목
+        gt_distance: ground truth distance (meters)
+        pred_score: predicted matching score
+    """
+    import matplotlib.patches as mpatches
+    from matplotlib.lines import Line2D
+
+    # Denormalize images
+    thermal_np = denormalize(thermal_img.unsqueeze(0)).cpu()[0].permute(1, 2, 0).numpy()
+    rgb_np = denormalize(rgb_img.unsqueeze(0)).cpu()[0].permute(1, 2, 0).numpy()
+
+    # Remove dustbin if present
+    if P.shape[0] == 257:
+        P_core = P[:256, :256].cpu().numpy()  # [256, 256]
+        dustbin_row = P[:256, 256].cpu().numpy()  # [256] thermal patches' dustbin assignment
+        dustbin_col = P[256, :256].cpu().numpy()  # [256] RGB patches' dustbin assignment
+    else:
+        P_core = P.cpu().numpy()
+        dustbin_row = None
+        dustbin_col = None
+
+    # Create figure with 2x3 subplots
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+
+    # ===== Row 1: Images and Heatmap =====
+
+    # 1-1: Thermal image
+    axes[0, 0].imshow(thermal_np)
+    axes[0, 0].set_title('Thermal (Query)', fontsize=12)
+    axes[0, 0].axis('off')
+
+    # 1-2: RGB image
+    axes[0, 1].imshow(rgb_np)
+    axes[0, 1].set_title('RGB (Database)', fontsize=12)
+    axes[0, 1].axis('off')
+
+    # 1-3: Assignment matrix heatmap
+    im = axes[0, 2].imshow(P_core, cmap='hot', aspect='auto')
+    axes[0, 2].set_title('Sinkhorn Assignment Matrix (256x256)', fontsize=12)
+    axes[0, 2].set_xlabel('RGB Patch Index')
+    axes[0, 2].set_ylabel('Thermal Patch Index')
+    plt.colorbar(im, ax=axes[0, 2], fraction=0.046, pad=0.04)
+
+    # ===== Row 2: Correspondence Visualization =====
+
+    # 2-1: Side-by-side with correspondence lines
+    H, W = thermal_np.shape[:2]
+    combined = np.concatenate([thermal_np, rgb_np], axis=1)  # [H, 2W, 3]
+    axes[1, 0].imshow(combined)
+    axes[1, 0].set_title(f'Top-{top_k} Correspondences', fontsize=12)
+
+    # Find top-k correspondences
+    flat_indices = np.argsort(P_core.flatten())[-top_k:][::-1]
+    thermal_indices = flat_indices // grid_size**2
+    rgb_indices = flat_indices % (grid_size**2)
+
+    # Actually, P_core is [256, 256] so:
+    thermal_patch_indices = flat_indices // 256
+    rgb_patch_indices = flat_indices % 256
+
+    # Draw correspondence lines
+    colors = plt.cm.viridis(np.linspace(0, 1, top_k))
+    for i, (t_idx, r_idx) in enumerate(zip(thermal_patch_indices, rgb_patch_indices)):
+        # Thermal patch center
+        t_row, t_col = t_idx // grid_size, t_idx % grid_size
+        t_y = t_row * patch_size + patch_size // 2
+        t_x = t_col * patch_size + patch_size // 2
+
+        # RGB patch center (offset by image width)
+        r_row, r_col = r_idx // grid_size, r_idx % grid_size
+        r_y = r_row * patch_size + patch_size // 2
+        r_x = r_col * patch_size + patch_size // 2 + W  # offset by thermal image width
+
+        # Draw line
+        axes[1, 0].plot([t_x, r_x], [t_y, r_y], color=colors[i], linewidth=1.5, alpha=0.7)
+        # Draw points
+        axes[1, 0].scatter([t_x], [t_y], c=[colors[i]], s=30, marker='o', edgecolors='white', linewidths=0.5)
+        axes[1, 0].scatter([r_x], [r_y], c=[colors[i]], s=30, marker='s', edgecolors='white', linewidths=0.5)
+
+    axes[1, 0].axis('off')
+
+    # 2-2: Thermal with best match overlay
+    axes[1, 1].imshow(thermal_np)
+    # For each thermal patch, show where its best match is (as heatmap overlay)
+    best_matches = P_core.argmax(axis=1)  # [256] - best RGB patch for each thermal patch
+    match_confidence = P_core.max(axis=1)  # [256] - confidence
+
+    # Create overlay
+    overlay = np.zeros((grid_size, grid_size))
+    for t_idx in range(256):
+        t_row, t_col = t_idx // grid_size, t_idx % grid_size
+        overlay[t_row, t_col] = match_confidence[t_idx]
+
+    overlay_resized = np.kron(overlay, np.ones((patch_size, patch_size)))
+    axes[1, 1].imshow(overlay_resized, cmap='jet', alpha=0.5)
+    axes[1, 1].set_title('Match Confidence per Thermal Patch', fontsize=12)
+    axes[1, 1].axis('off')
+
+    # 2-3: Statistics and info
+    axes[1, 2].axis('off')
+
+    # Compute statistics
+    diagonal_sum = np.trace(P_core) / 256  # Diagonal dominance (identity-like)
+    max_per_row = P_core.max(axis=1).mean()  # Average max confidence
+    entropy = -np.sum(P_core * np.log(P_core + 1e-10)) / 256  # Average entropy per row
+
+    # Dustbin usage
+    if dustbin_row is not None:
+        dustbin_thermal = dustbin_row.mean()
+        dustbin_rgb = dustbin_col.mean()
+        dustbin_info = f"Dustbin (Thermal→): {dustbin_thermal:.4f}\nDustbin (RGB→): {dustbin_rgb:.4f}"
+    else:
+        dustbin_info = "Dustbin: N/A"
+
+    info_text = (
+        f"=== Sinkhorn Statistics ===\n\n"
+        f"Diagonal Dominance: {diagonal_sum:.4f}\n"
+        f"(1.0 = perfect identity matching)\n\n"
+        f"Avg Max Confidence: {max_per_row:.4f}\n"
+        f"Avg Entropy: {entropy:.2f}\n\n"
+        f"{dustbin_info}\n\n"
+    )
+
+    if gt_distance is not None:
+        info_text += f"GT Distance: {gt_distance:.1f}m\n"
+    if pred_score is not None:
+        info_text += f"Pred Score: {pred_score:.4f}\n"
+
+    # Check if matching is meaningful
+    if diagonal_sum > 0.01:
+        info_text += "\n✓ Diagonal structure detected\n(spatially coherent matching)"
+    else:
+        info_text += "\n✗ No diagonal structure\n(random or semantic matching)"
+
+    axes[1, 2].text(0.1, 0.9, info_text, ha='left', va='top',
+                    fontsize=11, transform=axes[1, 2].transAxes,
+                    family='monospace',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+    # Overall title
+    fig.suptitle(title, fontsize=14, fontweight='bold')
+
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+    print(f"Saved Sinkhorn visualization: {save_path}")

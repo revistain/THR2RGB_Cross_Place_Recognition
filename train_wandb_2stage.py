@@ -109,15 +109,27 @@ if __name__ == "__main__":
         param.requires_grad = False
 
     # Unfreeze Stage2 relevant parameters (CroCo decoder)
+    stage2_keys = [
+        'decoder_blocks',       # CroCo decoder blocks
+        'decoder_norm',         # Decoder layer norm
+        'prediction_thermal_head',  # Prediction heads for reconstruction
+        'prediction_rgb_head',
+        'mask_token',           # Mask token
+        'decoder_pos_embed',    # Decoder positional embedding
+    ]
+
+    # Add V2-specific keys if using distance loss V2
+    if args.use_distance_loss_v2:
+        stage2_keys.extend([
+            'dustbin_score',        # Sinkhorn dustbin score
+            'aux_distance_head',    # Auxiliary distance head
+            'decoder_cls_token',    # CLS token for distance prediction
+            'decoder_pos_embed_with_cls',  # Positional embedding with CLS
+            'distance_head',        # Main distance head
+        ])
+
     for name, param in model.named_parameters():
-        if any(key in name for key in [
-            'decoder_blocks',       # CroCo decoder blocks
-            'decoder_norm',         # Decoder layer norm
-            'prediction_thermal_head',  # Prediction heads for reconstruction
-            'prediction_rgb_head',
-            'mask_token',           # Mask token
-            'decoder_pos_embed',    # Decoder positional embedding
-        ]):
+        if any(key in name for key in stage2_keys):
             param.requires_grad = True
 
     # Collect trainable params
@@ -181,7 +193,9 @@ if __name__ == "__main__":
             model = model.train()
             logging.debug(f"Start loading {len(triplets_ds)} triplets as {len(triplets_dl)} batches")
 
-            if args.use_distance_loss:
+            if args.use_distance_loss_v2:
+                print("- Stage2 Training (Distance V2: CLS + Sinkhorn Soft Aggregation)...")
+            elif args.use_distance_loss:
                 print("- Stage2 Training (Distance-based Geometric Matching)...")
             else:
                 print("- Stage2 Training (Attention-based Recon)...")
@@ -209,7 +223,7 @@ if __name__ == "__main__":
 
                 optimizer.zero_grad()
 
-                if args.use_distance_loss:
+                if args.use_distance_loss or args.use_distance_loss_v2:
                     # Stage2 forward: Distance-based geometric matching
                     # Get encoder features (frozen backbone)
                     with torch.no_grad():
@@ -220,18 +234,32 @@ if __name__ == "__main__":
                     pos_distances = distances[:, 0].to(args.device) if distances is not None else torch.zeros(batch_size).to(args.device)
 
                     # Forward distance prediction for positive pairs
-                    distance_loss, pred_score = model.module.stage2_forward_distance(
-                        thermal_feat=thermal_feat,
-                        rgb_feat=pos_rgb_feat,
-                        distance_gt=pos_distances,
-                        tau=args.distance_tau
-                    )
+                    if args.use_distance_loss_v2:
+                        # V2: CLS + Sinkhorn Soft Aggregation
+                        distance_loss, main_score, aux_score, P = model.module.stage2_forward_distance_v2(
+                            thermal_feat=thermal_feat,
+                            rgb_feat=pos_rgb_feat,
+                            distance_gt=pos_distances,
+                            tau=args.distance_tau,
+                            aux_weight=args.aux_loss_weight,
+                            sinkhorn_iters=args.sinkhorn_iters
+                        )
+                        pred_score = main_score
+                    else:
+                        # V1: CLS only
+                        distance_loss, pred_score = model.module.stage2_forward_distance(
+                            thermal_feat=thermal_feat,
+                            rgb_feat=pos_rgb_feat,
+                            distance_gt=pos_distances,
+                            tau=args.distance_tau
+                        )
 
                     total_loss = distance_loss
 
                     # Optionally train with negative pairs
                     if args.train_with_negatives and distances is not None:
                         neg_loss_list = []
+                        neg_aux_score_list = []
                         for neg_idx in range(args.negs_num_per_query):
                             neg_indices = [i * size_of_bundle + 2 + neg_idx for i in range(batch_size)]
                             neg_rgb_imgs = images[neg_indices].to(args.device)
@@ -240,27 +268,50 @@ if __name__ == "__main__":
                             with torch.no_grad():
                                 neg_rgb_feat = model.module.shared_backbone(neg_rgb_imgs)["x_norm_patchtokens"]
 
-                            neg_loss, _ = model.module.stage2_forward_distance(
-                                thermal_feat=thermal_feat,
-                                rgb_feat=neg_rgb_feat,
-                                distance_gt=neg_distances,
-                                tau=args.distance_tau
-                            )
+                            if args.use_distance_loss_v2:
+                                neg_loss, _, neg_aux_score, _ = model.module.stage2_forward_distance_v2(
+                                    thermal_feat=thermal_feat,
+                                    rgb_feat=neg_rgb_feat,
+                                    distance_gt=neg_distances,
+                                    tau=args.distance_tau,
+                                    aux_weight=args.aux_loss_weight,
+                                    sinkhorn_iters=args.sinkhorn_iters
+                                )
+                                neg_aux_score_list.append(neg_aux_score.mean().item())
+                            else:
+                                neg_loss, _ = model.module.stage2_forward_distance(
+                                    thermal_feat=thermal_feat,
+                                    rgb_feat=neg_rgb_feat,
+                                    distance_gt=neg_distances,
+                                    tau=args.distance_tau
+                                )
                             neg_loss_list.append(neg_loss)
 
                         # Average negative loss
                         neg_loss_avg = sum(neg_loss_list) / len(neg_loss_list)
                         total_loss = (distance_loss + neg_loss_avg) / 2.0
 
-                        wandb.log({
-                            "train/pos_distance_loss": distance_loss.item(),
-                            "train/neg_distance_loss": neg_loss_avg.item(),
-                            "train/total_distance_loss": total_loss.item(),
-                        }, step=global_step)
+                        if args.use_distance_loss_v2:
+                            neg_aux_score_avg = sum(neg_aux_score_list) / len(neg_aux_score_list)
+                            wandb.log({
+                                "train/pos_distance_loss": distance_loss.item(),
+                                "train/neg_distance_loss": neg_loss_avg.item(),
+                                "train/total_distance_loss": total_loss.item(),
+                                "train/pos_aux_score": aux_score.mean().item(),  # should → 1
+                                "train/neg_aux_score": neg_aux_score_avg,         # should → 0
+                            }, step=global_step)
+                        else:
+                            wandb.log({
+                                "train/pos_distance_loss": distance_loss.item(),
+                                "train/neg_distance_loss": neg_loss_avg.item(),
+                                "train/total_distance_loss": total_loss.item(),
+                            }, step=global_step)
                     else:
-                        wandb.log({
-                            "train/distance_loss": distance_loss.item(),
-                        }, step=global_step)
+                        log_dict = {"train/distance_loss": distance_loss.item()}
+                        if args.use_distance_loss_v2:
+                            log_dict["train/main_score_mean"] = main_score.mean().item()
+                            log_dict["train/aux_score_mean"] = aux_score.mean().item()
+                        wandb.log(log_dict, step=global_step)
 
                     # Backward
                     total_loss.backward()

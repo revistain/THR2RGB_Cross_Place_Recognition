@@ -20,6 +20,7 @@ from local_matching import *
 
 from recon_vis import *
 from reranking_dataset import RerankingDataset, reranking_collate_fn, compute_batch_recon_loss
+from visual import visualize_sinkhorn_assignment
 
 def patchify(imgs):
     """
@@ -197,7 +198,10 @@ def batched_distance_reranking(
     model,
     dataloader,
     prev_predictions,
-    reranking_top_k=5
+    reranking_top_k=5,
+    use_v2=False,
+    sinkhorn_iters=100,
+    cls_only=False
 ):
     """
     DataLoader 기반 배치 distance reranking.
@@ -209,6 +213,9 @@ def batched_distance_reranking(
         dataloader: RerankingDataset을 위한 DataLoader (load_targets=False)
         prev_predictions: 원본 predictions [num_queries, max_recall]
         reranking_top_k: reranking할 top-K 수
+        use_v2: V2 (CLS + Sinkhorn) 사용 여부
+        sinkhorn_iters: Sinkhorn iteration 횟수 (V2에서 사용)
+        cls_only: CLS score만 사용 (Sinkhorn 건너뜀, V2에서만 유효)
 
     Returns:
         predictions: [num_queries, max_recall] reranked predictions
@@ -228,10 +235,22 @@ def batched_distance_reranking(
             rgb_feat = batch['rgb_feat'].float().cuda()
 
             # ===== Bidirectional distance scoring (batched) =====
-            # stage2_forward_distance는 이미 bidirectional + batched
-            _, pred_scores = model.module.stage2_forward_distance(
-                thermal_feat, rgb_feat, distance_gt=None
-            )  # [BK]
+            if use_v2:
+                # V2: CLS + Sinkhorn Soft Aggregation (or CLS only if cls_only=True)
+                _, main_score, aux_score, P = model.module.stage2_forward_distance_v2(
+                    thermal_feat, rgb_feat, distance_gt=None,
+                    sinkhorn_iters=sinkhorn_iters,
+                    cls_only=cls_only
+                )
+                if cls_only:
+                    pred_scores = main_score  # CLS only
+                else:
+                    pred_scores = (main_score + aux_score) / 2  # main + aux 평균
+            else:
+                # V1: CLS only
+                _, pred_scores = model.module.stage2_forward_distance(
+                    thermal_feat, rgb_feat, distance_gt=None
+                )  # [BK]
 
             # Reshape to [B, K]
             pred_scores = pred_scores.view(B, K)
@@ -256,6 +275,117 @@ def batched_distance_reranking(
 
     predictions = np.array(predictions_list)
     return predictions, rerank_scores_dict
+
+
+def visualize_sinkhorn_samples(
+    model,
+    eval_ds,
+    predictions,
+    npy_root_path,
+    seq_name,
+    save_dir,
+    num_samples=10,
+    sinkhorn_iters=100,
+    positives_per_query=None
+):
+    """
+    Sinkhorn assignment matrix를 시각화합니다.
+
+    몇 개의 샘플에 대해 이미지를 로드하고, P matrix를 계산하여 시각화합니다.
+    Positive (같은 장소)와 Negative (다른 장소) 케이스를 모두 포함합니다.
+
+    Args:
+        model: CrossModalVPR_Net 모델
+        eval_ds: 평가 데이터셋 (이미지 경로 접근용)
+        predictions: [num_queries, max_recall] 예측 결과
+        npy_root_path: NPY 파일 경로
+        seq_name: 시퀀스 이름
+        save_dir: 저장 디렉토리
+        num_samples: 시각화할 샘플 수
+        sinkhorn_iters: Sinkhorn iteration 횟수
+        positives_per_query: 쿼리별 positive 인덱스 (없으면 eval_ds에서 가져옴)
+    """
+    import random
+    from torchvision import transforms
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    if positives_per_query is None:
+        positives_per_query = eval_ds.get_positives()
+
+    # 이미지 변환
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
+    # 샘플 선택: positive와 negative 케이스 모두 포함
+    num_queries = len(predictions)
+    sample_indices = random.sample(range(num_queries), min(num_samples, num_queries))
+
+    model.eval()
+
+    with torch.no_grad():
+        for sample_idx, query_idx in enumerate(tqdm(sample_indices, desc="Sinkhorn Visualization")):
+            # Top-1 예측
+            top1_db_idx = predictions[query_idx][0]
+            is_positive = top1_db_idx in positives_per_query[query_idx]
+
+            # Feature 로드
+            query_feat_path = os.path.join(npy_root_path, f"Query_{seq_name}_{query_idx}.npy")
+            db_feat_path = os.path.join(npy_root_path, f"Db_{seq_name}_{top1_db_idx}.npy")
+
+            if not os.path.exists(query_feat_path) or not os.path.exists(db_feat_path):
+                logging.warning(f"Feature files not found for query {query_idx}, db {top1_db_idx}")
+                continue
+
+            thermal_feat = torch.from_numpy(np.load(query_feat_path)).unsqueeze(0).float().cuda()
+            rgb_feat = torch.from_numpy(np.load(db_feat_path)).unsqueeze(0).float().cuda()
+
+            # Sinkhorn forward
+            _, main_score, aux_score, P = model.module.stage2_forward_distance_v2(
+                thermal_feat, rgb_feat, distance_gt=None,
+                sinkhorn_iters=sinkhorn_iters,
+                cls_only=False
+            )
+
+            pred_score = ((main_score + aux_score) / 2).item()
+
+            # 이미지 로드
+            thermal_path = eval_ds.t_queries_paths[query_idx]
+            rgb_path = eval_ds.rgb_database_paths[top1_db_idx]
+
+            thermal_img = eval_ds.get_thermal_img(thermal_path)
+            rgb_img = eval_ds.get_rgb_img(rgb_path)
+
+            # Resize to 224x224
+            thermal_img = cv2.resize(thermal_img, (224, 224))
+            rgb_img = cv2.resize(rgb_img, (224, 224))
+
+            thermal_tensor = transform(thermal_img)
+            rgb_tensor = transform(rgb_img)
+
+            # GT distance 계산 (UTM 좌표 사용)
+            query_utm = eval_ds.queries_utms[query_idx]
+            db_utm = eval_ds.database_utms[top1_db_idx]
+            gt_distance = np.linalg.norm(query_utm - db_utm)
+
+            # 시각화
+            status = "POS" if is_positive else "NEG"
+            save_path = os.path.join(save_dir, f"sinkhorn_{sample_idx:03d}_{status}_q{query_idx}_db{top1_db_idx}.png")
+
+            visualize_sinkhorn_assignment(
+                thermal_img=thermal_tensor,
+                rgb_img=rgb_tensor,
+                P=P[0],  # [257, 257]
+                save_path=save_path,
+                top_k=20,
+                title=f"Query {query_idx} → DB {top1_db_idx} ({status}, dist={gt_distance:.1f}m)",
+                gt_distance=gt_distance,
+                pred_score=pred_score
+            )
+
+    logging.info(f"Sinkhorn visualization saved to {save_dir}")
 
 
 def visualize_distance_reranking(vis_data, save_dir, seq_name, num_samples=20):
@@ -1233,7 +1363,15 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
 
             elif args.use_reranking == 'distance':
                 # Distance-based geometric matching reranking (DataLoader-based)
-                logging.info("Using distance-based reranking (DataLoader-based, batched)")
+                use_v2 = getattr(args, 'use_distance_loss_v2', False)
+                cls_only_flag = getattr(args, 'inference_cls_only', False)
+                if use_v2:
+                    if cls_only_flag:
+                        logging.info("Using distance-based reranking V2 (CLS only, Sinkhorn skipped)")
+                    else:
+                        logging.info("Using distance-based reranking V2 (CLS + Sinkhorn Soft Aggregation)")
+                else:
+                    logging.info("Using distance-based reranking (DataLoader-based, batched)")
 
                 # ===== DataLoader 설정 =====
                 reranking_dataset = RerankingDataset(
@@ -1260,12 +1398,34 @@ def inference(args, eval_ds, model, pca=None, k=1, use_cuda=True, verbose=True,s
                 logging.info(f"Distance Reranking DataLoader: batch_size={reranking_batch_size}, num_workers={reranking_num_workers}")
 
                 # ===== Batched Distance Reranking 실행 =====
+                sinkhorn_iters = getattr(args, 'sinkhorn_iters', 100)
+                cls_only = getattr(args, 'inference_cls_only', False)
                 predictions, rerank_scores_dict = batched_distance_reranking(
                     model=model,
                     dataloader=reranking_dataloader,
                     prev_predictions=prev_predictions,
-                    reranking_top_k=RERANKING_TOP_K
+                    reranking_top_k=RERANKING_TOP_K,
+                    use_v2=use_v2,
+                    sinkhorn_iters=sinkhorn_iters,
+                    cls_only=cls_only
                 )
+
+                # ===== Sinkhorn Visualization =====
+                if use_v2 and getattr(args, 'visualize_sinkhorn', False) and not cls_only:
+                    sinkhorn_vis_dir = os.path.join(args.save_dir, "sinkhorn_vis", seq_name)
+                    num_vis_samples = getattr(args, 'sinkhorn_vis_samples', 20)
+                    logging.info(f"Visualizing Sinkhorn assignment for {num_vis_samples} samples...")
+                    visualize_sinkhorn_samples(
+                        model=model,
+                        eval_ds=eval_ds,
+                        predictions=predictions,
+                        npy_root_path=NPY_ROOTPATH,
+                        seq_name=seq_name,
+                        save_dir=sinkhorn_vis_dir,
+                        num_samples=num_vis_samples,
+                        sinkhorn_iters=sinkhorn_iters,
+                        positives_per_query=None  # eval_ds에서 가져옴
+                    )
 
             del queries_features
             del database_features

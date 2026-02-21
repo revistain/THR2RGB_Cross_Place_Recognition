@@ -348,6 +348,64 @@ class LocalAdapt(nn.Module):
         x = self.upconv2(x)
         return x
 
+
+class AuxDistanceHead(nn.Module):
+    """Soft aggregation 기반 거리 예측 auxiliary head"""
+
+    def __init__(self, dim, patch_count=256):
+        super().__init__()
+        # Patch-wise projection
+        self.patch_proj = nn.Sequential(
+            nn.Linear(dim * 2, dim),  # concat(thermal, agg_rgb)
+            nn.GELU(),
+            nn.Linear(dim, 64)
+        )
+
+        # Global aggregation
+        self.global_pool = nn.AdaptiveAvgPool1d(1)
+
+        # Final head
+        self.head = nn.Sequential(
+            nn.Linear(64 + 1, 32),  # +1 for confidence
+            nn.GELU(),
+            nn.Linear(32, 1)
+        )
+
+        # Initialize weights
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def forward(self, thermal_decoded, agg_rgb_feat, confidence):
+        """
+        Args:
+            thermal_decoded: [B, 256, D]
+            agg_rgb_feat: [B, 256, D]
+            confidence: [B] matching confidence
+
+        Returns:
+            score: [B] 예측 점수 (0~1)
+        """
+        # Concat and project
+        concat = torch.cat([thermal_decoded, agg_rgb_feat], dim=-1)  # [B, 256, 2D]
+        patch_feat = self.patch_proj(concat)  # [B, 256, 64]
+
+        # Global pooling
+        global_feat = self.global_pool(patch_feat.transpose(1, 2)).squeeze(-1)  # [B, 64]
+
+        # Add confidence
+        feat = torch.cat([global_feat, confidence.unsqueeze(-1)], dim=-1)  # [B, 65]
+
+        # Predict score
+        score = torch.sigmoid(self.head(feat).squeeze(-1))  # [B]
+
+        return score
+
 class CrossModalVPR_Net(nn.Module):
     def __init__(self, args, pretrained_foundation=False, foundation_model_path=None):
         super().__init__()
@@ -465,6 +523,10 @@ class CrossModalVPR_Net(nn.Module):
 
         # Stage 2: Distance prediction modules
         self._set_distance_prediction_modules()
+
+        # Stage 2 V2: Sinkhorn + Soft Aggregation modules (if enabled)
+        if getattr(args, 'use_distance_loss_v2', False):
+            self._set_distance_prediction_modules_v2()
 
         # 2. Aggregation Layer (각각 따로 두는 것을 추천)
         self.rgb_aggregation = nn.Sequential(
@@ -596,6 +658,188 @@ class CrossModalVPR_Net(nn.Module):
         nn.init.zeros_(self.distance_head[0].bias)
         nn.init.normal_(self.distance_head[2].weight, std=0.02)
         nn.init.zeros_(self.distance_head[2].bias)
+
+    def _set_distance_prediction_modules_v2(self):
+        """
+        Stage 2 V2: Distance prediction with Sinkhorn soft aggregation.
+        Adds auxiliary head using cross-attention based soft matching.
+        """
+        # Learnable dustbin score for Sinkhorn matching
+        self.dustbin_score = nn.Parameter(torch.tensor(1.0))
+
+        # Auxiliary head for soft aggregation based distance prediction
+        self.aux_distance_head = AuxDistanceHead(self.decoder_dim, self.patch_count)
+
+    @staticmethod
+    def log_sinkhorn_iterations(Z, log_mu, log_nu, iters=100):
+        """
+        Sinkhorn iterations in log-space for numerical stability.
+
+        Args:
+            Z: [B, M+1, N+1] log assignment scores (with dustbin)
+            log_mu: [B, M+1] log row marginals
+            log_nu: [B, N+1] log column marginals
+            iters: number of Sinkhorn iterations
+
+        Returns:
+            Z: [B, M+1, N+1] converged log assignments
+        """
+        for _ in range(iters):
+            Z = Z - torch.logsumexp(Z, dim=2, keepdim=True) + log_mu.unsqueeze(2)
+            Z = Z - torch.logsumexp(Z, dim=1, keepdim=True) + log_nu.unsqueeze(1)
+        return Z
+
+    def sinkhorn_matching(self, attn_weights, dustbin_score=None, iters=100):
+        """
+        Sinkhorn matching with dustbin for unmatched patches.
+
+        Args:
+            attn_weights: [B, M, N] raw attention scores (256 x 256), typically from softmax
+            dustbin_score: learnable dustbin score (uses self.dustbin_score if None)
+            iters: Sinkhorn iterations
+
+        Returns:
+            P: [B, M+1, N+1] assignment matrix (257 x 257)
+        """
+        B, M, N = attn_weights.shape
+
+        if dustbin_score is None:
+            dustbin_score = self.dustbin_score
+
+        # Convert to log-space for numerical stability
+        attn_logits = torch.log(attn_weights + 1e-9)  # [B, M, N] in log-space
+
+        # Dustbin score in log-space (learnable, should be around 0 for dustbin value ~1)
+        log_dustbin = torch.log(dustbin_score + 1e-9)  # scalar in log-space
+
+        # Pad with dustbin (log-space) - keep gradient flow
+        # [B, M, N] -> [B, M+1, N+1]
+        dustbin_col = log_dustbin.expand(B, M, 1)  # [B, M, 1]
+        attn_padded = torch.cat([attn_logits, dustbin_col], dim=2)  # [B, M, N+1]
+
+        dustbin_row = log_dustbin.expand(B, 1, N+1)  # [B, 1, N+1]
+        Z = torch.cat([attn_padded, dustbin_row], dim=1)  # [B, M+1, N+1]
+
+        # Uniform marginals (each patch matches exactly once, plus dustbin)
+        log_mu = torch.zeros(B, M+1, device=attn_weights.device)
+        log_nu = torch.zeros(B, N+1, device=attn_weights.device)
+
+        # Sinkhorn iterations in log-space
+        Z = self.log_sinkhorn_iterations(Z, log_mu, log_nu, iters)
+
+        # Convert back from log-space
+        P = torch.exp(Z)  # [B, M+1, N+1]
+
+        return P
+
+    def soft_aggregate(self, P, feat):
+        """
+        Soft aggregation using Sinkhorn assignment matrix.
+
+        Args:
+            P: [B, M+1, N+1] Sinkhorn assignment (257 x 257)
+            feat: [B, N, D] patch features (256 x D)
+
+        Returns:
+            agg_feat: [B, M, D] aggregated features
+        """
+        # Remove dustbin dimensions for aggregation
+        P_core = P[:, :256, :256]  # [B, 256, 256] - patch-to-patch only
+
+        # Weighted sum
+        agg_feat = torch.bmm(P_core, feat)  # [B, 256, D]
+
+        return agg_feat
+
+    def stage2_forward_distance_v2(self, thermal_feat, rgb_feat, distance_gt=None, tau=10.0, aux_weight=0.3, sinkhorn_iters=100, cls_only=False):
+        """
+        Stage 2: CLS main + Bidirectional Sinkhorn Soft Aggregation auxiliary.
+
+        Args:
+            thermal_feat: [B, 256, D]
+            rgb_feat: [B, 256, D]
+            distance_gt: [B] in meters (optional)
+            tau: temperature for distance->score conversion
+            aux_weight: weight for auxiliary loss (default: 0.3)
+            sinkhorn_iters: number of Sinkhorn iterations
+            cls_only: if True, skip Sinkhorn and return CLS score only (for inference)
+
+        Returns:
+            loss: total loss if distance_gt provided
+            main_score: [B] main prediction (CLS-based)
+            aux_score: [B] auxiliary prediction (soft-agg-based, bidirectional) or None if cls_only
+            P_t2r: [B, 257, 257] thermal→RGB Sinkhorn assignment matrix or None if cls_only
+        """
+        B = thermal_feat.shape[0]
+
+        # ===== 기존 CLS-based Forward (Main) - Bidirectional =====
+        cls_tokens = self.decoder_cls_token.expand(2*B, -1, -1)
+        query_feat = torch.cat([thermal_feat, rgb_feat], dim=0)      # [2B, 256, D]
+        ref_feat = torch.cat([rgb_feat, thermal_feat], dim=0)        # [2B, 256, D]
+
+        query_with_cls = torch.cat([cls_tokens, query_feat], dim=1)  # [2B, 257, D]
+        query_with_cls = query_with_cls + self.decoder_pos_embed_with_cls
+        ref_with_pos = ref_feat + self.decoder_pos_embed
+
+        # Decoder with attention extraction (only if not cls_only)
+        x = query_with_cls
+        cross_attn_weights = None
+        for blk in self.decoder_blocks:
+            if cls_only:
+                x = blk(x, ref_with_pos, return_attention=False)
+            else:
+                x, cross_attn_weights = blk(x, ref_with_pos, return_attention=True)
+        x = self.decoder_norm(x)  # [2B, 257, D]
+
+        # CLS-based main score (bidirectional average)
+        cls_output = x[:, 0, :]  # [2B, D]
+        pred_scores = torch.sigmoid(self.distance_head(cls_output).squeeze(-1))  # [2B]
+        main_score = (pred_scores[:B] + pred_scores[B:]) / 2  # [B]
+
+        # ===== CLS only mode: skip Sinkhorn =====
+        if cls_only:
+            return None, main_score, None, None
+
+        # ===== Bidirectional Sinkhorn Soft Aggregation (Auxiliary) =====
+        # Extract attention weights (exclude CLS row)
+        attn_t2r = cross_attn_weights[:B, 1:, :]   # [B, 256, 256] thermal→RGB
+        attn_r2t = cross_attn_weights[B:, 1:, :]   # [B, 256, 256] RGB→thermal
+
+        # Sinkhorn matching (both directions)
+        P_t2r = self.sinkhorn_matching(attn_t2r, self.dustbin_score, iters=sinkhorn_iters)  # [B, 257, 257]
+        P_r2t = self.sinkhorn_matching(attn_r2t, self.dustbin_score, iters=sinkhorn_iters)  # [B, 257, 257]
+
+        # Soft aggregation (both directions)
+        agg_rgb_feat = self.soft_aggregate(P_t2r, rgb_feat)        # [B, 256, D]
+        agg_thermal_feat = self.soft_aggregate(P_r2t, thermal_feat)  # [B, 256, D]
+
+        # Confidence from assignment quality (both directions)
+        conf_t2r = P_t2r[:, :256, :256].max(dim=-1).values.mean(dim=-1)  # [B]
+        conf_r2t = P_r2t[:, :256, :256].max(dim=-1).values.mean(dim=-1)  # [B]
+
+        # Decoded features (exclude CLS)
+        thermal_decoded = x[:B, 1:, :]   # [B, 256, D]
+        rgb_decoded = x[B:, 1:, :]       # [B, 256, D]
+
+        # Auxiliary score (bidirectional)
+        aux_score_t2r = self.aux_distance_head(thermal_decoded, agg_rgb_feat, conf_t2r)      # [B]
+        aux_score_r2t = self.aux_distance_head(rgb_decoded, agg_thermal_feat, conf_r2t)      # [B]
+        aux_score = (aux_score_t2r + aux_score_r2t) / 2  # [B] bidirectional average
+
+        # ===== Combined Loss =====
+        if distance_gt is not None:
+            target_score = self.distance_to_score(distance_gt, tau=tau)
+
+            main_loss = F.binary_cross_entropy(main_score, target_score)
+            aux_loss = F.binary_cross_entropy(aux_score, target_score)
+
+            total_loss = main_loss + aux_weight * aux_loss
+
+            return total_loss, main_score, aux_score, P_t2r
+
+        # Inference: main + aux 평균
+        final_score = (main_score + aux_score) / 2
+        return None, final_score, aux_score, P_t2r
 
     def patchify(self, imgs):
         """
@@ -926,7 +1170,7 @@ class CrossModalVPR_Net(nn.Module):
 
         return total_recon_loss, recon_loss_thermal, recon_loss_rgb
 
-    def distance_to_score(self, distance, tau=20.0):
+    def distance_to_score(self, distance, tau=20., threshold=10.0):
         """
         Convert distance (meters) to similarity score (0~1)
         Using exponential decay: closer = higher score
@@ -936,6 +1180,9 @@ class CrossModalVPR_Net(nn.Module):
         - 100m → 0.007
         """
         return torch.exp(-distance / tau)
+        # logits = -(distance - threshold) / tau
+        
+        # return torch.sigmoid(logits)
 
     def stage2_forward_distance(self, thermal_feat, rgb_feat, distance_gt=None, tau=10.0):
         """

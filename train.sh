@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=7
+CUDA_VISIBLE_DEVICES=4
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
@@ -27,6 +27,8 @@ python3 train_wandb.py \
     --recon_loss_type 'l1' \
     --use_warmup \
     --masking_method 'random'
+
+    # --inference_cls_only
 
     # --masking_method 'GeM'
     # --use_mlp_dim_before_decoder 768

@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=4
+CUDA_VISIBLE_DEVICES=5
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
@@ -8,7 +8,7 @@ python3 fast_inference.py \
     --test_seq Urban Residential \
     --cuda_device $CUDA_VISIBLE_DEVICES \
     --foundation_model_path /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/backbone/dinov2/pretrained/dinov2_vits14_pretrain.pth \
-    --resume "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/twoStage-CroCo-ViTs-numBlock0-distanceDecoder-1e-4(neg,tau10)/260219_113028/best_model.pth" \
+    --resume "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/TEST-twoStage-CroCo-ViTs-numBlock0-distanceDecoder-1e-4(neg,tau20)_warmup_bidirection_sinkhorn(0.3)/260220_122751/last_model_stage2.pth" \
     --queries_per_epoch 2000 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
@@ -25,8 +25,19 @@ python3 fast_inference.py \
     --recon_loss_type 'l1' \
     --masking_method 'random' \
     --num_decoder_depth 8 \
-    --visualize_attention
+    --visualize_attention \
+    --use_distance_loss \
+    --train_with_negatives \
+    --use_warmup \
+    --distance_tau 10.0 \
+    --use_distance_loss_v2 \
+    --aux_loss_weight 0.3 \
+    --sinkhorn_iters 100 \
+    --visualize_sinkhorn \
+    --sinkhorn_vis_samples 20
 
+
+    # --inference_cls_only
     # --selaVPR_rerank_score_type 'none' \
     # --use_reranking 'reconSelaVPR' \
 

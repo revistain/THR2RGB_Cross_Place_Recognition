@@ -119,6 +119,8 @@ class Parser():
         self.parser.add_argument("--features_dim", type=int, default=768)
         self.parser.add_argument("--selaVPR_rerank_score_type", type=str, default="none", choices=['none', 'quantile_attn', 'mul_cossim'])
         self.parser.add_argument("--visualize_attention", action='store_true', default=False, help="Visualize CLS and GeM attention maps during inference")
+        self.parser.add_argument("--visualize_sinkhorn", action='store_true', default=False, help="Visualize Sinkhorn assignment matrix during inference")
+        self.parser.add_argument("--sinkhorn_vis_samples", type=int, default=20, help="Number of samples for Sinkhorn visualization")
         self.parser.add_argument("--use_sela_local_loss", action='store_true', default=False)
         self.parser.add_argument("--use_diff_loss", action='store_true', default=False)
         self.parser.add_argument("--use_mlp_dim_before_decoder", type=int, default=0)
@@ -148,6 +150,16 @@ class Parser():
                                  help="Temperature for distance->score conversion (default: 10m)")
         self.parser.add_argument("--train_with_negatives", action='store_true', default=False,
                                  help="Include negative pairs in distance-based training")
+
+        # Stage 2 V2: CLS + Sinkhorn Soft Aggregation
+        self.parser.add_argument("--use_distance_loss_v2", action='store_true', default=False,
+                                 help="Use CLS + Sinkhorn soft aggregation loss (V2)")
+        self.parser.add_argument("--aux_loss_weight", type=float, default=0.3,
+                                 help="Weight for auxiliary soft aggregation loss")
+        self.parser.add_argument("--sinkhorn_iters", type=int, default=100,
+                                 help="Number of Sinkhorn iterations")
+        self.parser.add_argument("--inference_cls_only", action='store_true', default=False,
+                                 help="Use only CLS score for inference (ignore Sinkhorn aux score)")
 
 
     def parse_arguments(self):
