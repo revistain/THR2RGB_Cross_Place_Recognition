@@ -210,7 +210,7 @@ if __name__ == "__main__":
             logging.debug(f"Start loading {len(triplets_ds)} triplets as {len(triplets_dl)} batches")
 
             print("- Training...")
-            for images, triplets_local_indexes, _, aligned_rgbs in tqdm(triplets_dl, ncols=100, desc=f"GPU{args.cuda_device}/Epoch {epoch_num:02d}"):
+            for images, triplets_local_indexes, _, aligned_rgbs, dist in tqdm(triplets_dl, ncols=100, desc=f"GPU{args.cuda_device}/Epoch {epoch_num:02d}"):
                 ### model을 통해, triplet의 descriptor와 patch embedding 추출
                 if args.use_pos_as_aligned_rgb:
                     assert images.size(0) % args.train_batch_size == 0

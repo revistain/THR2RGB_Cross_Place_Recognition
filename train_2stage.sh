@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=2
+CUDA_VISIBLE_DEVICES=0
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=8 \
@@ -16,7 +16,7 @@ python3 train_wandb_2stage.py \
     --hard_positives_dist_threshold 10 \
     --num_trainable_blocks_RGB 0 \
     --num_trainable_blocks_THERMAL 0 \
-    --comment "twoStage-CroCo-ViTs-numBlock0-distanceDecoder-1e-4(neg,tau10)_warmup_bidirection-sinkhorn(0.3,log)" \
+    --comment "twoStage-CroCo-ViTs-numBlock0-distanceDecoder-1e-4(neg,tau10)_warmup_bidirection_sinkhorn(0.3,log,margin)" \
     --margin 0.1 \
     --epochs_num 200 \
     --negs_num_per_query 10 \
@@ -32,10 +32,11 @@ python3 train_wandb_2stage.py \
     --use_warmup \
     --distance_tau 10.0 \
     --use_distance_loss_v2 \
-    --aux_loss_weight 1.0 \
+    --aux_loss_weight 0.3 \
     --sinkhorn_iters 100 \
-
-    # --inference_cls_only
+    --use_margin_loss \
+    --margin_loss_weight 0.5 \
+    --min_margin 0.1  
     # --resume "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/biRecon(w10,l1,dep8,r0.8)-1e4-posAfter30/260215_164530/last_model.pth"
     # --resume "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/logs/biRecon(w10,l1,dep8,r0.6)-attnMask(stage1, 1e-4)/260217_062526/last_model.pth" \
     # --use_reranking 'diffGeM' \
