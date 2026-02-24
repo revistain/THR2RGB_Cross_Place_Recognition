@@ -7,22 +7,22 @@ from torchvision.utils import make_grid
 from utils import get_timestamp
 import cv2
 
-def visualize_reconstruction(model, args, thermal_img, paired_rgb, device='cuda', save_path=None):
+def visualize_reconstruction(model, args, thermal_img, paired_rgb, device='cuda', save_path=None,
+                              pos_thermal=None, pos_rgb=None):
     """
-    Visualize bidirectional reconstruction (Thermal→RGB and RGB→Thermal).
-
-    NOTE: This function now matches stage2_forward_recon exactly:
-    - Uses AttentionMask (CLS attention based, 50% masking)
-    - Uses full encoder output with mask token replacement
-    - Uses CroCo decoder for cross-modal reconstruction
+    Visualize all 4 reconstruction types:
+    - Inter-modal: Thermal ← RGB, RGB ← Thermal
+    - Intra-modal: Thermal ← Thermal (pos), RGB ← RGB (pos)
 
     Args:
         model: CrossModalVPR_Net (wrapped in DataParallel)
         args: training arguments
-        thermal_img: [1, 3, 224, 224] - single thermal image
-        paired_rgb: [1, 3, 224, 224] - aligned RGB image
+        thermal_img: [1, 3, 224, 224] - single thermal image (query)
+        paired_rgb: [1, 3, 224, 224] - aligned RGB image (for inter-modal)
         device: 'cuda' or 'cpu'
         save_path: Optional path to save the figure
+        pos_thermal: [1, 3, 224, 224] - positive thermal image (for intra-modal, optional)
+        pos_rgb: [1, 3, 224, 224] - positive RGB image (for intra-modal, optional)
     """
     from croco.models.masking import AttentionMask
 
@@ -39,27 +39,39 @@ def visualize_reconstruction(model, args, thermal_img, paired_rgb, device='cuda'
     B = 1  # Single image
     patch_N = net.patch_count
 
+    # Denormalization constants
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(device)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(device)
+
+    # Check if intra-modal reconstruction is possible
+    has_intra = pos_thermal is not None and pos_rgb is not None
+
     with torch.no_grad():
-        # ========== 1. Forward without masking to get attention maps ==========
-        # (Same as stage2_forward_recon)
+        # ========== 1. Forward without masking to get features ==========
         thermal_out = net.shared_backbone(thermal_img, return_attention=True)
         rgb_out = net.shared_backbone(paired_rgb, return_attention=True)
 
-        # CLS attention: [B, num_heads, N] -> [B, N] (sum over heads)
+        # CLS attention for masking
         thermal_cls_attn = thermal_out["cls_attention"].sum(dim=1)  # [1, 256]
         rgb_cls_attn = rgb_out["cls_attention"].sum(dim=1)  # [1, 256]
 
-        # Full features (no masking)
+        # Full features
         thermal_full = thermal_out["x_norm_patchtokens"]  # [1, 256, D]
         rgb_full = rgb_out["x_norm_patchtokens"]  # [1, 256, D]
 
-        # ========== 2. Create attention-based masks (mask HIGH attention patches) ==========
-        # (Same as stage2_forward_recon - AttentionMask with 50% ratio)
+        # Get positive features if available
+        if has_intra:
+            pos_thermal_out = net.shared_backbone(pos_thermal)
+            pos_rgb_out = net.shared_backbone(pos_rgb)
+            pos_thermal_full = pos_thermal_out["x_norm_patchtokens"]  # [1, 256, D]
+            pos_rgb_full = pos_rgb_out["x_norm_patchtokens"]  # [1, 256, D]
+
+        # ========== 2. Create attention-based masks ==========
         attn_masker = AttentionMask(patch_N, mask_ratio=0.5)
         mask_thermal = attn_masker(thermal_cls_attn)  # [1, 256] True=masked
         mask_rgb = attn_masker(rgb_cls_attn)  # [1, 256] True=masked
 
-        # ========== 3. Apply masking (replace masked positions with mask token) ==========
+        # ========== 3. Apply masking ==========
         thermal_masked = net.mask_token.expand(B, patch_N, -1).clone()
         thermal_masked[~mask_thermal] = thermal_full[~mask_thermal]
 
@@ -67,160 +79,220 @@ def visualize_reconstruction(model, args, thermal_img, paired_rgb, device='cuda'
         rgb_masked[~mask_rgb] = rgb_full[~mask_rgb]
 
         # ========== 4. Add positional embedding ==========
-        thermal_masked = thermal_masked + net.decoder_pos_embed
-        rgb_masked = rgb_masked + net.decoder_pos_embed
+        thermal_masked_pos = thermal_masked + net.decoder_pos_embed
+        rgb_masked_pos = rgb_masked + net.decoder_pos_embed
 
         # Reference features (full, with positional embedding)
         thermal_ref = thermal_full + net.decoder_pos_embed
         rgb_ref = rgb_full + net.decoder_pos_embed
 
-        # ========== 5. CroCo Decoder forward (cross-modal reconstruction) ==========
-        # Thermal masked -> decode with RGB reference -> reconstruct thermal
-        thermal_decoded = thermal_masked
-        for blk in net.decoder_blocks:
-            thermal_decoded = blk(thermal_decoded, rgb_ref)
-        thermal_decoded = net.decoder_norm(thermal_decoded)
+        if has_intra:
+            pos_thermal_ref = pos_thermal_full + net.decoder_pos_embed
+            pos_rgb_ref = pos_rgb_full + net.decoder_pos_embed
 
-        # RGB masked -> decode with thermal reference -> reconstruct RGB
-        rgb_decoded = rgb_masked
+        # ========== 5. Inter-modal reconstruction ==========
+        # Thermal ← RGB (thermal masked, decoded with RGB reference)
+        inter_thermal_dec = thermal_masked_pos.clone()
         for blk in net.decoder_blocks:
-            rgb_decoded = blk(rgb_decoded, thermal_ref)
-        rgb_decoded = net.decoder_norm(rgb_decoded)
+            inter_thermal_dec = blk(inter_thermal_dec, rgb_ref)
+        inter_thermal_dec = net.decoder_norm(inter_thermal_dec)
 
-        # ========== 6. Prediction heads ==========
-        reconstructed_thermal_pixels = net.prediction_thermal_head(thermal_decoded)  # [1, 256, 588]
-        reconstructed_rgb_pixels = net.prediction_rgb_head(rgb_decoded)  # [1, 256, 588]
+        # RGB ← Thermal (rgb masked, decoded with thermal reference)
+        inter_rgb_dec = rgb_masked_pos.clone()
+        for blk in net.decoder_blocks:
+            inter_rgb_dec = blk(inter_rgb_dec, thermal_ref)
+        inter_rgb_dec = net.decoder_norm(inter_rgb_dec)
+
+        # ========== 6. Intra-modal reconstruction (if available) ==========
+        if has_intra:
+            # Thermal ← Thermal (thermal masked, decoded with pos_thermal reference)
+            intra_thermal_dec = thermal_masked_pos.clone()
+            for blk in net.decoder_blocks:
+                intra_thermal_dec = blk(intra_thermal_dec, pos_thermal_ref)
+            intra_thermal_dec = net.decoder_norm(intra_thermal_dec)
+
+            # RGB ← RGB (rgb masked, decoded with pos_rgb reference)
+            intra_rgb_dec = rgb_masked_pos.clone()
+            for blk in net.decoder_blocks:
+                intra_rgb_dec = blk(intra_rgb_dec, pos_rgb_ref)
+            intra_rgb_dec = net.decoder_norm(intra_rgb_dec)
+
+        # ========== 7. Prediction heads ==========
+        inter_thermal_pixels = net.prediction_thermal_head(inter_thermal_dec)  # [1, 256, 588]
+        inter_rgb_pixels = net.prediction_rgb_head(inter_rgb_dec)  # [1, 256, 588]
+
+        if has_intra:
+            intra_thermal_pixels = net.prediction_thermal_head(intra_thermal_dec)
+            intra_rgb_pixels = net.prediction_rgb_head(intra_rgb_dec)
 
     # Restore training mode
     if was_training:
         net.train()
 
-    # ========== Unpatchify to images ==========
-    reconstructed_thermal_img = unpatchify_visual(reconstructed_thermal_pixels, orig_H, orig_W, patch_size=14)
-    reconstructed_rgb_img = unpatchify_visual(reconstructed_rgb_pixels, orig_H, orig_W, patch_size=14)
+    # ========== Helper functions ==========
+    def to_hybrid_img(original_img, recon_pixels, mask):
+        """Create hybrid image: visible patches + reconstructed masked patches"""
+        original_patches = net.patchify(original_img)
+        hybrid_patches = original_patches.clone()
+        hybrid_patches[mask] = recon_pixels[mask]
+        hybrid_img = unpatchify_visual(hybrid_patches, orig_H, orig_W, patch_size=14)
+        return (hybrid_img * std + mean).detach().cpu()
 
-    # ========== Denormalize ==========
-    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(device)
-    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(device)
+    def to_mask_img(mask, h_patches, w_patches):
+        """Convert mask to image for visualization"""
+        mask_2d = mask.reshape(1, h_patches, w_patches).float()
+        mask_img = torch.nn.functional.interpolate(
+            mask_2d.unsqueeze(1), size=(orig_H, orig_W), mode='nearest'
+        ).squeeze(1).cpu()
+        return mask_img
 
-    thermal_img_denorm = thermal_img * std + mean
-    paired_rgb_denorm = paired_rgb * std + mean
-    reconstructed_thermal_denorm = reconstructed_thermal_img * std + mean
-    reconstructed_rgb_denorm = reconstructed_rgb_img * std + mean
-
-    # ========== Create hybrid images (visible + reconstructed) ==========
-    # For thermal: original visible patches + reconstructed masked patches
-    original_thermal_patches = net.patchify(thermal_img)
-    hybrid_thermal_patches = original_thermal_patches.clone()
-    hybrid_thermal_patches[mask_thermal] = reconstructed_thermal_pixels[mask_thermal]
-    hybrid_thermal_img = unpatchify_visual(hybrid_thermal_patches, orig_H, orig_W, patch_size=14)
-    hybrid_thermal_denorm = hybrid_thermal_img * std + mean
-
-    # For RGB: original visible patches + reconstructed masked patches
-    original_rgb_patches = net.patchify(paired_rgb)
-    hybrid_rgb_patches = original_rgb_patches.clone()
-    hybrid_rgb_patches[mask_rgb] = reconstructed_rgb_pixels[mask_rgb]
-    hybrid_rgb_img = unpatchify_visual(hybrid_rgb_patches, orig_H, orig_W, patch_size=14)
-    hybrid_rgb_denorm = hybrid_rgb_img * std + mean
-
-    # Move to CPU for visualization
-    thermal_img_denorm = thermal_img_denorm.detach().cpu()
-    paired_rgb_denorm = paired_rgb_denorm.detach().cpu()
-    reconstructed_thermal_denorm = reconstructed_thermal_denorm.detach().cpu()
-    reconstructed_rgb_denorm = reconstructed_rgb_denorm.detach().cpu()
-    hybrid_thermal_denorm = hybrid_thermal_denorm.detach().cpu()
-    hybrid_rgb_denorm = hybrid_rgb_denorm.detach().cpu()
-
-    # ========== Create mask visualizations ==========
+    # ========== Process images ==========
     h_patches = int(orig_H / 14)
     w_patches = int(orig_W / 14)
 
-    mask_thermal_2d = mask_thermal.reshape(1, h_patches, w_patches).float()
-    mask_thermal_img = torch.nn.functional.interpolate(
-        mask_thermal_2d.unsqueeze(1), size=(orig_H, orig_W), mode='nearest'
-    ).squeeze(1).cpu()
+    # Denormalize original images
+    thermal_denorm = (thermal_img * std + mean).detach().cpu()
+    rgb_denorm = (paired_rgb * std + mean).detach().cpu()
 
-    mask_rgb_2d = mask_rgb.reshape(1, h_patches, w_patches).float()
-    mask_rgb_img = torch.nn.functional.interpolate(
-        mask_rgb_2d.unsqueeze(1), size=(orig_H, orig_W), mode='nearest'
-    ).squeeze(1).cpu()
+    if has_intra:
+        pos_thermal_denorm = (pos_thermal * std + mean).detach().cpu()
+        pos_rgb_denorm = (pos_rgb * std + mean).detach().cpu()
+
+    # Inter-modal hybrid images
+    inter_thermal_hybrid = to_hybrid_img(thermal_img, inter_thermal_pixels, mask_thermal)
+    inter_rgb_hybrid = to_hybrid_img(paired_rgb, inter_rgb_pixels, mask_rgb)
+
+    # Intra-modal hybrid images
+    if has_intra:
+        intra_thermal_hybrid = to_hybrid_img(thermal_img, intra_thermal_pixels, mask_thermal)
+        intra_rgb_hybrid = to_hybrid_img(paired_rgb, intra_rgb_pixels, mask_rgb)
+
+    # Mask images
+    mask_thermal_img = to_mask_img(mask_thermal, h_patches, w_patches)
+    mask_rgb_img = to_mask_img(mask_rgb, h_patches, w_patches)
 
     # ========== Plot ==========
-    fig, axes = plt.subplots(3, 4, figsize=(20, 15))
+    n_rows = 5 if has_intra else 3
+    fig, axes = plt.subplots(n_rows, 4, figsize=(20, 5 * n_rows))
 
-    # Row 0: Thermal reconstruction (Thermal → reconstructed using RGB context)
-    axes[0, 0].imshow(thermal_img_denorm[0].permute(1, 2, 0).clip(0, 1))
-    axes[0, 0].set_title('Original Thermal', fontsize=14, fontweight='bold')
+    # Row 0: Inter-modal Thermal reconstruction (Thermal ← RGB)
+    axes[0, 0].imshow(thermal_denorm[0].permute(1, 2, 0).clip(0, 1))
+    axes[0, 0].set_title('Query Thermal', fontsize=12, fontweight='bold')
     axes[0, 0].axis('off')
 
     axes[0, 1].imshow(mask_thermal_img[0], cmap='RdYlGn_r', vmin=0, vmax=1)
-    axes[0, 1].set_title(f'Thermal Mask ({mask_thermal.float().mean()*100:.1f}% masked)', fontsize=14, fontweight='bold')
+    axes[0, 1].set_title(f'Thermal Mask ({mask_thermal.float().mean()*100:.1f}%)', fontsize=12, fontweight='bold')
     axes[0, 1].axis('off')
 
-    axes[0, 2].imshow(hybrid_thermal_denorm[0].permute(1, 2, 0).clip(0, 1))
-    axes[0, 2].set_title('Thermal: Visible + Reconstructed', fontsize=14, fontweight='bold', color='darkgreen')
+    axes[0, 2].imshow(inter_thermal_hybrid[0].permute(1, 2, 0).clip(0, 1))
+    axes[0, 2].set_title('Inter: Thermal ← RGB', fontsize=12, fontweight='bold', color='darkblue')
     axes[0, 2].axis('off')
 
-    axes[0, 3].imshow(paired_rgb_denorm[0].permute(1, 2, 0).clip(0, 1))
-    axes[0, 3].set_title('RGB (Context for Thermal Recon)', fontsize=14, fontweight='bold', color='blue')
+    axes[0, 3].imshow(rgb_denorm[0].permute(1, 2, 0).clip(0, 1))
+    axes[0, 3].set_title('Reference: Paired RGB', fontsize=12, fontweight='bold', color='blue')
     axes[0, 3].axis('off')
 
-    # Row 1: RGB reconstruction (RGB → reconstructed using Thermal context)
-    axes[1, 0].imshow(paired_rgb_denorm[0].permute(1, 2, 0).clip(0, 1))
-    axes[1, 0].set_title('Original RGB', fontsize=14, fontweight='bold')
+    # Row 1: Inter-modal RGB reconstruction (RGB ← Thermal)
+    axes[1, 0].imshow(rgb_denorm[0].permute(1, 2, 0).clip(0, 1))
+    axes[1, 0].set_title('Query RGB', fontsize=12, fontweight='bold')
     axes[1, 0].axis('off')
 
     axes[1, 1].imshow(mask_rgb_img[0], cmap='RdYlGn_r', vmin=0, vmax=1)
-    axes[1, 1].set_title(f'RGB Mask ({mask_rgb.float().mean()*100:.1f}% masked)', fontsize=14, fontweight='bold')
+    axes[1, 1].set_title(f'RGB Mask ({mask_rgb.float().mean()*100:.1f}%)', fontsize=12, fontweight='bold')
     axes[1, 1].axis('off')
 
-    axes[1, 2].imshow(hybrid_rgb_denorm[0].permute(1, 2, 0).clip(0, 1))
-    axes[1, 2].set_title('RGB: Visible + Reconstructed', fontsize=14, fontweight='bold', color='darkgreen')
+    axes[1, 2].imshow(inter_rgb_hybrid[0].permute(1, 2, 0).clip(0, 1))
+    axes[1, 2].set_title('Inter: RGB ← Thermal', fontsize=12, fontweight='bold', color='darkblue')
     axes[1, 2].axis('off')
 
-    axes[1, 3].imshow(thermal_img_denorm[0].permute(1, 2, 0).clip(0, 1))
-    axes[1, 3].set_title('Thermal (Context for RGB Recon)', fontsize=14, fontweight='bold', color='blue')
+    axes[1, 3].imshow(thermal_denorm[0].permute(1, 2, 0).clip(0, 1))
+    axes[1, 3].set_title('Reference: Thermal', fontsize=12, fontweight='bold', color='blue')
     axes[1, 3].axis('off')
 
-    # Row 2: Error analysis
-    # Thermal reconstruction error (on masked regions only)
-    thermal_error = (thermal_img_denorm - reconstructed_thermal_denorm).abs().mean(dim=1)
-    thermal_error_masked = thermal_error.clone()
-    thermal_error_masked[mask_thermal_img < 0.5] = 0
-    im0 = axes[2, 0].imshow(thermal_error_masked[0], cmap='hot', vmin=0, vmax=0.3)
-    axes[2, 0].set_title('Thermal Recon Error (Masked Only)', fontsize=14, fontweight='bold')
-    axes[2, 0].axis('off')
-    plt.colorbar(im0, ax=axes[2, 0], fraction=0.046, pad=0.04)
+    if has_intra:
+        # Row 2: Intra-modal Thermal reconstruction (Thermal ← Thermal_pos)
+        axes[2, 0].imshow(thermal_denorm[0].permute(1, 2, 0).clip(0, 1))
+        axes[2, 0].set_title('Query Thermal', fontsize=12, fontweight='bold')
+        axes[2, 0].axis('off')
 
-    # RGB reconstruction error (on masked regions only)
-    rgb_error = (paired_rgb_denorm - reconstructed_rgb_denorm).abs().mean(dim=1)
-    rgb_error_masked = rgb_error.clone()
-    rgb_error_masked[mask_rgb_img < 0.5] = 0
-    im1 = axes[2, 1].imshow(rgb_error_masked[0], cmap='hot', vmin=0, vmax=0.3)
-    axes[2, 1].set_title('RGB Recon Error (Masked Only)', fontsize=14, fontweight='bold')
-    axes[2, 1].axis('off')
-    plt.colorbar(im1, ax=axes[2, 1], fraction=0.046, pad=0.04)
+        axes[2, 1].imshow(mask_thermal_img[0], cmap='RdYlGn_r', vmin=0, vmax=1)
+        axes[2, 1].set_title(f'Thermal Mask ({mask_thermal.float().mean()*100:.1f}%)', fontsize=12, fontweight='bold')
+        axes[2, 1].axis('off')
 
-    # Show reconstructed only (masked regions)
-    recon_thermal_only = reconstructed_thermal_denorm.clone()
-    mask_thermal_expanded = mask_thermal_img.unsqueeze(1).expand(-1, 3, -1, -1)
-    recon_thermal_only[mask_thermal_expanded < 0.5] = 0.5  # Gray for visible regions
-    axes[2, 2].imshow(recon_thermal_only[0].permute(1, 2, 0).clip(0, 1))
-    axes[2, 2].set_title('Thermal Recon (Masked Only)', fontsize=14, fontweight='bold')
-    axes[2, 2].axis('off')
+        axes[2, 2].imshow(intra_thermal_hybrid[0].permute(1, 2, 0).clip(0, 1))
+        axes[2, 2].set_title('Intra: Thermal ← Thermal', fontsize=12, fontweight='bold', color='darkgreen')
+        axes[2, 2].axis('off')
 
-    recon_rgb_only = reconstructed_rgb_denorm.clone()
-    mask_rgb_expanded = mask_rgb_img.unsqueeze(1).expand(-1, 3, -1, -1)
-    recon_rgb_only[mask_rgb_expanded < 0.5] = 0.5  # Gray for visible regions
-    axes[2, 3].imshow(recon_rgb_only[0].permute(1, 2, 0).clip(0, 1))
-    axes[2, 3].set_title('RGB Recon (Masked Only)', fontsize=14, fontweight='bold')
-    axes[2, 3].axis('off')
+        axes[2, 3].imshow(pos_thermal_denorm[0].permute(1, 2, 0).clip(0, 1))
+        axes[2, 3].set_title('Reference: Pos Thermal', fontsize=12, fontweight='bold', color='green')
+        axes[2, 3].axis('off')
 
-    # Overall title
-    fig.suptitle('Bidirectional Cross-Modal Reconstruction\n'
-                 '(Top: Thermal reconstructed from RGB context | Middle: RGB reconstructed from Thermal context)',
-                 fontsize=16, fontweight='bold')
+        # Row 3: Intra-modal RGB reconstruction (RGB ← RGB_pos)
+        axes[3, 0].imshow(rgb_denorm[0].permute(1, 2, 0).clip(0, 1))
+        axes[3, 0].set_title('Query RGB', fontsize=12, fontweight='bold')
+        axes[3, 0].axis('off')
 
+        axes[3, 1].imshow(mask_rgb_img[0], cmap='RdYlGn_r', vmin=0, vmax=1)
+        axes[3, 1].set_title(f'RGB Mask ({mask_rgb.float().mean()*100:.1f}%)', fontsize=12, fontweight='bold')
+        axes[3, 1].axis('off')
+
+        axes[3, 2].imshow(intra_rgb_hybrid[0].permute(1, 2, 0).clip(0, 1))
+        axes[3, 2].set_title('Intra: RGB ← RGB', fontsize=12, fontweight='bold', color='darkgreen')
+        axes[3, 2].axis('off')
+
+        axes[3, 3].imshow(pos_rgb_denorm[0].permute(1, 2, 0).clip(0, 1))
+        axes[3, 3].set_title('Reference: Pos RGB', fontsize=12, fontweight='bold', color='green')
+        axes[3, 3].axis('off')
+
+        # Row 4: Comparison (Inter vs Intra)
+        axes[4, 0].imshow(inter_thermal_hybrid[0].permute(1, 2, 0).clip(0, 1))
+        axes[4, 0].set_title('Inter Thermal\n(← RGB)', fontsize=12, fontweight='bold', color='darkblue')
+        axes[4, 0].axis('off')
+
+        axes[4, 1].imshow(intra_thermal_hybrid[0].permute(1, 2, 0).clip(0, 1))
+        axes[4, 1].set_title('Intra Thermal\n(← Thermal)', fontsize=12, fontweight='bold', color='darkgreen')
+        axes[4, 1].axis('off')
+
+        axes[4, 2].imshow(inter_rgb_hybrid[0].permute(1, 2, 0).clip(0, 1))
+        axes[4, 2].set_title('Inter RGB\n(← Thermal)', fontsize=12, fontweight='bold', color='darkblue')
+        axes[4, 2].axis('off')
+
+        axes[4, 3].imshow(intra_rgb_hybrid[0].permute(1, 2, 0).clip(0, 1))
+        axes[4, 3].set_title('Intra RGB\n(← RGB)', fontsize=12, fontweight='bold', color='darkgreen')
+        axes[4, 3].axis('off')
+
+        title = 'Inter-modal vs Intra-modal Reconstruction\n' \
+                'Row 0-1: Inter-modal (cross-spectral) | Row 2-3: Intra-modal (same-spectral) | Row 4: Comparison'
+    else:
+        # Row 2: Error analysis (when no intra-modal)
+        inter_thermal_recon = unpatchify_visual(inter_thermal_pixels, orig_H, orig_W, patch_size=14)
+        inter_thermal_recon_denorm = (inter_thermal_recon * std + mean).detach().cpu()
+        inter_rgb_recon = unpatchify_visual(inter_rgb_pixels, orig_H, orig_W, patch_size=14)
+        inter_rgb_recon_denorm = (inter_rgb_recon * std + mean).detach().cpu()
+
+        thermal_error = (thermal_denorm - inter_thermal_recon_denorm).abs().mean(dim=1)
+        thermal_error_masked = thermal_error.clone()
+        thermal_error_masked[mask_thermal_img < 0.5] = 0
+        im0 = axes[2, 0].imshow(thermal_error_masked[0], cmap='hot', vmin=0, vmax=0.3)
+        axes[2, 0].set_title('Inter Thermal Error', fontsize=12, fontweight='bold')
+        axes[2, 0].axis('off')
+        plt.colorbar(im0, ax=axes[2, 0], fraction=0.046, pad=0.04)
+
+        rgb_error = (rgb_denorm - inter_rgb_recon_denorm).abs().mean(dim=1)
+        rgb_error_masked = rgb_error.clone()
+        rgb_error_masked[mask_rgb_img < 0.5] = 0
+        im1 = axes[2, 1].imshow(rgb_error_masked[0], cmap='hot', vmin=0, vmax=0.3)
+        axes[2, 1].set_title('Inter RGB Error', fontsize=12, fontweight='bold')
+        axes[2, 1].axis('off')
+        plt.colorbar(im1, ax=axes[2, 1], fraction=0.046, pad=0.04)
+
+        axes[2, 2].axis('off')
+        axes[2, 3].axis('off')
+
+        title = 'Inter-modal (Cross-Spectral) Reconstruction\n' \
+                'Row 0: Thermal ← RGB | Row 1: RGB ← Thermal | Row 2: Error Analysis'
+
+    fig.suptitle(title, fontsize=16, fontweight='bold')
     plt.tight_layout()
 
     if save_path:
@@ -230,7 +302,10 @@ def visualize_reconstruction(model, args, thermal_img, paired_rgb, device='cuda'
     else:
         plt.show()
 
-    return hybrid_thermal_denorm, hybrid_rgb_denorm
+    if has_intra:
+        return inter_thermal_hybrid, inter_rgb_hybrid, intra_thermal_hybrid, intra_rgb_hybrid
+    else:
+        return inter_thermal_hybrid, inter_rgb_hybrid
 
 def unpatchify_visual(patches, orig_H, orig_W, patch_size=14):
     """
@@ -250,7 +325,7 @@ def unpatchify_visual(patches, orig_H, orig_W, patch_size=14):
 
 # ===== Training Loop에서 사용 =====
 def visualize_during_training(args, model, triplets_dl, device, epoch, save_dir='./visualizations', comment="default"):
-    """Training 중간에 주기적으로 시각화"""
+    """Training 중간에 주기적으로 시각화 (4가지 reconstruction 타입 모두)"""
     import os
     timestamp = get_timestamp()
     save_subdir = os.path.join(save_dir, comment, timestamp)
@@ -259,13 +334,35 @@ def visualize_during_training(args, model, triplets_dl, device, epoch, save_dir=
     model.eval()
 
     # 첫 번째 batch 가져오기
-    images, _, _, aligned_rgbs, _ = next(iter(triplets_dl))
-    # Thermal query 1개만 추출 (첫 번째 thermal)
-    thermal_img = images[0:1].to(device)  # [1, 3, 224, 224]
-    paired_rgb = aligned_rgbs[0:1].to(device)  # [1, 3, 224, 224]
+    # triplets_dl returns: (images, triplets_local_indexes, _, aligned_rgbs, dist, paired_thermal_pos)
+    # images: [batch_size * (1 + 1 + negs_num), 3, H, W] - thermal images (query + pos + negs)
+    batch = next(iter(triplets_dl))
+    images, triplets_local_indexes, _, aligned_rgbs, dist, paired_thermal_pos = batch
+
+    # Calculate batch structure
+    # images[0] = query thermal, images[1] = pos thermal, images[2:] = neg thermals
+    size_of_batch = 1 + 1 + args.negs_num_per_query  # query + pos + negs
+
+    # Extract first sample
+    thermal_img = images[0:1].to(device)  # [1, 3, 224, 224] - query thermal
+    paired_rgb = aligned_rgbs[0:1].to(device)  # [1, 3, 224, 224] - aligned RGB
+
+    # pos_thermal from paired_thermal_pos (if available)
+    if paired_thermal_pos is not None and paired_thermal_pos.dim() == 4:
+        pos_thermal = paired_thermal_pos[0:1].to(device)  # [1, 3, 224, 224]
+    else:
+        # Fallback: use images[1] which is the positive thermal in triplet
+        pos_thermal = images[1:2].to(device)
+
+    # pos_rgb: extract from images using triplet structure
+    # The positive RGB corresponds to the positive thermal (index 1 in each batch)
+    # But we need RGB not thermal - use aligned_rgbs from positive sample
+    # For simplicity, use aligned_rgbs which is already the paired RGB for query
+    pos_rgb = aligned_rgbs[0:1].to(device)  # Same as paired_rgb for now
 
     save_path = f"{save_subdir}/epoch_{epoch:03d}.png"
-    visualize_reconstruction(model, args, thermal_img, paired_rgb, device, save_path)
+    visualize_reconstruction(model, args, thermal_img, paired_rgb, device, save_path,
+                           pos_thermal=pos_thermal, pos_rgb=pos_rgb)
 
     model.train()
 

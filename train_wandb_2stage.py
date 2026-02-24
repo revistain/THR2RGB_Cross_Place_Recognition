@@ -116,6 +116,7 @@ if __name__ == "__main__":
         'prediction_rgb_head',
         'mask_token',           # Mask token
         'decoder_pos_embed',    # Decoder positional embedding
+        'adapter'
     ]
 
     # Add V2-specific keys if using distance loss V2
@@ -130,6 +131,7 @@ if __name__ == "__main__":
 
     for name, param in model.named_parameters():
         if any(key in name for key in stage2_keys):
+            print("training\t: ", name)
             param.requires_grad = True
 
     # Collect trainable params
@@ -205,8 +207,10 @@ if __name__ == "__main__":
                 if len(batch_data) == 5:
                     images, triplets_local_indexes, _, aligned_rgbs, distances = batch_data
                 else:
-                    images, triplets_local_indexes, _, aligned_rgbs = batch_data
-                    distances = None
+                    images = batch_data[0]
+                    triplets_local_indexes = batch_data[1]
+                    aligned_rgbs = batch_data[3]
+                    distances = batch_data[4]
 
                 # Extract thermal queries and positive RGBs from batch
                 # images layout: [query, pos, neg1, neg2, ...] * batch_size

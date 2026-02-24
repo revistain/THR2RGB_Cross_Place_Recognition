@@ -168,7 +168,7 @@ def visualize_attention_maps_pca(
     model.eval()
 
     # Get a batch of images
-    images, _, _, aligned_rgbs, _ = next(iter(dataloader))
+    images, _, _, aligned_rgbs, _, _ = next(iter(dataloader))
 
     # Calculate batch structure
     # images shape: [batch_size * (1 + 1 + negs_num_per_query), 3, H, W]
@@ -463,7 +463,7 @@ def visualize_attention_comparison(
     model.eval()
 
     # Get batch
-    images, _, _, aligned_rgbs = next(iter(dataloader))
+    images, _, _, aligned_rgbs, _, _ = next(iter(dataloader))
     batch_size = args.train_batch_size
     sample_size = 1 + 1 + args.negs_num_per_query
 
@@ -913,7 +913,7 @@ def visualize_mnn_matches(
     model.eval()
 
     # Get a batch of images
-    images, _, _, aligned_rgbs = next(iter(dataloader))
+    images, _, _, aligned_rgbs, _, _ = next(iter(dataloader))
 
     # Calculate batch structure
     batch_size = args.train_batch_size

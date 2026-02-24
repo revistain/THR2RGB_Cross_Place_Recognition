@@ -210,17 +210,17 @@ if __name__ == "__main__":
             logging.debug(f"Start loading {len(triplets_ds)} triplets as {len(triplets_dl)} batches")
 
             print("- Training...")
-            for images, triplets_local_indexes, _, aligned_rgbs, dist in tqdm(triplets_dl, ncols=100, desc=f"GPU{args.cuda_device}/Epoch {epoch_num:02d}"):
-                ### model을 통해, triplet의 descriptor와 patch embedding 추출
-                if args.use_pos_as_aligned_rgb:
-                    assert images.size(0) % args.train_batch_size == 0
-                    size_of_batch = int(images.size(0) / args.train_batch_size)
-                    train_batch_size = args.train_batch_size
-                    
-                    pos_rgbs = [images[idx] for idx in range(1, images.size(0), size_of_batch)]
-                    pos_rgbs = torch.stack(pos_rgbs)
-                    pos_rgbs = triplets_ds.transform(pos_rgbs)
-                    aligned_rgbs = pos_rgbs
+            for images, triplets_local_indexes, _, aligned_rgbs, dist, paired_thermal_pos in tqdm(triplets_dl, ncols=100, desc=f"GPU{args.cuda_device}/Epoch {epoch_num:02d}"):
+                # paired_thermal_pos = [B, 3, H, W]
+                # model을 통해, triplet의 descriptor와 patch embedding 추출
+                assert images.size(0) % args.train_batch_size == 0
+                size_of_batch = int(images.size(0) / args.train_batch_size)
+                train_batch_size = args.train_batch_size
+                
+                pos_rgbs = [images[idx] for idx in range(1, images.size(0), size_of_batch)]
+                pos_rgbs = torch.stack(pos_rgbs)
+                pos_rgbs = triplets_ds.transform(pos_rgbs)
+                # aligned_rgbs = pos_rgbs
 
                 recon_loss = None
                 if args.use_recon_loss:
@@ -231,7 +231,9 @@ if __name__ == "__main__":
                         flags=flags,
                         paired_rgb=aligned_rgbs.to(args.device),
                         return_mask=True,
-                        return_masked_patch=True
+                        return_masked_patch=True,
+                        paired_thermal_pos=paired_thermal_pos.to(args.device),
+                        rgb_pos = pos_rgbs,
                     )
                 else:
                     outputs = model(
@@ -308,16 +310,22 @@ if __name__ == "__main__":
                 # train_batch_size: 4, arg.negs_num_per_query: 10
                 if args.use_recon_loss:
                     recon_weight = args.recon_weight
-                    thermal_recon_loss = recon_loss[0]
-                    rgb_recon_loss = recon_loss[1]
-                    recon_loss = (thermal_recon_loss + rgb_recon_loss) / 2
+                    thermal_intra_recon_loss = recon_loss[0]
+                    rgb_intra_recon_loss = recon_loss[1]
+                    thermal_inter_recon_loss = recon_loss[2]
+                    rgb_inter_recon_loss = recon_loss[3]
+                    recon_loss = (thermal_intra_recon_loss + rgb_intra_recon_loss + thermal_inter_recon_loss + rgb_inter_recon_loss) / 4
                     recon_loss = recon_loss.mean()
                     overall_loss += (recon_loss * recon_weight)
                 
                     wandb.log({
-                        "train/recon_loss(Thermal)": thermal_recon_loss.mean().item()
+                        "train/recon_intra_loss(Thermal)": thermal_intra_recon_loss.mean().item()
                             * recon_weight / (args.train_batch_size * args.negs_num_per_query),
-                        "train/recon_loss(Rgb)": rgb_recon_loss.mean().item()
+                        "train/recon_intra_loss(Rgb)": rgb_intra_recon_loss.mean().item()
+                            * recon_weight / (args.train_batch_size * args.negs_num_per_query),
+                        "train/recon_inter_loss(Thermal)": thermal_inter_recon_loss.mean().item()
+                            * recon_weight / (args.train_batch_size * args.negs_num_per_query),
+                        "train/recon_inter_loss(Rgb)": rgb_inter_recon_loss.mean().item()
                             * recon_weight / (args.train_batch_size * args.negs_num_per_query),
                     }, step=global_step)
 

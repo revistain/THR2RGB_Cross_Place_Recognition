@@ -60,6 +60,7 @@ def collate_fn(batch):
         triplets_global_indexes: torch tensor of shape (batch_size, 12).
         aligned_rgbs: torch tensor or None.
         distances: torch tensor of shape (batch_size, 1 + negs_num).
+        paired_theraml_pos
     """
     images                  = torch.cat([e[0] for e in batch])
     triplets_local_indexes  = torch.cat([e[1][None] for e in batch])
@@ -78,8 +79,11 @@ def collate_fn(batch):
         distances = torch.stack([e[4] for e in batch], 0)  # [batch_size, 1+negs_num]
     else:
         distances = None
+    
+    # pos RGB와 대응되면 thermal 이미지
+    paired_pos_theramls = torch.stack([e[5] for e in batch], 0)
 
-    return images, torch.cat(tuple(triplets_local_indexes)), triplets_global_indexes, aligned_rgbs, distances
+    return images, torch.cat(tuple(triplets_local_indexes)), triplets_global_indexes, aligned_rgbs, distances, paired_pos_theramls
 
 
 class BaseSTheReODual(data.Dataset):
@@ -441,11 +445,11 @@ class TripletsSTheReODual(BaseSTheReODual):
         if self.use_align_rgb:
             query = self.transform(self.get_thermal_img(self.t_queries_paths[query_index]))
             # query = self.resized_transform(self.get_thermal_img(self.t_queries_paths[query_index]))
-            aligned_rgb = self.transform(self.get_rgb_img(self.rgb_queries_paths[query_index]))
+            paired_rgb = self.transform(self.get_rgb_img(self.rgb_queries_paths[query_index]))
         else:
             query = self.transform(self.get_thermal_img(self.t_queries_paths[query_index]))
             # query = self.resized_transform(self.get_thermal_img(self.t_queries_paths[query_index]))
-            aligned_rgb = None
+            paired_rgb = None
 
         positive = self.transform(self.get_rgb_img(self.rgb_database_paths[best_positive_index]))
         negatives = [self.transform(self.get_rgb_img(self.rgb_database_paths[i])) for i in neg_indexes]
@@ -459,10 +463,7 @@ class TripletsSTheReODual(BaseSTheReODual):
 
         # Positive distance
         pos_utm = self.database_utms[best_positive_index.item()]
-        if self.args.use_pos_as_aligned_rgb:
-            pos_distance = np.linalg.norm(query_utm - pos_utm)
-        else:
-            pos_distance = 0
+        pos_distance = np.linalg.norm(query_utm - pos_utm)
 
         # Negative distances
         neg_distances = []
@@ -472,8 +473,9 @@ class TripletsSTheReODual(BaseSTheReODual):
 
         # Stack distances: [pos_distance, neg1_distance, neg2_distance, ...]
         distances = torch.tensor([pos_distance] + neg_distances, dtype=torch.float32)
+        pair_thermal_with_pos = self.transform(self.get_thermal_img(self.t_database_paths[best_positive_index]))
 
-        return images, triplets_local_indexes, self.triplets_global_indexes[index], aligned_rgb, distances
+        return images, triplets_local_indexes, self.triplets_global_indexes[index], paired_rgb, distances, pair_thermal_with_pos
 
     def __len__(self):
         if self.is_inference:

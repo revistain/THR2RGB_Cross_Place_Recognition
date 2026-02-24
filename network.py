@@ -1400,12 +1400,14 @@ class CrossModalVPR_Net(nn.Module):
         rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb, rgb_cls = self.croco_like_encoder(paired_rgb, modality='rgb')
         return thermal_visible, rgb_visible, mask_thermal, mask_rgb
 
-    def forward_model(self, x, paired_rgb=None, modality='rgb', return_masked_patch=False):
+    def forward_model(self, x, paired_rgb=None, modality='rgb', return_masked_patch=False, paired_thermal_pos=None, rgb_pos=None):
         """단일 모달리티에 대한 Forward"""
         # self.use_masked_inference: rerank를 위해, decoder에 들어가기 바로 전 단계를 뱉는다
         
-        recon_loss_thermal = None
-        recon_loss_rgb = None
+        recon_intra_loss_thermal = None
+        recon_intra_loss_rgb = None
+        recon_inter_loss_thermal = None
+        recon_inter_loss_rgb = None
         global_desc = None
         mask_thermal = None
         penultimate_patch = None
@@ -1469,44 +1471,37 @@ class CrossModalVPR_Net(nn.Module):
                     rgb_full_dec = rgb_decoded
                 else:
                     # ========== Original CroCo/Swin Decoder Path ==========
+                    # 0. pass paired positive thermal image to backbone
+                    B = x.shape[0]
+                    
                     # 1-4. masked encoder
-
                     # 5. Get full features for global descriptor
+                    # Query Thermal
                     paired_thermal = self.shared_backbone(x, return_attention=True)
                     paired_thermal_cls_attn_single_head = paired_thermal["cls_attention"].sum(dim=1)
                     penultimate_patch = paired_thermal["penultimate_norm_patchtokens"]
                     paired_thermal_full = paired_thermal["x_norm_patchtokens"]
-
+                    # paired RGB
                     paired_rgb_emb = self.shared_backbone(paired_rgb, return_attention=True)
+                    paired_rgb_cls_attn_single_head = paired_rgb_emb["cls_attention"].sum(dim=1)
                     paired_rgb_full = paired_rgb_emb["x_norm_patchtokens"]
-
-                    cls_attn_map = paired_thermal_cls_attn_single_head
-
-                    gem_attn_score_thermal = None
-                    gem_attn_score_rgb = None
-                    cls_attn_score = None
-                    if self.args.masking_method == 'GeM':
-                        B, N, D = paired_thermal_full.shape # B, # N # D
-                        H_feat = int(x.shape[2]/14)
-                        W_feat = int(x.shape[3]/14)
-                        x_feat = paired_thermal_full.permute(0, 2, 1).view(B, D, H_feat, W_feat)
-                        global_desc = self.thermal_aggregation(x_feat) 
-                        gem_attn_score_thermal = torch.einsum('bd,bnd->bn', global_desc.detach(), paired_thermal_full.detach())
-                        
-                        B, N, D = paired_rgb_full.shape # B, # N # D
-                        H_feat = int(x.shape[2]/14)
-                        W_feat = int(x.shape[3]/14)
-                        x_feat = paired_rgb_full.permute(0, 2, 1).view(B, D, H_feat, W_feat)
-                        global_desc = self.rgb_aggregation(x_feat) 
-                        gem_attn_score_rgb = torch.einsum('bd,bnd->bn', global_desc.detach(), paired_rgb_full.detach())                        
-                    elif self.args.masking_method == 'CLS':
-                        raise Exception("Not Yet implemented, maybe someday")
-                        ...
                     
+                    # paried pos Thermal
+                    paired_pos_thermal = self.shared_backbone(paired_thermal_pos, return_attention=True)
+                    paired_pos_thermal_full = paired_pos_thermal["x_norm_patchtokens"]
+                    # paried pos RGB
+                    pos_rgb = self.shared_backbone(rgb_pos, return_attention=True)
+                    pos_rgb_full = pos_rgb["x_norm_patchtokens"]
+
+                    thermal_cls_attn_map = rgb_cls_attn_map = None
+                    if self.args.masking_method == 'CLS':
+                        thermal_cls_attn_map = paired_thermal_cls_attn_single_head
+                        rgb_cls_attn_map = paired_rgb_cls_attn_single_head
+
                     thermal_visible, mask_thermal, patch_B, patch_N, patch_D, thermal_cls = \
-                        self.croco_like_encoder(x, modality='thermal', gem_score=gem_attn_score_thermal, cls_score=cls_attn_score)
+                        self.croco_like_encoder(x, modality='thermal', gem_score=None, cls_score=thermal_cls_attn_map)
                     rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb, patch_D_rgb, rgb_cls = \
-                        self.croco_like_encoder(paired_rgb, modality='rgb', gem_score=gem_attn_score_rgb, cls_score=cls_attn_score)
+                        self.croco_like_encoder(paired_rgb, modality='rgb', gem_score=None, cls_score=rgb_cls_attn_map)
                     
                     # mask 붙이기 전 mlp로 channel 변경
                     if self.args.use_mlp_dim_before_decoder != 0:
@@ -1516,40 +1511,52 @@ class CrossModalVPR_Net(nn.Module):
                         paired_rgb_full = self.proj_before_decoder(paired_rgb_full)
                         
                     # 6. Mask token expansion
-                    thermal_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N)
-                    rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb)
+                    thermal_masked_full = self.croco_encoded_mask_expension(thermal_visible, mask_thermal, patch_B, patch_N)
+                    rgb_masked_full = self.croco_encoded_mask_expension(rgb_visible, mask_rgb, patch_B_rgb, patch_N_rgb)
 
                     out = paired_thermal
                     if return_masked_patch:
-                        masked_patch_thermal = thermal_full
+                        masked_patch_thermal = thermal_masked_full
                     
                     # 7. CroCo Decoder forward
-                    thermal_full_dec = thermal_full + self.decoder_pos_embed
-                    rgb_full_dec = rgb_full + self.decoder_pos_embed
-                    paired_thermal_dec = paired_thermal_full + self.decoder_pos_embed
-                    paired_rgb_dec = paired_rgb_full + self.decoder_pos_embed
+                    # a. Thermal(masked) <- RGB : Recon
+                    thermal_masked_full_pos_emb = thermal_masked_full + self.decoder_pos_embed
+                    rgb_masked_full_pos_emb = rgb_masked_full + self.decoder_pos_embed
+                    # b. RGB(masked) <- Thermal : Recon
+                    paired_rgb_full_pos_emb = paired_rgb_full + self.decoder_pos_embed
+                    paired_thermal_pos_emb = paired_thermal_full + self.decoder_pos_embed
+                    # c. RGB(masked) <- Pos Rgb : Recon
+                    pos_rgb_dec = pos_rgb_full + self.decoder_pos_embed
+                    # d. Thermal(masked) <- Pos Thermal : Recon
+                    paired_pos_thermal_dec = paired_pos_thermal_full + self.decoder_pos_embed
 
-                    target_full_dec = torch.cat([thermal_full_dec, rgb_full_dec], dim=0)
-                    ref_full_dec = torch.cat([paired_rgb_dec, paired_thermal_dec], dim=0)
+                    target_full_dec = torch.cat([thermal_masked_full_pos_emb, rgb_masked_full_pos_emb, thermal_masked_full_pos_emb, rgb_masked_full_pos_emb], dim=0)
+                    ref_full_dec    = torch.cat([paired_rgb_full_pos_emb, paired_thermal_pos_emb, paired_pos_thermal_dec, pos_rgb_dec], dim=0)
 
                     for blk in self.decoder_blocks:
                         target_full_dec = blk(target_full_dec, ref_full_dec)
                     target_full_dec = self.decoder_norm(target_full_dec)
-
-                    thermal_reconed_dec = target_full_dec[:thermal_full_dec.shape[0], :, :]
-                    rgb_full_dec = target_full_dec[thermal_full_dec.shape[0]:, :, :]
+                    
+                    thermal_inter_reconed_dec = target_full_dec[:B, :, :]
+                    rgb_inter_reconed_dec = target_full_dec[B:B*2, :, :]
+                    thermal_intra_reconed_dec = target_full_dec[B*2:B*3, :, :]
+                    rgb_intra_reconed_dec = target_full_dec[B*3:B*4, :, :]
 
                 recon_loss_fn = self.calculate_recon_loss
 
                 # 9. Prediction Head
-                reconstructed_thermal_patches = self.prediction_thermal_head(thermal_reconed_dec)
-                reconstructed_rgb_patches = self.prediction_rgb_head(rgb_full_dec)
+                reconstructed_intra_thermal_patches = self.prediction_thermal_head(thermal_intra_reconed_dec)
+                reconstructed_intra_rgb_patches = self.prediction_rgb_head(rgb_intra_reconed_dec)
+                reconstructed_inter_thermal_patches = self.prediction_thermal_head(thermal_inter_reconed_dec)
+                reconstructed_inter_rgb_patches = self.prediction_rgb_head(rgb_inter_reconed_dec)
                 target_thermal_patches = self.patchify(x)
                 target_rgb_patches = self.patchify(paired_rgb)
 
                 # 10. Reconstruction loss 계산
-                recon_loss_thermal = recon_loss_fn(reconstructed_thermal_patches, mask_thermal, target_thermal_patches)
-                recon_loss_rgb = recon_loss_fn(reconstructed_rgb_patches, mask_rgb, target_rgb_patches)    
+                recon_intra_loss_thermal = recon_loss_fn(reconstructed_intra_thermal_patches, mask_thermal, target_thermal_patches)
+                recon_intra_loss_rgb = recon_loss_fn(reconstructed_intra_rgb_patches, mask_rgb, target_rgb_patches)    
+                recon_inter_loss_thermal = recon_loss_fn(reconstructed_inter_thermal_patches, mask_thermal, target_thermal_patches)
+                recon_inter_loss_rgb = recon_loss_fn(reconstructed_inter_rgb_patches, mask_rgb, target_rgb_patches)
             else:
                 # when inference
                 out = self.shared_backbone(x,return_attention=True)
@@ -1592,7 +1599,7 @@ class CrossModalVPR_Net(nn.Module):
             x0 = x0.permute(0, 2, 3, 1)
             sela_local_feature = torch.nn.functional.normalize(x0, p=2, dim=-1)
                 
-        return global_desc, patch_tokens, [recon_loss_thermal, recon_loss_rgb], \
+        return global_desc, patch_tokens, [recon_intra_loss_thermal, recon_intra_loss_rgb, recon_inter_loss_thermal, recon_inter_loss_rgb], \
                 mask_thermal, masked_patch_thermal, cls_attn_map, \
                 penultimate_patch, sela_local_feature, gem_attn_map
 
@@ -1704,7 +1711,7 @@ class CrossModalVPR_Net(nn.Module):
         target_decoded = F.normalize(target_spatial, p=2, dim=-1)
         return target_decoded[:B//2,:,:], target_decoded[B//2:,:,:]
 
-    def forward(self, x, flags, paired_rgb=None, return_mask=False, return_masked_patch=False):
+    def forward(self, x, flags, paired_thermal_pos=None, paired_rgb=None, return_mask=False, return_masked_patch=False, rgb_pos=None):
         if not isinstance(flags, torch.Tensor):
             flags = torch.tensor(flags, device=x.device)
 
@@ -1742,7 +1749,9 @@ class CrossModalVPR_Net(nn.Module):
                 sela_local_emb[is_rgb] = sela_local_rgb
 
         if (~is_rgb).any():
-            global_emb, patch_thermal, recon_losses, mask, masked_patch_thermal, cls_thermal_attn_map, penultimate_patch_thermal, sela_local_thermal, gem_thermal_attn_map = self.forward_model(x[~is_rgb], modality='thermal', paired_rgb=paired_rgb, return_masked_patch=return_masked_patch)
+            global_emb, patch_thermal, recon_losses, mask, masked_patch_thermal, \
+            cls_thermal_attn_map, penultimate_patch_thermal, sela_local_thermal, gem_thermal_attn_map = \
+                self.forward_model(x[~is_rgb], modality='thermal', paired_rgb=paired_rgb, return_masked_patch=return_masked_patch, paired_thermal_pos=paired_thermal_pos, rgb_pos=rgb_pos)
             if global_emb is not None:
                 final_emb[~is_rgb] = global_emb
             if patch_thermal is not None:
