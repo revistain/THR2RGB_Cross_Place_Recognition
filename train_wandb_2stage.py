@@ -128,9 +128,39 @@ if __name__ == "__main__":
             'distance_head',        # Main distance head
         ])
 
+    # Add Flow-specific keys if using distance loss flow
+    if args.use_distance_loss_flow:
+        stage2_keys.extend([
+            'decoder_cls_token',    # CLS token for distance prediction
+            'decoder_pos_embed_with_cls',  # Positional embedding with CLS
+            'distance_head',        # Main distance head
+        ])
+
     for name, param in model.named_parameters():
         if any(key in name for key in stage2_keys):
             param.requires_grad = True
+
+    # Unfreeze adapter layers if specified (like Stage1)
+    train_adapter = args.stage2_train_adapter
+    if train_adapter:
+        for name, param in model.module.shared_backbone.named_parameters():
+            if "adapter" in name:
+                param.requires_grad = True
+
+    # Unfreeze encoder (backbone) blocks if specified (like Stage1)
+    train_encoder = args.num_trainable_blocks_RGB > 0
+    if train_encoder:
+        num_blocks = len(model.module.shared_backbone.blocks)
+        for i in range(args.num_trainable_blocks_RGB):
+            model.module.shared_backbone.blocks[num_blocks - i - 1].requires_grad_(True)
+
+    # Print training configuration
+    print("=" * 30)
+    print("Stage2 Training Config:")
+    print(f"  - Decoder: ON (default)")
+    print(f"  - Adapter: {'ON' if train_adapter else 'OFF'}")
+    print(f"  - Backbone blocks: {args.num_trainable_blocks_RGB}")
+    print("=" * 30)
 
     # Collect trainable params
     train_params = [p for p in model.parameters() if p.requires_grad]
@@ -193,7 +223,9 @@ if __name__ == "__main__":
             model = model.train()
             logging.debug(f"Start loading {len(triplets_ds)} triplets as {len(triplets_dl)} batches")
 
-            if args.use_distance_loss_v2:
+            if args.use_distance_loss_flow:
+                print("- Stage2 Training (Distance Flow: CLS + Flow Matching)...")
+            elif args.use_distance_loss_v2:
                 print("- Stage2 Training (Distance V2: CLS + Sinkhorn Soft Aggregation)...")
             elif args.use_distance_loss:
                 print("- Stage2 Training (Distance-based Geometric Matching)...")
@@ -223,10 +255,10 @@ if __name__ == "__main__":
 
                 optimizer.zero_grad()
 
-                if args.use_distance_loss or args.use_distance_loss_v2:
+                if args.use_distance_loss or args.use_distance_loss_v2 or args.use_distance_loss_flow:
                     # Stage2 forward: Distance-based geometric matching
-                    # Get encoder features (frozen backbone)
-                    with torch.no_grad():
+                    # Get encoder features (trainable if train_encoder or train_adapter)
+                    with torch.set_grad_enabled(train_encoder or train_adapter):
                         thermal_feat = model.module.shared_backbone(thermal_imgs)["x_norm_patchtokens"]  # [B, 256, D]
                         pos_rgb_feat = model.module.shared_backbone(pos_rgb_imgs)["x_norm_patchtokens"]  # [B, 256, D]
 
@@ -234,7 +266,18 @@ if __name__ == "__main__":
                     pos_distances = distances[:, 0].to(args.device) if distances is not None else torch.zeros(batch_size).to(args.device)
 
                     # Forward distance prediction for positive pairs
-                    if args.use_distance_loss_v2:
+                    if args.use_distance_loss_flow:
+                        # Flow: CLS + Flow matching auxiliary
+                        distance_loss, main_score, flow_score = model.module.stage2_forward_distance_flow(
+                            thermal_feat=thermal_feat,
+                            rgb_feat=pos_rgb_feat,
+                            distance_gt=pos_distances,
+                            tau=args.distance_tau,
+                            aux_weight=args.aux_loss_weight
+                        )
+                        pred_score = main_score
+                        aux_score = flow_score
+                    elif args.use_distance_loss_v2:
                         # V2: CLS + Sinkhorn Soft Aggregation
                         distance_loss, main_score, aux_score, P = model.module.stage2_forward_distance_v2(
                             thermal_feat=thermal_feat,
@@ -253,6 +296,7 @@ if __name__ == "__main__":
                             distance_gt=pos_distances,
                             tau=args.distance_tau
                         )
+                        aux_score = None
 
                     total_loss = distance_loss
 
@@ -268,10 +312,20 @@ if __name__ == "__main__":
                             neg_rgb_imgs = images[neg_indices].to(args.device)
                             neg_distances = distances[:, 1 + neg_idx].to(args.device)
 
-                            with torch.no_grad():
+                            with torch.set_grad_enabled(train_encoder or train_adapter):
                                 neg_rgb_feat = model.module.shared_backbone(neg_rgb_imgs)["x_norm_patchtokens"]
 
-                            if args.use_distance_loss_v2:
+                            if args.use_distance_loss_flow:
+                                neg_loss, neg_main_score, neg_flow_score = model.module.stage2_forward_distance_flow(
+                                    thermal_feat=thermal_feat,
+                                    rgb_feat=neg_rgb_feat,
+                                    distance_gt=neg_distances,
+                                    tau=args.distance_tau,
+                                    aux_weight=args.aux_loss_weight
+                                )
+                                neg_aux_score_list.append(neg_flow_score.mean().item())
+                                neg_scores_list.append(neg_main_score)
+                            elif args.use_distance_loss_v2:
                                 neg_loss, neg_main_score, neg_aux_score, _ = model.module.stage2_forward_distance_v2(
                                     thermal_feat=thermal_feat,
                                     rgb_feat=neg_rgb_feat,
@@ -315,7 +369,16 @@ if __name__ == "__main__":
                             margin_loss = sum(margin_losses) / len(margin_losses)
                             total_loss = total_loss + args.margin_loss_weight * margin_loss
 
-                        if args.use_distance_loss_v2:
+                        if args.use_distance_loss_flow:
+                            neg_aux_score_avg = sum(neg_aux_score_list) / len(neg_aux_score_list)
+                            log_dict = {
+                                "train/pos_distance_loss": distance_loss.item(),
+                                "train/neg_distance_loss": neg_loss_avg.item(),
+                                "train/total_distance_loss": total_loss.item(),
+                                "train/pos_flow_score": aux_score.mean().item(),  # should → 1
+                                "train/neg_flow_score": neg_aux_score_avg,         # should → 0
+                            }
+                        elif args.use_distance_loss_v2:
                             neg_aux_score_avg = sum(neg_aux_score_list) / len(neg_aux_score_list)
                             log_dict = {
                                 "train/pos_distance_loss": distance_loss.item(),
@@ -340,7 +403,10 @@ if __name__ == "__main__":
                         wandb.log(log_dict, step=global_step)
                     else:
                         log_dict = {"train/distance_loss": distance_loss.item()}
-                        if args.use_distance_loss_v2:
+                        if args.use_distance_loss_flow:
+                            log_dict["train/main_score_mean"] = pred_score.mean().item()
+                            log_dict["train/flow_score_mean"] = aux_score.mean().item()
+                        elif args.use_distance_loss_v2:
                             log_dict["train/main_score_mean"] = main_score.mean().item()
                             log_dict["train/aux_score_mean"] = aux_score.mean().item()
                         wandb.log(log_dict, step=global_step)

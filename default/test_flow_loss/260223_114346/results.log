@@ -1,0 +1,11 @@
+2026-02-23 11:43:47   Use 8 GPUs and 80 CPUs
+2026-02-23 11:43:47   
+Traceback (most recent call last):
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/train_wandb_2stage.py", line 74, in <module>
+    triplets_ds = datasets_T2R.TripletsSTheReODual(args, DATASET_FOLDER, use_align_rgb=True)
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 368, in __init__
+    super().__init__(args, datasets_folder, split='train')
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 88, in __init__
+    if all(i in ['Campus', 'Residential', 'Urban'] for i in args.sequences):
+TypeError: 'NoneType' object is not iterable
+

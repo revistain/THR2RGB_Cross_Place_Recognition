@@ -107,6 +107,7 @@ class Parser():
         self.parser.add_argument("--num_decoder_depth", type=int, default=8, help="_")
         self.parser.add_argument("--use_only_cross_decoder", action='store_true', default=False)
         self.parser.add_argument("--use_pos_as_aligned_rgb", action='store_true', default=False)
+        self.parser.add_argument("--switch_to_pos_rgb_epoch", type=int, default=-1, help="Epoch to switch from aligned_rgb to pos_rgb for CroCo. -1 means no switch.")
         self.parser.add_argument("--recon_loss_type", type=str, default="none", choices=['mse', 'l1', 'ssim', 'mse+ssim', 'GV', 'GV+l1', 'l1+ssim'])
         self.parser.add_argument("--use_fast_track", action='store_true', default=False)
         self.parser.add_argument("--rerank_with_RGB", action='store_true', default=False)
@@ -134,6 +135,8 @@ class Parser():
         self.parser.add_argument('--unfreeze_dino_decoder', action='store_true', default=False,
                                  help="Unfreeze DINO blocks in decoder (train self-attn + MLP, not just cross-attn)")   
         self.parser.add_argument('--is_dino_dec_stage2', action='store_true', default=False)
+        self.parser.add_argument('--stage2_train_adapter', action='store_true', default=False,
+                                 help="Train adapter layers in Stage2 (like Stage1)")
 
         # Swin Decoder settings
         self.parser.add_argument("--use_swin_decoder", action='store_true', default=False,
@@ -151,15 +154,19 @@ class Parser():
         self.parser.add_argument("--train_with_negatives", action='store_true', default=False,
                                  help="Include negative pairs in distance-based training")
 
-        # Stage 2 V2: CLS + Sinkhorn Soft Aggregation
+        # Stage 2 V2: CLS + Sinkhorn Soft Aggregation (deprecated)
         self.parser.add_argument("--use_distance_loss_v2", action='store_true', default=False,
-                                 help="Use CLS + Sinkhorn soft aggregation loss (V2)")
+                                 help="Use CLS + Sinkhorn soft aggregation loss (V2) [DEPRECATED]")
         self.parser.add_argument("--aux_loss_weight", type=float, default=0.3,
-                                 help="Weight for auxiliary soft aggregation loss")
+                                 help="Weight for auxiliary loss (flow or sinkhorn)")
         self.parser.add_argument("--sinkhorn_iters", type=int, default=100,
                                  help="Number of Sinkhorn iterations")
         self.parser.add_argument("--inference_cls_only", action='store_true', default=False,
-                                 help="Use only CLS score for inference (ignore Sinkhorn aux score)")
+                                 help="Use only CLS score for inference (ignore aux score)")
+
+        # Stage 2 Flow: CLS + Flow matching auxiliary
+        self.parser.add_argument("--use_distance_loss_flow", action='store_true', default=False,
+                                 help="Use CLS + Flow matching auxiliary loss")
 
         # Distance-Aware Margin Loss
         self.parser.add_argument("--use_margin_loss", action='store_true', default=False,

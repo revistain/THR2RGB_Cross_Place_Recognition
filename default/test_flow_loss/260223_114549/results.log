@@ -1,0 +1,13 @@
+2026-02-23 11:45:50   Use 8 GPUs and 80 CPUs
+2026-02-23 11:45:50   There are 0 queries without any positives
+2026-02-23 11:45:50   [Train - ['KAIST']] Database: 1152, Queries: 12548, Total: 13700
+2026-02-23 11:45:50   [Test - SNU] Database: 1197, Queries: 12589, Total: 13786
+2026-02-23 11:45:50   using MLP layer as FFN
+2026-02-23 11:45:51   No checkpoint provided. Starting from scratch (not recommended for Stage2)
+2026-02-23 11:45:52   Stage2 Trainable params: 22,202,137 / 46,035,099 (48.23%)
+2026-02-23 11:45:52   Using warmup scheduler: 5 warmup epochs + cosine annealing
+2026-02-23 11:45:52   Start Stage2 training epoch: 00
+2026-02-23 11:46:38   Epoch[00](1/1): current batch loss = 0.94375801, average epoch loss = 0.91675844
+2026-02-23 11:46:38   epoch 00 time: 0:00:46
+2026-02-23 11:46:38   ===== Evaluating Sequence: SNU =====
+2026-02-23 11:46:38   Cleaned and created NPY directory: /home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/npys_agg/260223_114549_test_flow_loss

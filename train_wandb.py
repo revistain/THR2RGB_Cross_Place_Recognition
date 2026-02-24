@@ -209,14 +209,21 @@ if __name__ == "__main__":
             model = model.train()
             logging.debug(f"Start loading {len(triplets_ds)} triplets as {len(triplets_dl)} batches")
 
+            # Determine whether to use pos_rgb instead of aligned_rgb
+            use_pos_rgb_this_epoch = args.use_pos_as_aligned_rgb or \
+                (args.switch_to_pos_rgb_epoch >= 0 and epoch_num >= args.switch_to_pos_rgb_epoch)
+
+            if args.switch_to_pos_rgb_epoch >= 0 and epoch_num == args.switch_to_pos_rgb_epoch:
+                print(f"- Switching CroCo target from aligned_rgb to pos_rgb at epoch {epoch_num}")
+
             print("- Training...")
             for images, triplets_local_indexes, _, aligned_rgbs, dist in tqdm(triplets_dl, ncols=100, desc=f"GPU{args.cuda_device}/Epoch {epoch_num:02d}"):
                 ### model을 통해, triplet의 descriptor와 patch embedding 추출
-                if args.use_pos_as_aligned_rgb:
+                if use_pos_rgb_this_epoch:
                     assert images.size(0) % args.train_batch_size == 0
                     size_of_batch = int(images.size(0) / args.train_batch_size)
                     train_batch_size = args.train_batch_size
-                    
+
                     pos_rgbs = [images[idx] for idx in range(1, images.size(0), size_of_batch)]
                     pos_rgbs = torch.stack(pos_rgbs)
                     pos_rgbs = triplets_ds.transform(pos_rgbs)

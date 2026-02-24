@@ -459,10 +459,7 @@ class TripletsSTheReODual(BaseSTheReODual):
 
         # Positive distance
         pos_utm = self.database_utms[best_positive_index.item()]
-        if self.args.use_pos_as_aligned_rgb:
-            pos_distance = np.linalg.norm(query_utm - pos_utm)
-        else:
-            pos_distance = 0
+        pos_distance = np.linalg.norm(query_utm - pos_utm)
 
         # Negative distances
         neg_distances = []

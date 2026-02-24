@@ -20,6 +20,7 @@ from swin_transformer import *
 from local_matching import LocalFeatureLoss
 from diff_loss import DiffLoss
 from backbone.dinov2.decoder import DINOv2Decoder
+from flow_utils import *
      
 class GeM(nn.Module):
     def __init__(self, p=3, eps=1e-6, work_with_tokens=False):
@@ -1022,6 +1023,88 @@ class CrossModalVPR_Net(nn.Module):
         rerank_loss = self.BCEloss(all_scores, target)
         
         return rerank_loss
+    
+    def stage2_forward_flow_match(self, thermal_feat, rgb_feat):
+        """
+        Stage 2 Auxiliary: GMFlow-style dense correspondence matching.
+
+        Flow:
+        1. Decoder forward (bidirectional)
+        2. Global correlation softmax → flow prediction
+        3. Warp encoder features using flow
+        4. Compute cosine similarity between warped and target features
+        5. Return flow matching score (higher = better match)
+
+        Args:
+            thermal_feat: [B, 256, D] encoder patch tokens (thermal)
+            rgb_feat: [B, 256, D] encoder patch tokens (RGB)
+
+        Returns:
+            flow_score: [B] matching score based on flow correspondence (0~1)
+            flow_loss: [B] loss = 1 - flow_score (lower when well-matched)
+        """
+        B = thermal_feat.shape[0]
+        D = thermal_feat.shape[2]
+        H = W = int(math.sqrt(self.patch_count))  # 16x16 = 256
+
+        cls_tokens = self.decoder_cls_token.expand(2 * B, -1, -1)  # [2B, 1, D]
+
+        # Concat: [thermal; rgb] for query, [rgb; thermal] for reference
+        query_feat = torch.cat([thermal_feat, rgb_feat], dim=0)  # [2B, 256, D]
+        ref_feat = torch.cat([rgb_feat, thermal_feat], dim=0)    # [2B, 256, D]
+
+        query_with_cls = torch.cat([cls_tokens, query_feat], dim=1)  # [2B, 257, D]
+        query_with_pos = query_with_cls + self.decoder_pos_embed_with_cls
+        ref_with_pos = ref_feat + self.decoder_pos_embed  # [2B, 256, D]
+
+        # Decoder forward
+        x = query_with_pos
+        for blk in self.decoder_blocks:
+            x = blk(x, ref_with_pos, return_attention=False)
+        x = self.decoder_norm(x)  # [2B, 257, D]
+
+        # Extract decoded patch tokens (exclude CLS)
+        thermal_decoded = x[:B, 1:, :]   # [B, 256, D]
+        rgb_decoded = x[B:, 1:, :]       # [B, 256, D]
+
+        # Reshape to [B, D, H, W] for flow computation
+        thermal_decoded_2d = thermal_decoded.permute(0, 2, 1).reshape(B, D, H, W)
+        rgb_decoded_2d = rgb_decoded.permute(0, 2, 1).reshape(B, D, H, W)
+
+        # Global correlation softmax → flow (bidirectional)
+        # flow shape: [2B, 2, H, W], first B is t→r, last B is r→t
+        flow, prob = global_correlation_softmax(thermal_decoded_2d, rgb_decoded_2d, pred_bidir_flow=True)
+        flow_t2r = flow[:B]   # [B, 2, H, W] thermal→RGB
+        flow_r2t = flow[B:]   # [B, 2, H, W] RGB→thermal
+
+        # Reshape encoder features to [B, D, H, W] for warping
+        thermal_feat_2d = thermal_feat.permute(0, 2, 1).reshape(B, D, H, W)
+        rgb_feat_2d = rgb_feat.permute(0, 2, 1).reshape(B, D, H, W)
+
+        # Warp encoder features using predicted flow
+        # thermal warped to RGB space, RGB warped to thermal space
+        thermal_warped = flow_warp(thermal_feat_2d, flow_t2r)  # [B, D, H, W]
+        rgb_warped = flow_warp(rgb_feat_2d, flow_r2t)          # [B, D, H, W]
+
+        # Reshape back to [B, 256, D] for cosine similarity
+        thermal_warped_flat = thermal_warped.reshape(B, D, -1).permute(0, 2, 1)  # [B, 256, D]
+        rgb_warped_flat = rgb_warped.reshape(B, D, -1).permute(0, 2, 1)          # [B, 256, D]
+
+        # Cosine similarity between warped and target (per patch)
+        # thermal_warped should match rgb_feat, rgb_warped should match thermal_feat
+        cos_sim_t2r = F.cosine_similarity(thermal_warped_flat, rgb_feat, dim=-1)      # [B, 256]
+        cos_sim_r2t = F.cosine_similarity(rgb_warped_flat, thermal_feat, dim=-1)      # [B, 256]
+
+        # Average cosine similarity across patches (bidirectional)
+        # Score in range [-1, 1], normalize to [0, 1]
+        flow_score_t2r = (cos_sim_t2r.mean(dim=-1) + 1) / 2  # [B]
+        flow_score_r2t = (cos_sim_r2t.mean(dim=-1) + 1) / 2  # [B]
+        flow_score = (flow_score_t2r + flow_score_r2t) / 2   # [B] bidirectional average
+
+        # Loss: 1 - score (lower when well-matched)
+        flow_loss = 1 - flow_score  # [B]
+
+        return flow_score, flow_loss 
 
     def stage2_inference(self, query_embedding, candidate_embedding):
         TOP_K_SIZE = candidate_embedding.shape[0]
@@ -1238,6 +1321,99 @@ class CrossModalVPR_Net(nn.Module):
             return loss, pred_score
 
         return None, pred_score
+
+    def stage2_forward_distance_flow(self, thermal_feat, rgb_feat, distance_gt=None, tau=10.0, aux_weight=0.3):
+        """
+        Stage 2: CLS main + Flow matching auxiliary loss.
+
+        Main: CLS-based distance prediction (BCE with GT distance)
+        Aux: Flow-based correspondence matching (cosine similarity loss)
+
+        Args:
+            thermal_feat: [B, 256, D] - encoder patch tokens (thermal)
+            rgb_feat: [B, 256, D] - encoder patch tokens (RGB)
+            distance_gt: [B] - GT distance in meters (None for inference)
+            tau: temperature for distance→score conversion (default: 10m)
+            aux_weight: weight for auxiliary flow loss (default: 0.3)
+
+        Returns:
+            loss: total loss if distance_gt is provided, else None
+            main_score: [B] CLS-based matching score (0~1)
+            flow_score: [B] flow-based matching score (0~1)
+        """
+        B = thermal_feat.shape[0]
+        D = thermal_feat.shape[2]
+        H = W = int(math.sqrt(self.patch_count))  # 16x16 = 256
+
+        # ===== CLS Main Score (Bidirectional) =====
+        cls_tokens = self.decoder_cls_token.expand(2 * B, -1, -1)  # [2B, 1, D]
+
+        query_feat = torch.cat([thermal_feat, rgb_feat], dim=0)  # [2B, 256, D]
+        ref_feat = torch.cat([rgb_feat, thermal_feat], dim=0)    # [2B, 256, D]
+
+        query_with_cls = torch.cat([cls_tokens, query_feat], dim=1)  # [2B, 257, D]
+        query_with_cls = query_with_cls + self.decoder_pos_embed_with_cls
+        ref_with_pos = ref_feat + self.decoder_pos_embed  # [2B, 256, D]
+
+        # Decoder forward
+        x = query_with_cls
+        for blk in self.decoder_blocks:
+            x = blk(x, ref_with_pos)
+        x = self.decoder_norm(x)  # [2B, 257, D]
+
+        # CLS-based main score
+        cls_output = x[:, 0, :]  # [2B, D]
+        pred_scores = torch.sigmoid(self.distance_head(cls_output).squeeze(-1))  # [2B]
+        main_score = (pred_scores[:B] + pred_scores[B:]) / 2  # [B]
+
+        # ===== Flow Matching Auxiliary Score =====
+        # Extract decoded patch tokens (exclude CLS)
+        thermal_decoded = x[:B, 1:, :]   # [B, 256, D]
+        rgb_decoded = x[B:, 1:, :]       # [B, 256, D]
+
+        # Reshape to [B, D, H, W] for flow computation
+        thermal_decoded_2d = thermal_decoded.permute(0, 2, 1).reshape(B, D, H, W)
+        rgb_decoded_2d = rgb_decoded.permute(0, 2, 1).reshape(B, D, H, W)
+
+        # Global correlation softmax → flow (bidirectional)
+        flow, _ = global_correlation_softmax(thermal_decoded_2d, rgb_decoded_2d, pred_bidir_flow=True)
+        flow_t2r = flow[:B]   # [B, 2, H, W]
+        flow_r2t = flow[B:]   # [B, 2, H, W]
+
+        # Reshape encoder features to [B, D, H, W] for warping
+        thermal_feat_2d = thermal_feat.permute(0, 2, 1).reshape(B, D, H, W)
+        rgb_feat_2d = rgb_feat.permute(0, 2, 1).reshape(B, D, H, W)
+
+        # Warp encoder features using predicted flow
+        thermal_warped = flow_warp(thermal_feat_2d, flow_t2r)  # [B, D, H, W]
+        rgb_warped = flow_warp(rgb_feat_2d, flow_r2t)          # [B, D, H, W]
+
+        # Reshape back to [B, 256, D]
+        thermal_warped_flat = thermal_warped.reshape(B, D, -1).permute(0, 2, 1)  # [B, 256, D]
+        rgb_warped_flat = rgb_warped.reshape(B, D, -1).permute(0, 2, 1)          # [B, 256, D]
+
+        # Cosine similarity (per patch, bidirectional)
+        cos_sim_t2r = F.cosine_similarity(thermal_warped_flat, rgb_feat, dim=-1)  # [B, 256]
+        cos_sim_r2t = F.cosine_similarity(rgb_warped_flat, thermal_feat, dim=-1)  # [B, 256]
+
+        # Flow score: average cosine similarity, normalized to [0, 1]
+        flow_score = ((cos_sim_t2r.mean(dim=-1) + cos_sim_r2t.mean(dim=-1)) / 2 + 1) / 2  # [B]
+
+        # ===== Combined Loss =====
+        if distance_gt is not None:
+            target_score = self.distance_to_score(distance_gt, tau=tau)  # [B]
+
+            main_loss = F.binary_cross_entropy(main_score, target_score)
+            # Flow aux loss: BCE with same target (closer pairs should have higher flow_score)
+            aux_loss = F.binary_cross_entropy(flow_score, target_score)
+
+            total_loss = main_loss + aux_weight * aux_loss
+
+            return total_loss, main_score, flow_score
+
+        # Inference: combine scores
+        final_score = (main_score + flow_score) / 2
+        return None, final_score, flow_score
 
     @torch.no_grad()
     def stage2_inference_distance(self, thermal_feat, rgb_feats):
