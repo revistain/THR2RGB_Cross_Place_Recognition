@@ -86,6 +86,7 @@ class Parser():
         self.parser.add_argument("--use_pos_as_aligned_rgb", action='store_true', default=False) # CroCo는 동시에 찍은 사진은 reference로 사용하는데, 이게 키면 pos로 수집한걸 사용
         self.parser.add_argument("--use_fast_track", action='store_true', default=False) # training 빠르게 건너뛰어서 실험할때 사용
         self.parser.add_argument("--masking_method", type=str, default="random", choices=['random', 'CLS'])
+        self.parser.add_argument("--isRGBGreyscale", action='store_true', default=False)
         
         # Test options
         self.parser.add_argument("--use_reranking", type=str, default="none", choices=['recon']) # reranking 사용여부 및 선택

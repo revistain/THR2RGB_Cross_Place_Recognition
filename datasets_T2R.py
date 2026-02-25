@@ -103,6 +103,7 @@ class BaseSTheReODual(data.Dataset):
         
         self.dataset_folder = dataset_folder
         self.img_time = args.img_time
+        self.args = args
         self.matStruct = [
             loadmat(os.path.join(self.dataset_folder, split, seq, f'{self.dataset_type}_{split}.mat'))['dbStruct']
             for seq in args.sequences
@@ -314,6 +315,11 @@ class BaseSTheReODual(data.Dataset):
         else:  # ms2
             img = cv2.imread(path, cv2.IMREAD_COLOR)
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        
+        if self.args.isRGBGreyscale:
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+            
         return img
 
     def get_thermal_img(self, path):
