@@ -309,8 +309,7 @@ class CrossModalVPR_Net(nn.Module):
                 - 'rgb_similar_rgb': [B, 3, H, W] - RGB와 유사한 RGB (intra-modal)
             modality: 'rgb' or 'thermal'
         """
-        recon_loss_thermal = None
-        recon_loss_rgb = None
+        recon_losses_dict = None
         mask_thermal = None
 
         if modality == 'rgb':
@@ -319,7 +318,7 @@ class CrossModalVPR_Net(nn.Module):
             if self.training:
                 # recon_pairs가 제공되면 4가지 reconstruction pairs 사용
                 if recon_pairs is not None and self._has_valid_recon_pairs(recon_pairs):
-                    recon_loss_thermal, recon_loss_rgb, mask_thermal, out = self._forward_with_recon_pairs(
+                    recon_losses_dict, mask_thermal, out = self._forward_with_recon_pairs(
                         x, recon_pairs, paired_rgb
                     )
                 else:
@@ -340,7 +339,7 @@ class CrossModalVPR_Net(nn.Module):
         # - feature embedding -> GeM -> Descriptor
         global_desc = self.aggregation(x_feat)
 
-        return global_desc, patch_tokens, [recon_loss_thermal, recon_loss_rgb], mask_thermal
+        return global_desc, patch_tokens, recon_losses_dict, mask_thermal
 
     def _has_valid_recon_pairs(self, recon_pairs):
         """recon_pairs에 유효한 데이터가 있는지 확인"""
@@ -354,64 +353,51 @@ class CrossModalVPR_Net(nn.Module):
         4가지 Reconstruction Pairs를 사용한 forward
 
         Pairs:
-        1. Query Thermal (masked) ← Pos Thermal (ref) : intra-modal thermal
-        2. Pos Thermal (masked) ← Query Thermal (ref) : intra-modal thermal (vice versa)
-        3. Similar RGB (masked) ← RGB-similar RGB (ref) : intra-modal RGB
-        4. Query Thermal (masked) ← Similar RGB (ref) : inter-modal
+        1. Query Thermal (masked) ← Pos Thermal (ref) : intra-modal thermal (uni)
+        2. Similar RGB (masked) ← RGB-similar RGB (ref) : intra-modal RGB (uni)
+        3. Query Thermal (masked) ← Similar RGB (ref) : inter-modal (bi)
+        4. Similar RGB (masked) ← Query Thermal (ref) : inter-modal (bi)
         """
         pos_thermal = recon_pairs.get('pos_thermal')
         similar_rgb = recon_pairs.get('similar_rgb')
         rgb_similar_rgb = recon_pairs.get('rgb_similar_rgb')
 
-        # Query thermal의 full feature (global descriptor용)
+        # Query thermal의 full feature (global descriptor용 및 inter-modal reference용)
         query_thermal_out = self.shared_backbone(query_thermal)
         query_thermal_full = query_thermal_out["x_norm_patchtokens"]
 
-        all_recon_losses = []
+        # Loss dictionary 초기화
+        recon_losses_dict = {
+            'intra_thermal': None,  # Pair 1: Query Thermal ← Pos Thermal
+            'intra_rgb': None,      # Pair 2: Similar RGB ← RGB-similar RGB
+            'inter_t2r': None,      # Pair 3: Query Thermal ← Similar RGB
+            'inter_r2t': None,      # Pair 4: Similar RGB ← Query Thermal
+        }
 
-        # ===== Pair 1 & 2: Thermal ↔ Thermal (intra-modal) =====
+        mask_thermal = None
+
+        # ===== Pair 1: Query Thermal ← Pos Thermal (intra-modal thermal, uni) =====
         if pos_thermal is not None:
-            # Full features for reference
             pos_thermal_out = self.shared_backbone(pos_thermal)
             pos_thermal_full = pos_thermal_out["x_norm_patchtokens"]
 
-            # Masked encoding
             query_visible, mask_query, B_q, N_q, D_q, _ = self.croco_like_encoder(query_thermal, modality='thermal')
-            pos_visible, mask_pos, B_p, N_p, D_p, _ = self.croco_like_encoder(pos_thermal, modality='thermal')
-
-            # Mask token expansion
             query_full = self.croco_encoded_mask_expension(query_visible, mask_query, B_q, N_q, D_q)
-            pos_full = self.croco_encoded_mask_expension(pos_visible, mask_pos, B_p, N_p, D_p)
 
-            # Decoder forward
             query_dec = query_full + self.decoder_pos_embed
-            pos_dec = pos_full + self.decoder_pos_embed
-            query_ref = query_thermal_full + self.decoder_pos_embed
             pos_ref = pos_thermal_full + self.decoder_pos_embed
 
-            # Batch: [query←pos, pos←query]
-            target_batch = torch.cat([query_dec, pos_dec], dim=0)
-            ref_batch = torch.cat([pos_ref, query_ref], dim=0)
-
             for blk in self.decoder_blocks:
-                target_batch = blk(target_batch, ref_batch)
-            target_batch = self.decoder_norm(target_batch)
+                query_dec = blk(query_dec, pos_ref)
+            query_dec = self.decoder_norm(query_dec)
 
-            query_recon = target_batch[:B_q, :, :]
-            pos_recon = target_batch[B_q:, :, :]
-
-            # Prediction & Loss
-            query_pred = self.prediction_thermal_head(query_recon)
-            pos_pred = self.prediction_thermal_head(pos_recon)
-
+            query_pred = self.prediction_thermal_head(query_dec)
             query_target = self.patchify(query_thermal)
-            pos_target = self.patchify(pos_thermal)
 
-            loss_1 = self.calculate_recon_loss(query_pred, mask_query, query_target)
-            loss_2 = self.calculate_recon_loss(pos_pred, mask_pos, pos_target)
-            all_recon_losses.extend([loss_1, loss_2])
+            recon_losses_dict['intra_thermal'] = self.calculate_recon_loss(query_pred, mask_query, query_target)
+            mask_thermal = mask_query
 
-        # ===== Pair 3: Similar RGB ← RGB-similar RGB (intra-modal RGB) =====
+        # ===== Pair 2: Similar RGB ← RGB-similar RGB (intra-modal RGB, uni) =====
         if similar_rgb is not None and rgb_similar_rgb is not None:
             rgb_sim_out = self.shared_backbone(rgb_similar_rgb)
             rgb_sim_full = rgb_sim_out["x_norm_patchtokens"]
@@ -429,60 +415,51 @@ class CrossModalVPR_Net(nn.Module):
             sim_rgb_pred = self.prediction_rgb_head(sim_rgb_dec)
             sim_rgb_target = self.patchify(similar_rgb)
 
-            loss_3 = self.calculate_recon_loss(sim_rgb_pred, mask_sim_rgb, sim_rgb_target)
-            all_recon_losses.append(loss_3)
+            recon_losses_dict['intra_rgb'] = self.calculate_recon_loss(sim_rgb_pred, mask_sim_rgb, sim_rgb_target)
 
-        # ===== Pair 4: Query Thermal ← Similar RGB (inter-modal) =====
+        # ===== Pair 3 & 4: Inter-modal bi-directional =====
         if similar_rgb is not None:
             sim_rgb_out = self.shared_backbone(similar_rgb)
             sim_rgb_full = sim_rgb_out["x_norm_patchtokens"]
 
+            # Masked encoding for both directions
             query_visible_inter, mask_query_inter, B_qi, N_qi, D_qi, _ = self.croco_like_encoder(query_thermal, modality='thermal')
-            query_inter_full = self.croco_encoded_mask_expension(query_visible_inter, mask_query_inter, B_qi, N_qi, D_qi)
+            rgb_visible_inter, mask_rgb_inter, B_ri, N_ri, D_ri, _ = self.croco_like_encoder(similar_rgb, modality='rgb')
 
+            query_inter_full = self.croco_encoded_mask_expension(query_visible_inter, mask_query_inter, B_qi, N_qi, D_qi)
+            rgb_inter_full = self.croco_encoded_mask_expension(rgb_visible_inter, mask_rgb_inter, B_ri, N_ri, D_ri)
+
+            # Decoder input + positional embedding
             query_inter_dec = query_inter_full + self.decoder_pos_embed
+            rgb_inter_dec = rgb_inter_full + self.decoder_pos_embed
+            query_ref = query_thermal_full + self.decoder_pos_embed
             sim_rgb_ref = sim_rgb_full + self.decoder_pos_embed
 
+            # Batch: [thermal←rgb, rgb←thermal]
+            target_batch = torch.cat([query_inter_dec, rgb_inter_dec], dim=0)
+            ref_batch = torch.cat([sim_rgb_ref, query_ref], dim=0)
+
             for blk in self.decoder_blocks:
-                query_inter_dec = blk(query_inter_dec, sim_rgb_ref)
-            query_inter_dec = self.decoder_norm(query_inter_dec)
+                target_batch = blk(target_batch, ref_batch)
+            target_batch = self.decoder_norm(target_batch)
 
-            query_inter_pred = self.prediction_thermal_head(query_inter_dec)
-            query_inter_target = self.patchify(query_thermal)
+            thermal_recon = target_batch[:B_qi, :, :]
+            rgb_recon = target_batch[B_qi:, :, :]
 
-            loss_4 = self.calculate_recon_loss(query_inter_pred, mask_query_inter, query_inter_target)
-            all_recon_losses.append(loss_4)
+            # Pair 3: Query Thermal ← Similar RGB
+            thermal_pred = self.prediction_thermal_head(thermal_recon)
+            thermal_target = self.patchify(query_thermal)
+            recon_losses_dict['inter_t2r'] = self.calculate_recon_loss(thermal_pred, mask_query_inter, thermal_target)
 
-        # Loss 합산
-        if len(all_recon_losses) > 0:
-            # thermal loss (pairs 1, 2, 4)와 rgb loss (pair 3) 분리
-            thermal_losses = []
-            rgb_losses = []
+            # Pair 4: Similar RGB ← Query Thermal
+            rgb_pred = self.prediction_rgb_head(rgb_recon)
+            rgb_target = self.patchify(similar_rgb)
+            recon_losses_dict['inter_r2t'] = self.calculate_recon_loss(rgb_pred, mask_rgb_inter, rgb_target)
 
-            if pos_thermal is not None:
-                thermal_losses.extend([all_recon_losses[0], all_recon_losses[1]])
+            if mask_thermal is None:
+                mask_thermal = mask_query_inter
 
-            if similar_rgb is not None and rgb_similar_rgb is not None:
-                idx = 2 if pos_thermal is not None else 0
-                rgb_losses.append(all_recon_losses[idx])
-
-            if similar_rgb is not None:
-                idx = 3 if (pos_thermal is not None and rgb_similar_rgb is not None) else \
-                      2 if pos_thermal is not None else \
-                      1 if rgb_similar_rgb is not None else 0
-                thermal_losses.append(all_recon_losses[idx])
-
-            recon_loss_thermal = torch.stack(thermal_losses).mean() if thermal_losses else None
-            recon_loss_rgb = torch.stack(rgb_losses).mean() if rgb_losses else None
-        else:
-            recon_loss_thermal = None
-            recon_loss_rgb = None
-
-        # mask는 첫 번째 query thermal의 mask 사용
-        mask_thermal = mask_query if pos_thermal is not None else \
-                       mask_query_inter if similar_rgb is not None else None
-
-        return recon_loss_thermal, recon_loss_rgb, mask_thermal, query_thermal_out
+        return recon_losses_dict, mask_thermal, query_thermal_out
 
     def forward(self, x, flags, paired_rgb=None, recon_pairs=None, return_mask=False):
         if not isinstance(flags, torch.Tensor):
@@ -517,6 +494,159 @@ class CrossModalVPR_Net(nn.Module):
 
     def calculate_recon_loss(self, pred, mask, target):
         return self.reconstruction_criterion(pred=pred, mask=mask, target=target)
+
+    @torch.no_grad()
+    def visualize_reconstruction(self, query_thermal, recon_pairs, batch_idx=0):
+        """
+        Reconstruction 결과를 시각화용으로 반환
+
+        Returns:
+            dict: 각 reconstruction pair에 대한 시각화 데이터
+                - 'intra_thermal': (input, masked, recon, ref)
+                - 'intra_rgb': (input, masked, recon, ref)
+                - 'inter_t2r': (input, masked, recon, ref)
+                - 'inter_r2t': (input, masked, recon, ref)
+        """
+        vis_data = {}
+        pos_thermal = recon_pairs.get('pos_thermal')
+        similar_rgb = recon_pairs.get('similar_rgb')
+        rgb_similar_rgb = recon_pairs.get('rgb_similar_rgb')
+
+        # 배치에서 하나만 추출
+        query_t = query_thermal[batch_idx:batch_idx+1]
+        H, W = query_t.shape[2], query_t.shape[3]
+        h_feat, w_feat = H // 14, W // 14
+
+        # Query thermal의 full feature
+        query_thermal_full = self.shared_backbone(query_t)["x_norm_patchtokens"]
+
+        # Pair 1: Intra Thermal
+        if pos_thermal is not None:
+            pos_t = pos_thermal[batch_idx:batch_idx+1]
+            pos_thermal_full = self.shared_backbone(pos_t)["x_norm_patchtokens"]
+
+            query_visible, mask, B, N, D, _ = self.croco_like_encoder(query_t, modality='thermal')
+            query_full = self.croco_encoded_mask_expension(query_visible, mask, B, N, D)
+
+            query_dec = query_full + self.decoder_pos_embed
+            pos_ref = pos_thermal_full + self.decoder_pos_embed
+
+            for blk in self.decoder_blocks:
+                query_dec = blk(query_dec, pos_ref)
+            query_dec = self.decoder_norm(query_dec)
+
+            pred = self.prediction_thermal_head(query_dec)
+            recon_img = self.unpatchify(pred, h_feat, w_feat)
+            masked_img = self._apply_mask_to_image(query_t, mask, h_feat, w_feat)
+
+            vis_data['intra_thermal'] = {
+                'input': query_t[0].cpu(),
+                'masked': masked_img[0].cpu(),
+                'recon': recon_img[0].cpu(),
+                'ref': pos_t[0].cpu(),
+            }
+
+        # Pair 2: Intra RGB
+        if similar_rgb is not None and rgb_similar_rgb is not None:
+            sim_rgb = similar_rgb[batch_idx:batch_idx+1]
+            rgb_sim = rgb_similar_rgb[batch_idx:batch_idx+1]
+            rgb_sim_full = self.shared_backbone(rgb_sim)["x_norm_patchtokens"]
+
+            sim_visible, mask, B, N, D, _ = self.croco_like_encoder(sim_rgb, modality='rgb')
+            sim_full = self.croco_encoded_mask_expension(sim_visible, mask, B, N, D)
+
+            sim_dec = sim_full + self.decoder_pos_embed
+            rgb_ref = rgb_sim_full + self.decoder_pos_embed
+
+            for blk in self.decoder_blocks:
+                sim_dec = blk(sim_dec, rgb_ref)
+            sim_dec = self.decoder_norm(sim_dec)
+
+            pred = self.prediction_rgb_head(sim_dec)
+            recon_img = self.unpatchify(pred, h_feat, w_feat)
+            masked_img = self._apply_mask_to_image(sim_rgb, mask, h_feat, w_feat)
+
+            vis_data['intra_rgb'] = {
+                'input': sim_rgb[0].cpu(),
+                'masked': masked_img[0].cpu(),
+                'recon': recon_img[0].cpu(),
+                'ref': rgb_sim[0].cpu(),
+            }
+
+        # Pair 3 & 4: Inter-modal
+        if similar_rgb is not None:
+            sim_rgb = similar_rgb[batch_idx:batch_idx+1]
+            sim_rgb_full = self.shared_backbone(sim_rgb)["x_norm_patchtokens"]
+
+            query_visible, mask_t, B_t, N_t, D_t, _ = self.croco_like_encoder(query_t, modality='thermal')
+            rgb_visible, mask_r, B_r, N_r, D_r, _ = self.croco_like_encoder(sim_rgb, modality='rgb')
+
+            query_full = self.croco_encoded_mask_expension(query_visible, mask_t, B_t, N_t, D_t)
+            rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask_r, B_r, N_r, D_r)
+
+            query_dec = query_full + self.decoder_pos_embed
+            rgb_dec = rgb_full + self.decoder_pos_embed
+            query_ref = query_thermal_full + self.decoder_pos_embed
+            sim_rgb_ref = sim_rgb_full + self.decoder_pos_embed
+
+            target_batch = torch.cat([query_dec, rgb_dec], dim=0)
+            ref_batch = torch.cat([sim_rgb_ref, query_ref], dim=0)
+
+            for blk in self.decoder_blocks:
+                target_batch = blk(target_batch, ref_batch)
+            target_batch = self.decoder_norm(target_batch)
+
+            thermal_recon = target_batch[:B_t]
+            rgb_recon = target_batch[B_t:]
+
+            # Inter T2R
+            pred_t = self.prediction_thermal_head(thermal_recon)
+            recon_t = self.unpatchify(pred_t, h_feat, w_feat)
+            masked_t = self._apply_mask_to_image(query_t, mask_t, h_feat, w_feat)
+
+            vis_data['inter_t2r'] = {
+                'input': query_t[0].cpu(),
+                'masked': masked_t[0].cpu(),
+                'recon': recon_t[0].cpu(),
+                'ref': sim_rgb[0].cpu(),
+            }
+
+            # Inter R2T
+            pred_r = self.prediction_rgb_head(rgb_recon)
+            recon_r = self.unpatchify(pred_r, h_feat, w_feat)
+            masked_r = self._apply_mask_to_image(sim_rgb, mask_r, h_feat, w_feat)
+
+            vis_data['inter_r2t'] = {
+                'input': sim_rgb[0].cpu(),
+                'masked': masked_r[0].cpu(),
+                'recon': recon_r[0].cpu(),
+                'ref': query_t[0].cpu(),
+            }
+
+        return vis_data
+
+    def unpatchify(self, x, h_feat, w_feat):
+        """Patchified tensor를 이미지로 복원"""
+        patch_size = 14
+        B, N, C = x.shape
+        x = x.reshape(B, h_feat, w_feat, patch_size, patch_size, 3)
+        x = x.permute(0, 5, 1, 3, 2, 4).contiguous()
+        x = x.reshape(B, 3, h_feat * patch_size, w_feat * patch_size)
+        return x
+
+    def _apply_mask_to_image(self, img, mask, h_feat, w_feat):
+        """Mask를 이미지에 적용 (masked 영역을 회색으로)"""
+        B, C, H, W = img.shape
+        patch_size = 14
+
+        # mask: [B, N] -> [B, 1, h_feat, w_feat]
+        mask_2d = mask.view(B, h_feat, w_feat).unsqueeze(1).float()
+        # upscale to image size
+        mask_img = F.interpolate(mask_2d, size=(H, W), mode='nearest')
+        # masked area to gray
+        masked_img = img.clone()
+        masked_img = masked_img * (1 - mask_img) + 0.5 * mask_img
+        return masked_img
 
 def get_backbone(pretrained_foundation, foundation_model_path, args=None):
     model_path = Path(foundation_model_path)

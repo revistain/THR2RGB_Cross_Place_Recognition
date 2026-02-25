@@ -239,20 +239,44 @@ if __name__ == "__main__":
                     triplet_loss_sum += triplet_loss
 
                 # Add reconstruction loss if enabled
-                if args.use_recon_loss and recon_loss is not None and recon_loss[0] is not None:
+                # recon_loss는 dict: {intra_thermal, intra_rgb, inter_t2r, inter_r2t}
+                if args.use_recon_loss and recon_loss is not None:
                     recon_weight = args.recon_weight
-                    thermal_recon_loss = recon_loss[0]
-                    rgb_recon_loss = recon_loss[1]
-                    combined_recon_loss = (thermal_recon_loss + rgb_recon_loss) / 2
-                    combined_recon_loss = combined_recon_loss.mean()
-                    overall_loss += (combined_recon_loss * recon_weight)
 
-                    wandb.log({
-                        "train/recon_loss(Thermal)": thermal_recon_loss.mean().item()
-                            * recon_weight / (args.train_batch_size * args.negs_num_per_query),
-                        "train/recon_loss(Rgb)": rgb_recon_loss.mean().item()
-                            * recon_weight / (args.train_batch_size * args.negs_num_per_query),
-                    }, step=global_step)
+                    # 유효한 loss들만 수집
+                    valid_losses = []
+                    loss_log = {}
+                    scale_factor = args.train_batch_size * args.negs_num_per_query
+
+                    # Pair 1: Intra-modal Thermal (Query ← Pos Thermal)
+                    if recon_loss.get('intra_thermal') is not None:
+                        loss_1 = recon_loss['intra_thermal']
+                        valid_losses.append(loss_1)
+                        loss_log["train/recon_intra_thermal"] = loss_1.mean().item() * recon_weight / scale_factor
+
+                    # Pair 2: Intra-modal RGB (Similar RGB ← RGB-similar RGB)
+                    if recon_loss.get('intra_rgb') is not None:
+                        loss_2 = recon_loss['intra_rgb']
+                        valid_losses.append(loss_2)
+                        loss_log["train/recon_intra_rgb"] = loss_2.mean().item() * recon_weight / scale_factor
+
+                    # Pair 3: Inter-modal (Query Thermal ← Similar RGB)
+                    if recon_loss.get('inter_t2r') is not None:
+                        loss_3 = recon_loss['inter_t2r']
+                        valid_losses.append(loss_3)
+                        loss_log["train/recon_inter_t2r"] = loss_3.mean().item() * recon_weight / scale_factor
+
+                    # Pair 4: Inter-modal (Similar RGB ← Query Thermal)
+                    if recon_loss.get('inter_r2t') is not None:
+                        loss_4 = recon_loss['inter_r2t']
+                        valid_losses.append(loss_4)
+                        loss_log["train/recon_inter_r2t"] = loss_4.mean().item() * recon_weight / scale_factor
+
+                    if valid_losses:
+                        combined_recon_loss = torch.stack(valid_losses).mean()
+                        overall_loss += (combined_recon_loss * recon_weight)
+                        loss_log["train/recon_loss_combined"] = combined_recon_loss.mean().item() * recon_weight / scale_factor
+                        wandb.log(loss_log, step=global_step)
 
                 overall_loss /= (args.train_batch_size * args.negs_num_per_query)
 
@@ -282,6 +306,46 @@ if __name__ == "__main__":
         # wandb logging (epoch level)
         wandb.log({"train/epoch_avg_loss": epoch_losses.mean(), "epoch": epoch_num}, step=global_step)
         logging.info(f"epoch {epoch_num:02d} time: {str(datetime.now() - epoch_start_time)[:-7]}, ")
+
+        # Reconstruction visualization (every epoch)
+        if args.use_recon_loss and epoch_num % 1 == 0:
+            model.eval()
+            with torch.no_grad():
+                # Get a sample batch for visualization
+                sample_batch = next(iter(triplets_dl))
+                images, _, _, _, recon_images = sample_batch
+                if recon_images is not None:
+                    recon_images_device = {}
+                    for key in recon_images:
+                        if recon_images[key] is not None:
+                            recon_images_device[key] = recon_images[key].to(args.device)
+                        else:
+                            recon_images_device[key] = None
+
+                    vis_data = model.module.visualize_reconstruction(
+                        images.to(args.device),
+                        recon_images_device,
+                        batch_idx=0
+                    )
+
+                    # Save images to logs folder
+                    from torchvision.utils import save_image
+                    vis_dir = Path(args.save_dir) / "recon_vis"
+                    vis_dir.mkdir(parents=True, exist_ok=True)
+
+                    for pair_name, data in vis_data.items():
+                        # Create a grid: input | masked | recon | ref
+                        grid = torch.cat([
+                            data['input'],
+                            data['masked'],
+                            data['recon'].clamp(0, 1),
+                            data['ref']
+                        ], dim=2)  # concatenate along width
+                        save_path = vis_dir / f"epoch{epoch_num:03d}_{pair_name}.png"
+                        save_image(grid, save_path)
+
+                    logging.info(f"Saved reconstruction visualization to {vis_dir}")
+            model.train()
 
         # Update learning rate scheduler
         scheduler.step()
