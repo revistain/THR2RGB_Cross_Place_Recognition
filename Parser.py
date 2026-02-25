@@ -28,6 +28,7 @@ class Parser():
         self.parser.add_argument("--queries_per_epoch", type=int, default=2000)
         self.parser.add_argument("--negs_num_per_query", type=int, default=10)
         self.parser.add_argument("--neg_samples_num", type=int, default=1000)
+        self.parser.add_argument("--num_trainable_blocks", type=int, default=0, help="number of trainable blocks")
 
         # Inference settings
         self.parser.add_argument("--infer_batch_size", type=int, default=64)

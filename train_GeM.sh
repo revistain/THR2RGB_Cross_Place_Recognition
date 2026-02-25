@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=6
+CUDA_VISIBLE_DEVICES=0
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=4 \
@@ -10,7 +10,8 @@ python3 train_wandb.py \
     --lr 3e-5 \
     --train_seq Campus \
     --test_seq Urban Residential \
-    --comment "GeM-beforeA6000(Sthereo,lr3e-5)-sameGeM"
+    --comment "GeM-beforeA6000(Sthereo,lr3e-5)-rgbGreyScale" \
+    --isRGBGreyscale
 
 # Scene 종류 : ['Campus', 'Residential', 'Urban', 'KAIST', 'SNU', 'Valley'] 
 # recon_loss_type: ['mse', 'l1', 'ssim', 'mse+ssim']

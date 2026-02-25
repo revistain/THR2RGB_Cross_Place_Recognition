@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=5
+CUDA_VISIBLE_DEVICES=6
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=4 \
@@ -10,17 +10,15 @@ python3 train_wandb.py \
     --lr 3e-5 \
     --train_seq Campus \
     --test_seq Urban Residential \
-    --comment "CroCo-beforeA6000(Sthereo,lr3e-5)-interintraRecon(r0.8, fixed, CLSmask)-rgbGreyScale" \
-    --croco_mask_ratio 0.8 \
+    --comment "CroCo-beforeA6000(Sthereo,lr3e-5)-interintraRecon(r0.5, fixed, CLSmask)-block4" \
+    --croco_mask_ratio 0.5 \
     --recon_weight 10 \
     --use_recon_loss \
     --recon_loss_type 'l1' \
     --num_decoder_depth 8 \
-    --masking_method CLS \
-    --isRGBGreyscale
+    --masking_method CLS
 
 # Scene 종류 : ['Campus', 'Residential', 'Urban', 'KAIST', 'SNU', 'Valley'] 
 # recon_loss_type: ['mse', 'l1', 'ssim', 'mse+ssim']
-
 
 # claude-monitor --plan pro --timezone Asia/Seoul

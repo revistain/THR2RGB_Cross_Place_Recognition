@@ -107,9 +107,15 @@ if __name__ == "__main__":
     model = torch.nn.DataParallel(model)
 
     # Freeze backbone except adapter layers
+    print("="*30)
+    print("- Tuning backbone layers: ", args.num_trainable_blocks)
+    print("="*30)
     for name, param in model.module.shared_backbone.named_parameters():
         if "adapter" not in name:
             param.requires_grad = False
+        for i in range(args.num_trainable_blocks):
+            num_blocks = len(model.module.shared_backbone.blocks)
+            model.module.shared_backbone.blocks[num_blocks - i - 1].requires_grad_(True)
 
     # Initialize adapter layers
     for n, m in model.named_modules():
@@ -203,22 +209,30 @@ if __name__ == "__main__":
 
                 # Forward pass
                 # recon_images를 device로 이동
-                recon_images_device = None
-                if recon_images is not None:
-                    recon_images_device = {}
-                    for key, val in recon_images.items():
-                        if val is not None:
-                            recon_images_device[key] = val.to(args.device)
-                        else:
-                            recon_images_device[key] = None
+                if args.use_recon_loss:
+                    recon_images_device = None
+                    if recon_images is not None:
+                        recon_images_device = {}
+                        for key, val in recon_images.items():
+                            if val is not None:
+                                recon_images_device[key] = val.to(args.device)
+                            else:
+                                recon_images_device[key] = None
 
-                global_features, patch_embedding, recon_loss, masks = model(
-                    images.to(args.device),
-                    flags=flags,
-                    paired_rgb=aligned_rgbs.to(args.device) if aligned_rgbs is not None else None,
-                    recon_pairs=recon_images_device,
-                    return_mask=True
-                )
+                    global_features, patch_embedding, recon_loss, masks = model(
+                        images.to(args.device),
+                        flags=flags,
+                        paired_rgb=aligned_rgbs.to(args.device) if aligned_rgbs is not None else None,
+                        recon_pairs=recon_images_device,
+                        return_mask=True
+                    )
+                else:
+                    global_features, patch_embedding, recon_loss, masks = model(
+                        images.to(args.device),
+                        flags=flags,
+                        paired_rgb=aligned_rgbs.to(args.device),
+                        return_mask=True
+                    )
 
                 # Process triplet indices
                 triplets_local_indexes = torch.transpose(
