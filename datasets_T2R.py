@@ -610,10 +610,7 @@ class TripletsSTheReODual(BaseSTheReODual):
 
             # Reconstruction pair 샘플링 (use_recon_loss가 True인 경우)
             if args.use_recon_loss and self.pair_sampler is not None:
-                # database의 thermal/rgb features 추출 (RAMEfficient2DMatrix에서 numpy array로 변환)
-                all_thermal_feats = cache[list(range(self.database_num))]
-                all_rgb_feats = all_thermal_feats  # 같은 cache 사용
-
+                # cache를 직접 전달 (RAMEfficient2DMatrix, sparse하므로 pair_sampler에서 None 체크)
                 # Query의 traverse ID
                 query_traverse_id = self.query_traverse_indices.get(query_index) if self.query_traverse_indices else None
 
@@ -621,8 +618,8 @@ class TripletsSTheReODual(BaseSTheReODual):
                 pairs = self.pair_sampler.sample_all_pairs(
                     query_index,
                     query_features,
-                    all_thermal_feats,
-                    all_rgb_feats,
+                    cache,  # RAMEfficient2DMatrix 직접 전달
+                    cache,  # 같은 cache 사용 (thermal/rgb 동일)
                     query_traverse_id=query_traverse_id
                 )
                 self.reconstruction_pairs[query_index] = pairs

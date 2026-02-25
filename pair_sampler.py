@@ -159,7 +159,7 @@ class PairSampler:
         Args:
             rgb_idx: 현재 RGB 인덱스 (제외됨)
             rgb_feat: [D] numpy array - RGB feature
-            all_rgb_feats: [N, D] numpy array - 모든 RGB features
+            all_rgb_feats: [N, D] numpy array or RAMEfficient2DMatrix - 모든 RGB features
             database_utms: [N, 2] numpy array - database 좌표
             same_traverse_indices: [M] numpy array - 같은 traverse의 인덱스들
 
@@ -185,8 +185,21 @@ class PairSampler:
         if len(candidates) == 0:
             return None
 
-        candidate_feats = all_rgb_feats[candidates]
-        result = self.get_similar_by_feature(rgb_feat, candidate_feats, candidates, k=1)
+        # Feature 추출 시 None 체크 (sparse cache 대응)
+        valid_candidates = []
+        valid_feats = []
+        for idx in candidates:
+            feat = all_rgb_feats[idx]
+            if feat is not None:
+                valid_candidates.append(idx)
+                valid_feats.append(feat)
+
+        if len(valid_feats) == 0:
+            return None
+
+        candidate_feats = np.array(valid_feats)
+        valid_candidates = np.array(valid_candidates)
+        result = self.get_similar_by_feature(rgb_feat, candidate_feats, valid_candidates, k=1)
 
         return result[0] if result is not None else None
 
