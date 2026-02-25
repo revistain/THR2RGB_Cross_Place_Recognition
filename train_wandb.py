@@ -23,6 +23,7 @@ import inference
 import network
 import network_only_GeM
 from pathlib import Path
+from pair_sampler import PairSampler
 
 
 def set_seed(seed=42):
@@ -79,10 +80,12 @@ if __name__ == "__main__":
 
     '''Model'''
     if args.use_recon_loss:
+        sampler = PairSampler(triplets_ds.database_utms, triplets_ds.queries_utms, distance_threshold=20.0)
         model = network.CrossModalVPR_Net(
             args,
             pretrained_foundation=True,
             foundation_model_path=args.foundation_model_path,
+            pair_sampler=sampler,
         )
     else:
         model = network_only_GeM.CrossModalVPR_Net(
@@ -185,7 +188,9 @@ if __name__ == "__main__":
             logging.debug(f"Start loading {len(triplets_ds)} triplets as {len(triplets_dl)} batches")
 
             print("- Training...")
-            for images, triplets_local_indexes, _, aligned_rgbs in tqdm(triplets_dl, ncols=100, desc=f"GPU{args.cuda_device}/Epoch {epoch_num:02d}"):
+            for batch_data in tqdm(triplets_dl, ncols=100, desc=f"GPU{args.cuda_device}/Epoch {epoch_num:02d}"):
+                # Unpack batch data (5 elements with recon_images)
+                images, triplets_local_indexes, _, aligned_rgbs, recon_images = batch_data
                 # Use positive as aligned RGB if specified
                 if args.use_pos_as_aligned_rgb:
                     assert images.size(0) % args.train_batch_size == 0
@@ -196,10 +201,21 @@ if __name__ == "__main__":
                     aligned_rgbs = pos_rgbs
 
                 # Forward pass
+                # recon_images를 device로 이동
+                recon_images_device = None
+                if recon_images is not None:
+                    recon_images_device = {}
+                    for key, val in recon_images.items():
+                        if val is not None:
+                            recon_images_device[key] = val.to(args.device)
+                        else:
+                            recon_images_device[key] = None
+
                 global_features, patch_embedding, recon_loss, masks = model(
                     images.to(args.device),
                     flags=flags,
-                    paired_rgb=aligned_rgbs.to(args.device),
+                    paired_rgb=aligned_rgbs.to(args.device) if aligned_rgbs is not None else None,
+                    recon_pairs=recon_images_device,
                     return_mask=True
                 )
 
@@ -278,7 +294,7 @@ if __name__ == "__main__":
         for seq, test_ds in zip(test_sequences, test_ds_list):
             logging.info(f"===== Evaluating Sequence: {seq} =====")
             args.current_epoch = epoch_num
-            recalls, recalls_str = inference.inference(args, test_ds, model, seq_name=seq)
+            recalls, recalls_str = inference.inference(args, test_ds, model)
             logging.info(f"Recalls for {seq}: {recalls_str}")
             logging.info(f"================================================")
             current_epoch_r1_list.append(recalls[0])

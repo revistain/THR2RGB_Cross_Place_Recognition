@@ -61,27 +61,17 @@ class CrossModalVPR_Net(nn.Module):
         self.output_dim = args.features_dim
 
         # Aggregation layers
-        self.rgb_aggregation = nn.Sequential(
+        self.aggregation = nn.Sequential(
             L2Norm(),
             GeM(work_with_tokens=None),
             Flatten(),
-        )
-        self.thermal_aggregation = nn.Sequential(
-            L2Norm(),
-            GeM(work_with_tokens=None),
-            Flatten()
         )
 
     def forward_model(self, x, modality='rgb'):
         """Forward pass for a single modality."""
         out = self.shared_backbone(x)
 
-        if modality == 'rgb':
-            agg_layer = self.rgb_aggregation
-        elif modality == 'thermal':
-            agg_layer = self.thermal_aggregation
-        else:
-            raise ValueError("Modality must be 'rgb' or 'thermal'")
+        agg_layer = self.aggregation
 
         # Process backbone output
         patch_tokens = out["x_norm_patchtokens"]

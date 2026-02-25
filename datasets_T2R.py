@@ -19,6 +19,7 @@ import logging
 import random
 
 from PIL import Image
+from pair_sampler import PairSampler, get_traverse_indices_from_paths
 
 # Denormalize 함수
 def denormalize(tensor):
@@ -62,15 +63,30 @@ def collate_fn(batch):
     triplets_local_indexes  = torch.cat([e[1][None] for e in batch])
     triplets_global_indexes = torch.cat([e[2][None] for e in batch])
     for i, (local_indexes, global_indexes) in enumerate(zip(triplets_local_indexes, triplets_global_indexes)):
-        local_indexes += len(global_indexes) * i 
-    
+        local_indexes += len(global_indexes) * i
+
     # aligned_rgb 처리
     if batch[0][3] is not None:
         aligned_rgbs = torch.stack([e[3] for e in batch], 0)
     else:
         aligned_rgbs = None
-         
-    return images, torch.cat(tuple(triplets_local_indexes)), triplets_global_indexes, aligned_rgbs
+
+    # recon_images 처리 (5번째 요소)
+    if len(batch[0]) > 4 and batch[0][4] is not None:
+        # 각 배치 항목에서 recon_images dict 수집
+        recon_images = {}
+        keys = batch[0][4].keys()
+        for key in keys:
+            # None이 아닌 항목들만 스택
+            valid_items = [e[4][key] for e in batch if e[4] is not None and e[4][key] is not None]
+            if len(valid_items) == len(batch):
+                recon_images[key] = torch.stack(valid_items, 0)
+            else:
+                recon_images[key] = None
+    else:
+        recon_images = None
+
+    return images, torch.cat(tuple(triplets_local_indexes)), triplets_global_indexes, aligned_rgbs, recon_images
 
 
 class BaseSTheReODual(data.Dataset):
@@ -394,6 +410,12 @@ class TripletsSTheReODual(BaseSTheReODual):
         self.queries_num = len(self.rgb_queries_paths)
         self.use_align_rgb = use_align_rgb
 
+        # Reconstruction pair sampling 관련 초기화
+        self.reconstruction_pairs = {}  # query_idx -> pair indices dict
+        self.pair_sampler = None  # compute_triplets_partial에서 초기화
+        self.db_traverse_indices = None
+        self.query_traverse_indices = None
+
     def transform(self, query_img):
         transform_list = [
             v2.ToImage(),
@@ -421,28 +443,55 @@ class TripletsSTheReODual(BaseSTheReODual):
     def __getitem__(self, index):
         if self.is_inference:
             return super().__getitem__(index)
-        
+
         query_index, best_positive_index, neg_indexes = torch.split(
             self.triplets_global_indexes[index],
             (1, 1, self.negs_num_per_query)
         )
-        
+
+        query_index_int = query_index.item()
+
         if self.use_align_rgb:
             query = self.transform(self.get_thermal_img(self.t_queries_paths[query_index]))
-            # query = self.resized_transform(self.get_thermal_img(self.t_queries_paths[query_index]))
             aligned_rgb = self.transform(self.get_rgb_img(self.rgb_queries_paths[query_index]))
         else:
             query = self.transform(self.get_thermal_img(self.t_queries_paths[query_index]))
-            # query = self.resized_transform(self.get_thermal_img(self.t_queries_paths[query_index]))
             aligned_rgb = None
-        
+
         positive = self.transform(self.get_rgb_img(self.rgb_database_paths[best_positive_index]))
         negatives = [self.transform(self.get_rgb_img(self.rgb_database_paths[i])) for i in neg_indexes]
 
         images = torch.stack((query, positive, *negatives), 0)
         triplets_local_indexes = torch.tensor([[0, 1, neg_num + 2] for neg_num in range(len(neg_indexes))])
-        
-        return images, triplets_local_indexes, self.triplets_global_indexes[index], aligned_rgb
+
+        # Reconstruction pairs 로드
+        recon_images = None
+        if query_index_int in self.reconstruction_pairs:
+            pairs = self.reconstruction_pairs[query_index_int]
+            recon_images = {}
+
+            # Pos Thermal (intra-modal: Thermal ← Thermal)
+            if pairs.get('pos_thermal_idx') is not None:
+                pos_thermal_img = self.get_thermal_img(self.t_database_paths[pairs['pos_thermal_idx']])
+                recon_images['pos_thermal'] = self.transform(pos_thermal_img)
+            else:
+                recon_images['pos_thermal'] = None
+
+            # Similar RGB (inter-modal: Thermal ← RGB)
+            if pairs.get('query_similar_rgb_idx') is not None:
+                similar_rgb_img = self.get_rgb_img(self.rgb_database_paths[pairs['query_similar_rgb_idx']])
+                recon_images['similar_rgb'] = self.transform(similar_rgb_img)
+            else:
+                recon_images['similar_rgb'] = None
+
+            # RGB similar RGB (intra-modal: RGB ← RGB)
+            if pairs.get('rgb_similar_rgb_idx') is not None:
+                rgb_similar_rgb_img = self.get_rgb_img(self.rgb_database_paths[pairs['rgb_similar_rgb_idx']])
+                recon_images['rgb_similar_rgb'] = self.transform(rgb_similar_rgb_img)
+            else:
+                recon_images['rgb_similar_rgb'] = None
+
+        return images, triplets_local_indexes, self.triplets_global_indexes[index], aligned_rgb, recon_images
 
     def __len__(self):
         if self.is_inference:
@@ -528,6 +577,25 @@ class TripletsSTheReODual(BaseSTheReODual):
         subset_ds = Subset(self, database_indexes + list(sampled_queries_indexes + self.database_num))
 
         cache = self.compute_cache(args, model, subset_ds, cache_shape=(len(self), args.features_dim))
+
+        # PairSampler 초기화 (처음 한 번만)
+        if args.use_recon_loss and self.pair_sampler is None:
+            logging.info("Initializing PairSampler for reconstruction pairs...")
+            self.db_traverse_indices = get_traverse_indices_from_paths(
+                self.t_database_paths,
+                traverse_names=['morning', 'afternoon', 'evening', 'clearsky', 'rainy', 'nighttime']
+            )
+            self.query_traverse_indices = get_traverse_indices_from_paths(
+                self.t_queries_paths,
+                traverse_names=['morning', 'afternoon', 'evening', 'clearsky', 'rainy', 'nighttime']
+            )
+            self.pair_sampler = PairSampler(
+                self.database_utms,
+                self.queries_utms,
+                traverse_indices=self.db_traverse_indices,
+                distance_threshold=args.hard_positives_dist_threshold
+            )
+
         for query_index in tqdm(sampled_queries_indexes, ncols=100):
             query_features = self.get_query_features(query_index, cache)
             best_positive_index = self.get_best_positive_index(args, query_index, cache, query_features)
@@ -539,6 +607,25 @@ class TripletsSTheReODual(BaseSTheReODual):
             # Take all database images that are negatives and are within the sampled database images (aka database_indexes)
             neg_indexes = self.get_hardest_negatives_indexes(args, cache, query_features, neg_indexes)
             self.triplets_global_indexes.append((query_index, best_positive_index, *neg_indexes))
+
+            # Reconstruction pair 샘플링 (use_recon_loss가 True인 경우)
+            if args.use_recon_loss and self.pair_sampler is not None:
+                # database의 thermal/rgb features 추출 (RAMEfficient2DMatrix에서 numpy array로 변환)
+                all_thermal_feats = cache[list(range(self.database_num))]
+                all_rgb_feats = all_thermal_feats  # 같은 cache 사용
+
+                # Query의 traverse ID
+                query_traverse_id = self.query_traverse_indices.get(query_index) if self.query_traverse_indices else None
+
+                # 모든 reconstruction pairs 샘플링
+                pairs = self.pair_sampler.sample_all_pairs(
+                    query_index,
+                    query_features,
+                    all_thermal_feats,
+                    all_rgb_feats,
+                    query_traverse_id=query_traverse_id
+                )
+                self.reconstruction_pairs[query_index] = pairs
         self.triplets_global_indexes = torch.tensor(self.triplets_global_indexes)
 
 class RAMEfficient2DMatrix:
