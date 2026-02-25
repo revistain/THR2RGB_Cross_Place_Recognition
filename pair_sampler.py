@@ -122,7 +122,7 @@ class PairSampler:
         Args:
             query_idx: query index (거리 제약용)
             query_thermal_feat: [D] numpy array - query thermal feature
-            all_rgb_feats: [N, D] numpy array - 모든 RGB features
+            all_rgb_feats: [N, D] numpy array or RAMEfficient2DMatrix - 모든 RGB features
 
         Returns:
             int or None - 유사한 RGB의 인덱스
@@ -132,8 +132,21 @@ class PairSampler:
         if len(candidates) == 0:
             return None
 
-        candidate_feats = all_rgb_feats[candidates]
-        result = self.get_similar_by_feature(query_thermal_feat, candidate_feats, candidates, k=1)
+        # Feature 추출 시 None 체크 (sparse cache 대응)
+        valid_candidates = []
+        valid_feats = []
+        for idx in candidates:
+            feat = all_rgb_feats[idx]
+            if feat is not None:
+                valid_candidates.append(idx)
+                valid_feats.append(feat)
+
+        if len(valid_feats) == 0:
+            return None
+
+        candidate_feats = np.array(valid_feats)
+        valid_candidates = np.array(valid_candidates)
+        result = self.get_similar_by_feature(query_thermal_feat, candidate_feats, valid_candidates, k=1)
 
         return result[0] if result is not None else None
 
