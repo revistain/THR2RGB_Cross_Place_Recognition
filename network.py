@@ -121,6 +121,64 @@ class L2Norm(nn.Module):
     def forward(self, x):
         return F.normalize(x, p=2, dim=self.dim)
 
+from timm.models.layers import trunc_normal_
+class DistanceModule(nn.Module):
+    def __init__(self, decoder_dim):
+        super().__init__()
+        self.decoder_dim = decoder_dim
+        
+        # 1. 거리 예측 전용 CLS 토큰 (학습 가능한 파라미터)
+        self.decoder_dist_cls_token = nn.Parameter(torch.zeros(1, 1, self.decoder_dim))
+        trunc_normal_(self.decoder_dist_cls_token, std=0.02)
+        
+        # 2. 거리를 예측하는 MLP Head
+        self.distance_head = nn.Sequential(
+            nn.Linear(self.decoder_dim, self.decoder_dim // 2),
+            nn.GELU(),
+            nn.Linear(self.decoder_dim // 2, 1)
+        )
+        
+        # 가중치 초기화 (안정적인 학습을 위해 필수)
+        nn.init.normal_(self.distance_head[0].weight, std=0.02)
+        nn.init.zeros_(self.distance_head[0].bias)
+        nn.init.normal_(self.distance_head[2].weight, std=0.02)
+        nn.init.zeros_(self.distance_head[2].bias)
+        
+    @staticmethod
+    def distance_to_score(distance, tau=20.0):
+        return torch.exp(-distance / tau)
+        
+    def prepend_cls_token(self, patch_features):
+        """
+        [디코더 입력 전 사용] 
+        배치 사이즈에 맞춰 CLS 토큰을 복제하고 패치들 맨 앞에 붙여줍니다.
+        patch_features: [B, N, D]
+        return: [B, N+1, D]
+        """
+        B = patch_features.shape[0]
+        cls_tokens = self.decoder_dist_cls_token.expand(B, -1, -1)
+        return torch.cat([cls_tokens, patch_features], dim=1)
+        
+    def forward(self, decoder_output, distance_gt=None, tau=20.0):
+        """
+        [디코더 출력 후 사용]
+        decoder_output: 디코더를 통과한 결과 [B, N+1, D]
+        distance_gt: 정답 거리(m) [B] (Training 시 제공, Inference 시 None)
+        """
+        # 1. 맨 앞의 CLS 토큰만 추출
+        cls_output = decoder_output[:, 0, :] # [B, D]
+        
+        # 2. MLP 통과 및 Sigmoid로 0~1 사이 점수화
+        logits = self.distance_head(cls_output).squeeze(-1) # [B]
+        pred_scores = torch.sigmoid(logits)
+        
+        # 3. 정답이 주어지면 Loss까지 계산해서 반환
+        if distance_gt is not None:
+            target_scores = self.distance_to_score(distance_gt, tau=tau)
+            loss = F.binary_cross_entropy(pred_scores, target_scores)
+            return loss, pred_scores
+            
+        return None, pred_scores
 
 class CrossModalVPR_Net(nn.Module):
     """
@@ -174,6 +232,9 @@ class CrossModalVPR_Net(nn.Module):
             GeM(work_with_tokens=None),
             Flatten(),
         )
+        
+        # Distance Module
+        distanceModule = DistanceModule(self.decoder_dim)
 
     def _set_mask_token(self, dec_embed_dim):
         self.mask_token = nn.Parameter(torch.zeros(1, 1, dec_embed_dim))

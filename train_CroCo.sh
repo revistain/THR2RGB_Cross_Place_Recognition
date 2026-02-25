@@ -10,13 +10,14 @@ python3 train_wandb.py \
     --lr 3e-5 \
     --train_seq Campus \
     --test_seq Urban Residential \
-    --comment "CroCo-beforeA6000(Sthereo,lr3e-5)-interintraRecon(r0.5, fixed, CLSmask)-block4" \
+    --comment "TEST-CroCo-beforeA6000(Sthereo,lr3e-5)-interintraRecon(r0.5, fixed, CLSmask)-block4" \
     --croco_mask_ratio 0.5 \
     --recon_weight 10 \
     --use_recon_loss \
     --recon_loss_type 'l1' \
     --num_decoder_depth 8 \
-    --masking_method CLS
+    --masking_method CLS \
+    --use_dist_cls_while_Recon
 
 # Scene 종류 : ['Campus', 'Residential', 'Urban', 'KAIST', 'SNU', 'Valley'] 
 # recon_loss_type: ['mse', 'l1', 'ssim', 'mse+ssim']
