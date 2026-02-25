@@ -156,8 +156,9 @@ class CrossModalVPR_Net(nn.Module):
         # Mask and positional embeddings
         self._set_mask_token(self.output_dim)
         self._set_decode_positional_embedding(self.output_dim)
-        self._set_mask_generator(self.patch_count, args.croco_mask_ratio)
+        self._set_mask_generator(self.patch_count, args.croco_mask_ratio, args.masking_method)
         self._set_prediction_head(self.output_dim)
+        self.masking_method = args.masking_method
 
         # Reconstruction criterion
         self.reconstruction_criterion = MaskedMSE(
@@ -182,8 +183,8 @@ class CrossModalVPR_Net(nn.Module):
         self.decoder_pos_embed = nn.Parameter(torch.zeros(1, self.patch_count, dec_embed_dim))
         nn.init.trunc_normal_(self.decoder_pos_embed, std=0.02)
 
-    def _set_mask_generator(self, num_patches, mask_ratio):
-        self.mask_generator = RandomMask(num_patches, mask_ratio)
+    def _set_mask_generator(self, num_patches, mask_ratio, masking_method='random'):
+        self.mask_generator = RandomMask(num_patches, mask_ratio, masking_method=masking_method)
 
     def _set_prediction_head(self, dec_embed_dim):
         hidden_dim = dec_embed_dim * 4
@@ -348,6 +349,13 @@ class CrossModalVPR_Net(nn.Module):
         # 최소 하나 이상의 유효한 pair가 있어야 함
         return any(recon_pairs.get(key) is not None for key in ['pos_thermal', 'similar_rgb', 'rgb_similar_rgb'])
 
+    def _get_cls_score(self, backbone_out):
+        """Extract CLS attention score from backbone output (MHA average)"""
+        if "cls_attention" in backbone_out:
+            # cls_attention: [B, num_heads, N] → [B, N]
+            return backbone_out["cls_attention"].mean(dim=1)
+        return None
+
     def _forward_with_recon_pairs(self, query_thermal, recon_pairs, paired_rgb=None):
         """
         4가지 Reconstruction Pairs를 사용한 forward
@@ -362,9 +370,12 @@ class CrossModalVPR_Net(nn.Module):
         similar_rgb = recon_pairs.get('similar_rgb')
         rgb_similar_rgb = recon_pairs.get('rgb_similar_rgb')
 
+        use_cls_masking = (self.masking_method == 'CLS')
+
         # Query thermal의 full feature (global descriptor용 및 inter-modal reference용)
-        query_thermal_out = self.shared_backbone(query_thermal)
+        query_thermal_out = self.shared_backbone(query_thermal, return_attention=use_cls_masking)
         query_thermal_full = query_thermal_out["x_norm_patchtokens"]
+        query_cls_score = self._get_cls_score(query_thermal_out) if use_cls_masking else None
 
         # Loss dictionary 초기화
         recon_losses_dict = {
@@ -381,7 +392,9 @@ class CrossModalVPR_Net(nn.Module):
             pos_thermal_out = self.shared_backbone(pos_thermal)
             pos_thermal_full = pos_thermal_out["x_norm_patchtokens"]
 
-            query_visible, mask_query, B_q, N_q, D_q, _ = self.croco_like_encoder(query_thermal, modality='thermal')
+            query_visible, mask_query, B_q, N_q, D_q, _ = self.croco_like_encoder(
+                query_thermal, modality='thermal', cls_score=query_cls_score
+            )
             query_full = self.croco_encoded_mask_expension(query_visible, mask_query, B_q, N_q, D_q)
 
             query_dec = query_full + self.decoder_pos_embed
@@ -402,7 +415,13 @@ class CrossModalVPR_Net(nn.Module):
             rgb_sim_out = self.shared_backbone(rgb_similar_rgb)
             rgb_sim_full = rgb_sim_out["x_norm_patchtokens"]
 
-            sim_rgb_visible, mask_sim_rgb, B_sr, N_sr, D_sr, _ = self.croco_like_encoder(similar_rgb, modality='rgb')
+            # Similar RGB의 cls_score 필요
+            sim_rgb_out_attn = self.shared_backbone(similar_rgb, return_attention=use_cls_masking)
+            sim_rgb_cls_score = self._get_cls_score(sim_rgb_out_attn) if use_cls_masking else None
+
+            sim_rgb_visible, mask_sim_rgb, B_sr, N_sr, D_sr, _ = self.croco_like_encoder(
+                similar_rgb, modality='rgb', cls_score=sim_rgb_cls_score
+            )
             sim_rgb_full = self.croco_encoded_mask_expension(sim_rgb_visible, mask_sim_rgb, B_sr, N_sr, D_sr)
 
             sim_rgb_dec = sim_rgb_full + self.decoder_pos_embed
@@ -419,12 +438,17 @@ class CrossModalVPR_Net(nn.Module):
 
         # ===== Pair 3 & 4: Inter-modal bi-directional =====
         if similar_rgb is not None:
-            sim_rgb_out = self.shared_backbone(similar_rgb)
+            sim_rgb_out = self.shared_backbone(similar_rgb, return_attention=use_cls_masking)
             sim_rgb_full = sim_rgb_out["x_norm_patchtokens"]
+            sim_rgb_cls_score = self._get_cls_score(sim_rgb_out) if use_cls_masking else None
 
             # Masked encoding for both directions
-            query_visible_inter, mask_query_inter, B_qi, N_qi, D_qi, _ = self.croco_like_encoder(query_thermal, modality='thermal')
-            rgb_visible_inter, mask_rgb_inter, B_ri, N_ri, D_ri, _ = self.croco_like_encoder(similar_rgb, modality='rgb')
+            query_visible_inter, mask_query_inter, B_qi, N_qi, D_qi, _ = self.croco_like_encoder(
+                query_thermal, modality='thermal', cls_score=query_cls_score
+            )
+            rgb_visible_inter, mask_rgb_inter, B_ri, N_ri, D_ri, _ = self.croco_like_encoder(
+                similar_rgb, modality='rgb', cls_score=sim_rgb_cls_score
+            )
 
             query_inter_full = self.croco_encoded_mask_expension(query_visible_inter, mask_query_inter, B_qi, N_qi, D_qi)
             rgb_inter_full = self.croco_encoded_mask_expension(rgb_visible_inter, mask_rgb_inter, B_ri, N_ri, D_ri)
@@ -512,20 +536,26 @@ class CrossModalVPR_Net(nn.Module):
         similar_rgb = recon_pairs.get('similar_rgb')
         rgb_similar_rgb = recon_pairs.get('rgb_similar_rgb')
 
+        use_cls_masking = (self.masking_method == 'CLS')
+
         # 배치에서 하나만 추출
         query_t = query_thermal[batch_idx:batch_idx+1]
         H, W = query_t.shape[2], query_t.shape[3]
         h_feat, w_feat = H // 14, W // 14
 
-        # Query thermal의 full feature
-        query_thermal_full = self.shared_backbone(query_t)["x_norm_patchtokens"]
+        # Query thermal의 full feature + cls_score
+        query_thermal_out = self.shared_backbone(query_t, return_attention=use_cls_masking)
+        query_thermal_full = query_thermal_out["x_norm_patchtokens"]
+        query_cls_score = self._get_cls_score(query_thermal_out) if use_cls_masking else None
 
         # Pair 1: Intra Thermal
         if pos_thermal is not None:
             pos_t = pos_thermal[batch_idx:batch_idx+1]
             pos_thermal_full = self.shared_backbone(pos_t)["x_norm_patchtokens"]
 
-            query_visible, mask, B, N, D, _ = self.croco_like_encoder(query_t, modality='thermal')
+            query_visible, mask, B, N, D, _ = self.croco_like_encoder(
+                query_t, modality='thermal', cls_score=query_cls_score
+            )
             query_full = self.croco_encoded_mask_expension(query_visible, mask, B, N, D)
 
             query_dec = query_full + self.decoder_pos_embed
@@ -552,7 +582,13 @@ class CrossModalVPR_Net(nn.Module):
             rgb_sim = rgb_similar_rgb[batch_idx:batch_idx+1]
             rgb_sim_full = self.shared_backbone(rgb_sim)["x_norm_patchtokens"]
 
-            sim_visible, mask, B, N, D, _ = self.croco_like_encoder(sim_rgb, modality='rgb')
+            # Similar RGB의 cls_score
+            sim_rgb_out = self.shared_backbone(sim_rgb, return_attention=use_cls_masking)
+            sim_rgb_cls_score = self._get_cls_score(sim_rgb_out) if use_cls_masking else None
+
+            sim_visible, mask, B, N, D, _ = self.croco_like_encoder(
+                sim_rgb, modality='rgb', cls_score=sim_rgb_cls_score
+            )
             sim_full = self.croco_encoded_mask_expension(sim_visible, mask, B, N, D)
 
             sim_dec = sim_full + self.decoder_pos_embed
@@ -576,10 +612,16 @@ class CrossModalVPR_Net(nn.Module):
         # Pair 3 & 4: Inter-modal
         if similar_rgb is not None:
             sim_rgb = similar_rgb[batch_idx:batch_idx+1]
-            sim_rgb_full = self.shared_backbone(sim_rgb)["x_norm_patchtokens"]
+            sim_rgb_out = self.shared_backbone(sim_rgb, return_attention=use_cls_masking)
+            sim_rgb_full = sim_rgb_out["x_norm_patchtokens"]
+            sim_rgb_cls_score = self._get_cls_score(sim_rgb_out) if use_cls_masking else None
 
-            query_visible, mask_t, B_t, N_t, D_t, _ = self.croco_like_encoder(query_t, modality='thermal')
-            rgb_visible, mask_r, B_r, N_r, D_r, _ = self.croco_like_encoder(sim_rgb, modality='rgb')
+            query_visible, mask_t, B_t, N_t, D_t, _ = self.croco_like_encoder(
+                query_t, modality='thermal', cls_score=query_cls_score
+            )
+            rgb_visible, mask_r, B_r, N_r, D_r, _ = self.croco_like_encoder(
+                sim_rgb, modality='rgb', cls_score=sim_rgb_cls_score
+            )
 
             query_full = self.croco_encoded_mask_expension(query_visible, mask_t, B_t, N_t, D_t)
             rgb_full = self.croco_encoded_mask_expension(rgb_visible, mask_r, B_r, N_r, D_r)

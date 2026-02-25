@@ -17,8 +17,9 @@ import wandb
 from Parser import Parser
 import commons
 import utils
-import datasets_T2R
 import inference
+import recon_vis
+import datasets_T2R
 
 import network
 import network_only_GeM
@@ -314,6 +315,7 @@ if __name__ == "__main__":
                 # Get a sample batch for visualization
                 sample_batch = next(iter(triplets_dl))
                 images, _, _, _, recon_images = sample_batch
+                
                 if recon_images is not None:
                     recon_images_device = {}
                     for key in recon_images:
@@ -322,29 +324,33 @@ if __name__ == "__main__":
                         else:
                             recon_images_device[key] = None
 
+                    # Visualization 데이터 가져오기
                     vis_data = model.module.visualize_reconstruction(
                         images.to(args.device),
                         recon_images_device,
                         batch_idx=0
                     )
 
-                    # Save images to logs folder
-                    from torchvision.utils import save_image
                     vis_dir = Path(args.save_dir) / "recon_vis"
                     vis_dir.mkdir(parents=True, exist_ok=True)
 
-                    for pair_name, data in vis_data.items():
-                        # Create a grid: input | masked | recon | ref
-                        grid = torch.cat([
-                            data['input'],
-                            data['masked'],
-                            data['recon'].clamp(0, 1),
-                            data['ref']
-                        ], dim=2)  # concatenate along width
-                        save_path = vis_dir / f"epoch{epoch_num:03d}_{pair_name}.png"
-                        save_image(grid, save_path)
+                    # 1. recon_vis를 사용해 개별 이미지 쌍 저장
+                    recon_vis.save_reconstruction_images(vis_data, vis_dir, epoch=epoch_num)
 
-                    logging.info(f"Saved reconstruction visualization to {vis_dir}")
+                    # 2. recon_vis를 사용해 통합 Grid Figure 생성 및 로컬 저장
+                    grid_path = vis_dir / f"epoch{epoch_num:03d}_grid.png"
+                    fig = recon_vis.visualize_reconstruction_grid(
+                        vis_data,
+                        save_path=grid_path,
+                        title=f"Epoch {epoch_num} Reconstruction"
+                    )
+
+                    # 3. WandB에 Grid 이미지 직접 로깅 (대시보드에서 확인 가능)
+                    if fig is not None:
+                        wandb.log({"val/reconstruction_vis": wandb.Image(fig)}, step=global_step)
+
+                    logging.info(f"Saved and logged reconstruction visualization to {vis_dir}")
+            
             model.train()
 
         # Update learning rate scheduler
