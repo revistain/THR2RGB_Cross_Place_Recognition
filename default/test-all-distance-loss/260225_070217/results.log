@@ -1,0 +1,46 @@
+2026-02-25 07:02:17   Use 1 GPUs and 80 CPUs
+2026-02-25 07:02:18   There are 0 queries without any positives
+2026-02-25 07:02:18   [Train - ['KAIST']] Database: 1152, Queries: 12548, Total: 13700
+2026-02-25 07:02:18   [Test - SNU] Database: 1197, Queries: 12589, Total: 13786
+2026-02-25 07:02:18   [Test - Valley] Database: 179, Queries: 2082, Total: 2261
+2026-02-25 07:02:18   using MLP layer as FFN
+2026-02-25 07:02:22   Start training epoch: 00
+2026-02-25 07:02:43   Initializing PairSampler for reconstruction pairs...
+2026-02-25 07:02:50   
+Traceback (most recent call last):
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/train_wandb.py", line 228, in <module>
+    global_features, patch_embedding, recon_loss, masks = model(
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1532, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1541, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/nn/parallel/data_parallel.py", line 183, in forward
+    return self.module(*inputs[0], **module_kwargs[0])
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1532, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1541, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/network.py", line 637, in forward
+    global_emb, patch_thermal, recon_losses, mask = self.forward_model(
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/network.py", line 385, in forward_model
+    recon_losses_dict, mask_thermal, out = self._forward_with_recon_pairs(
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/network.py", line 571, in _forward_with_recon_pairs
+    target_batch = blk(target_batch, ref_batch)
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1532, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1541, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/network.py", line 59, in forward
+    self_out = self.self_attn(x_norm, x_norm, x_norm)[0]
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1532, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1541, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/nn/modules/activation.py", line 1266, in forward
+    attn_output, attn_output_weights = F.multi_head_attention_forward(
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/nn/functional.py", line 5364, in multi_head_attention_forward
+    q, k, v = _in_projection_packed(query, key, value, in_proj_weight, in_proj_bias)
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/nn/functional.py", line 4886, in _in_projection_packed
+    proj = proj.unflatten(-1, (3, E)).unsqueeze(0).transpose(0, -2).squeeze(-2).contiguous()
+torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 20.00 MiB. GPU 
+

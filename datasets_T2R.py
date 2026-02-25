@@ -86,7 +86,16 @@ def collate_fn(batch):
     else:
         recon_images = None
 
-    return images, torch.cat(tuple(triplets_local_indexes)), triplets_global_indexes, aligned_rgbs, recon_images
+    # distances 처리 (6번째 요소) - dict 형태
+    # 모든 샘플에서 distance 수집 (-1은 invalid를 의미)
+    if len(batch[0]) > 5 and isinstance(batch[0][5], dict):
+        distances = {}
+        for key in batch[0][5].keys():
+            distances[key] = torch.stack([e[5][key] for e in batch], 0)
+    else:
+        distances = None
+
+    return images, torch.cat(tuple(triplets_local_indexes)), triplets_global_indexes, aligned_rgbs, recon_images, distances
 
 
 class BaseSTheReODual(data.Dataset):
@@ -472,32 +481,58 @@ class TripletsSTheReODual(BaseSTheReODual):
 
         # Reconstruction pairs 로드
         recon_images = None
+        # Distance GT for each reconstruction pair (-1 means invalid)
+        distances = {
+            'intra_thermal': -1.0,  # Query ↔ Pos Thermal
+            'inter': -1.0,          # Query ↔ Similar RGB
+            'intra_rgb': -1.0,      # Similar RGB ↔ RGB-similar RGB
+        }
+        query_utm = self.queries_utms[query_index_int]
+
         if query_index_int in self.reconstruction_pairs:
             pairs = self.reconstruction_pairs[query_index_int]
             recon_images = {}
 
             # Pos Thermal (intra-modal: Thermal ← Thermal)
             if pairs.get('pos_thermal_idx') is not None:
-                pos_thermal_img = self.get_thermal_img(self.t_database_paths[pairs['pos_thermal_idx']])
+                pos_thermal_idx = pairs['pos_thermal_idx']
+                pos_thermal_img = self.get_thermal_img(self.t_database_paths[pos_thermal_idx])
                 recon_images['pos_thermal'] = self.transform(pos_thermal_img)
+                # Distance: Query ↔ Pos Thermal
+                pos_thermal_utm = self.database_utms[pos_thermal_idx]
+                distances['intra_thermal'] = float(np.linalg.norm(query_utm - pos_thermal_utm))
             else:
                 recon_images['pos_thermal'] = None
 
             # Similar RGB (inter-modal: Thermal ← RGB)
+            similar_rgb_idx = None
             if pairs.get('query_similar_rgb_idx') is not None:
-                similar_rgb_img = self.get_rgb_img(self.rgb_database_paths[pairs['query_similar_rgb_idx']])
+                similar_rgb_idx = pairs['query_similar_rgb_idx']
+                similar_rgb_img = self.get_rgb_img(self.rgb_database_paths[similar_rgb_idx])
                 recon_images['similar_rgb'] = self.transform(similar_rgb_img)
+                # Distance: Query ↔ Similar RGB
+                similar_rgb_utm = self.database_utms[similar_rgb_idx]
+                distances['inter'] = float(np.linalg.norm(query_utm - similar_rgb_utm))
             else:
                 recon_images['similar_rgb'] = None
 
             # RGB similar RGB (intra-modal: RGB ← RGB)
             if pairs.get('rgb_similar_rgb_idx') is not None:
-                rgb_similar_rgb_img = self.get_rgb_img(self.rgb_database_paths[pairs['rgb_similar_rgb_idx']])
+                rgb_similar_rgb_idx = pairs['rgb_similar_rgb_idx']
+                rgb_similar_rgb_img = self.get_rgb_img(self.rgb_database_paths[rgb_similar_rgb_idx])
                 recon_images['rgb_similar_rgb'] = self.transform(rgb_similar_rgb_img)
+                # Distance: Similar RGB ↔ RGB-similar RGB
+                if similar_rgb_idx is not None:
+                    rgb_similar_rgb_utm = self.database_utms[rgb_similar_rgb_idx]
+                    similar_rgb_utm = self.database_utms[similar_rgb_idx]
+                    distances['intra_rgb'] = float(np.linalg.norm(similar_rgb_utm - rgb_similar_rgb_utm))
             else:
                 recon_images['rgb_similar_rgb'] = None
 
-        return images, triplets_local_indexes, self.triplets_global_indexes[index], aligned_rgb, recon_images
+        # Convert distances to tensor dict
+        distances_tensor = {k: torch.tensor(v, dtype=torch.float32) for k, v in distances.items()}
+
+        return images, triplets_local_indexes, self.triplets_global_indexes[index], aligned_rgb, recon_images, distances_tensor
 
     def __len__(self):
         if self.is_inference:

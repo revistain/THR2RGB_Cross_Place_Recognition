@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=6
+CUDA_VISIBLE_DEVICES=1
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=4 \
@@ -10,8 +10,8 @@ python3 train_wandb.py \
     --lr 3e-5 \
     --train_seq Campus \
     --test_seq Urban Residential \
-    --comment "TEST-CroCo-beforeA6000(Sthereo,lr3e-5)-interintraRecon(r0.5, fixed, CLSmask)-block4" \
-    --croco_mask_ratio 0.5 \
+    --comment "CroCo-beforeA6000(Sthereo,lr3e-5)-interintraRecon(r0.8, fixed, CLSmask)-distanceCLS" \
+    --croco_mask_ratio 0.8 \
     --recon_weight 10 \
     --use_recon_loss \
     --recon_loss_type 'l1' \

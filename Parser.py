@@ -85,6 +85,10 @@ class Parser():
         self.parser.add_argument("--masking_method", type=str, default="random", choices=['random', 'CLS'])
         self.parser.add_argument("--use_dist_cls_while_Recon", action='store_true', default=False)
 
+        # Distance prediction settings
+        self.parser.add_argument("--distance_weight", type=float, default=1.0) # distance loss 가중치
+        self.parser.add_argument("--distance_tau", type=float, default=20.0) # exp(-d/tau) 변환용 tau 값 (미터)
+
         # Training options
         self.parser.add_argument("--use_pos_as_aligned_rgb", action='store_true', default=False) # CroCo는 동시에 찍은 사진은 reference로 사용하는데, 이게 키면 pos로 수집한걸 사용
         self.parser.add_argument("--use_fast_track", action='store_true', default=False) # training 빠르게 건너뛰어서 실험할때 사용

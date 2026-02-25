@@ -196,8 +196,8 @@ if __name__ == "__main__":
 
             print("- Training...")
             for batch_data in tqdm(triplets_dl, ncols=100, desc=f"GPU{args.cuda_device}/Epoch {epoch_num:02d}"):
-                # Unpack batch data (5 elements with recon_images)
-                images, triplets_local_indexes, _, aligned_rgbs, recon_images = batch_data
+                # Unpack batch data (6 elements with recon_images and distances)
+                images, triplets_local_indexes, _, aligned_rgbs, recon_images, distances = batch_data
                 # Use positive as aligned RGB if specified
                 if args.use_pos_as_aligned_rgb:
                     assert images.size(0) % args.train_batch_size == 0
@@ -219,11 +219,18 @@ if __name__ == "__main__":
                             else:
                                 recon_images_device[key] = None
 
+                    # distances dict의 각 tensor를 device로 이동
+                    if distances is not None and isinstance(distances, dict):
+                        distances_device = {k: v.to(args.device) for k, v in distances.items()}
+                    else:
+                        distances_device = None
+
                     global_features, patch_embedding, recon_loss, masks = model(
                         images.to(args.device),
                         flags=flags,
                         paired_rgb=aligned_rgbs.to(args.device) if aligned_rgbs is not None else None,
                         recon_pairs=recon_images_device,
+                        distances=distances_device,
                         return_mask=True
                     )
                 else:
@@ -291,7 +298,32 @@ if __name__ == "__main__":
                         combined_recon_loss = torch.stack(valid_losses).mean()
                         overall_loss += (combined_recon_loss * recon_weight)
                         loss_log["train/recon_loss_combined"] = combined_recon_loss.mean().item() * recon_weight / scale_factor
-                        wandb.log(loss_log, step=global_step)
+
+                    # Distance prediction losses (all pairs)
+                    distance_weight = getattr(args, 'distance_weight', 1.0)
+                    distance_losses = []
+
+                    if recon_loss.get('distance_intra_thermal') is not None:
+                        loss_dist_thermal = recon_loss['distance_intra_thermal']
+                        distance_losses.append(loss_dist_thermal)
+                        loss_log["train/distance_intra_thermal"] = loss_dist_thermal.item()
+
+                    if recon_loss.get('distance_intra_rgb') is not None:
+                        loss_dist_rgb = recon_loss['distance_intra_rgb']
+                        distance_losses.append(loss_dist_rgb)
+                        loss_log["train/distance_intra_rgb"] = loss_dist_rgb.item()
+
+                    if recon_loss.get('distance_inter') is not None:
+                        loss_dist_inter = recon_loss['distance_inter']
+                        distance_losses.append(loss_dist_inter)
+                        loss_log["train/distance_inter"] = loss_dist_inter.item()
+
+                    if distance_losses:
+                        combined_distance_loss = torch.stack(distance_losses).mean()
+                        overall_loss += (combined_distance_loss * distance_weight)
+                        loss_log["train/distance_loss_combined"] = combined_distance_loss.item() * distance_weight / scale_factor
+
+                    wandb.log(loss_log, step=global_step)
 
                 overall_loss /= (args.train_batch_size * args.negs_num_per_query)
 
@@ -328,7 +360,7 @@ if __name__ == "__main__":
             with torch.no_grad():
                 # Get a sample batch for visualization
                 sample_batch = next(iter(triplets_dl))
-                images, _, _, _, recon_images = sample_batch
+                images, _, _, _, recon_images, _ = sample_batch  # 6 elements including distances
                 
                 if recon_images is not None:
                     recon_images_device = {}
