@@ -233,9 +233,14 @@ class CrossModalVPR_Net(nn.Module):
             Flatten(),
         )
         
-        # Distance Module
-        self.distance_module = DistanceModule(self.output_dim)
-        self.distance_tau = getattr(args, 'distance_tau', 20.0)
+        # Distance Module (optional)
+        self.use_distance_module = getattr(args, 'use_distance_module', False)
+        if self.use_distance_module:
+            self.distance_module = DistanceModule(self.output_dim)
+            self.distance_tau = getattr(args, 'distance_tau', 20.0)
+        else:
+            self.distance_module = None
+            self.distance_tau = None
 
     def _set_mask_token(self, dec_embed_dim):
         self.mask_token = nn.Parameter(torch.zeros(1, 1, dec_embed_dim))
@@ -456,7 +461,7 @@ class CrossModalVPR_Net(nn.Module):
         }
 
         mask_thermal = None
-        use_cls_attn_weight = self.args.recon_attn_scale
+        exclude_ratio = getattr(self.args, 'recon_exclude_bottom_ratio', 0.0)
         # ===== Pair 1: Query Thermal ← Pos Thermal (intra-modal thermal, uni) =====
         if pos_thermal is not None:
             pos_thermal_out = self.shared_backbone(pos_thermal)
@@ -470,24 +475,30 @@ class CrossModalVPR_Net(nn.Module):
             query_dec = query_full + self.decoder_pos_embed
             pos_ref = pos_thermal_full + self.decoder_pos_embed
 
-            # Prepend distance CLS token
-            query_dec_with_cls = self.distance_module.prepend_cls_token(query_dec)
+            # Prepend distance CLS token (if using distance module)
+            if self.use_distance_module:
+                query_dec_with_cls = self.distance_module.prepend_cls_token(query_dec)
+            else:
+                query_dec_with_cls = query_dec
 
             for blk in self.decoder_blocks:
                 query_dec_with_cls = blk(query_dec_with_cls, pos_ref)
             query_dec_with_cls = self.decoder_norm(query_dec_with_cls)
 
-            # Remove CLS token for reconstruction
-            query_dec = query_dec_with_cls[:, 1:, :]
+            # Remove CLS token for reconstruction (if using distance module)
+            if self.use_distance_module:
+                query_dec = query_dec_with_cls[:, 1:, :]
+            else:
+                query_dec = query_dec_with_cls
             query_pred = self.prediction_thermal_head(query_dec)
             query_target = self.patchify(query_thermal)
 
-            cls_attn_map = query_cls_score if use_cls_attn_weight else None
+            cls_attn_map = query_cls_score if exclude_ratio > 0 else None
             recon_losses_dict['intra_thermal'] = self.calculate_recon_loss(query_pred, mask_query, query_target, cls_attn_map=cls_attn_map)
             mask_thermal = mask_query
 
             # Distance prediction for Intra-Thermal
-            if distances is not None and 'intra_thermal' in distances:
+            if self.use_distance_module and distances is not None and 'intra_thermal' in distances:
                 dist_gt = distances['intra_thermal'].to(query_thermal.device)
                 valid_mask = dist_gt >= 0
                 if valid_mask.any():
@@ -513,23 +524,29 @@ class CrossModalVPR_Net(nn.Module):
             sim_rgb_dec = sim_rgb_full + self.decoder_pos_embed
             rgb_sim_ref = rgb_sim_full + self.decoder_pos_embed
 
-            # Prepend distance CLS token
-            sim_rgb_dec_with_cls = self.distance_module.prepend_cls_token(sim_rgb_dec)
+            # Prepend distance CLS token (if using distance module)
+            if self.use_distance_module:
+                sim_rgb_dec_with_cls = self.distance_module.prepend_cls_token(sim_rgb_dec)
+            else:
+                sim_rgb_dec_with_cls = sim_rgb_dec
 
             for blk in self.decoder_blocks:
                 sim_rgb_dec_with_cls = blk(sim_rgb_dec_with_cls, rgb_sim_ref)
             sim_rgb_dec_with_cls = self.decoder_norm(sim_rgb_dec_with_cls)
 
-            # Remove CLS token for reconstruction
-            sim_rgb_dec = sim_rgb_dec_with_cls[:, 1:, :]
+            # Remove CLS token for reconstruction (if using distance module)
+            if self.use_distance_module:
+                sim_rgb_dec = sim_rgb_dec_with_cls[:, 1:, :]
+            else:
+                sim_rgb_dec = sim_rgb_dec_with_cls
             sim_rgb_pred = self.prediction_rgb_head(sim_rgb_dec)
             sim_rgb_target = self.patchify(similar_rgb)
 
-            cls_attn_map = sim_rgb_cls_score if use_cls_attn_weight else None
+            cls_attn_map = sim_rgb_cls_score if exclude_ratio > 0 else None
             recon_losses_dict['intra_rgb'] = self.calculate_recon_loss(sim_rgb_pred, mask_sim_rgb, sim_rgb_target, cls_attn_map=cls_attn_map)
 
             # Distance prediction for Intra-RGB
-            if distances is not None and 'intra_rgb' in distances:
+            if self.use_distance_module and distances is not None and 'intra_rgb' in distances:
                 dist_gt = distances['intra_rgb'].to(similar_rgb.device)
                 valid_mask = dist_gt >= 0
                 if valid_mask.any():
@@ -561,9 +578,13 @@ class CrossModalVPR_Net(nn.Module):
             query_ref = query_thermal_full + self.decoder_pos_embed
             sim_rgb_ref = sim_rgb_full + self.decoder_pos_embed
 
-            # Prepend distance CLS token for distance prediction
-            query_inter_dec_with_cls = self.distance_module.prepend_cls_token(query_inter_dec)
-            rgb_inter_dec_with_cls = self.distance_module.prepend_cls_token(rgb_inter_dec)
+            # Prepend distance CLS token for distance prediction (if using distance module)
+            if self.use_distance_module:
+                query_inter_dec_with_cls = self.distance_module.prepend_cls_token(query_inter_dec)
+                rgb_inter_dec_with_cls = self.distance_module.prepend_cls_token(rgb_inter_dec)
+            else:
+                query_inter_dec_with_cls = query_inter_dec
+                rgb_inter_dec_with_cls = rgb_inter_dec
 
             # Batch: [thermal←rgb, rgb←thermal]
             target_batch = torch.cat([query_inter_dec_with_cls, rgb_inter_dec_with_cls], dim=0)
@@ -573,27 +594,31 @@ class CrossModalVPR_Net(nn.Module):
                 target_batch = blk(target_batch, ref_batch)
             target_batch = self.decoder_norm(target_batch)
 
-            # Split batch back and remove CLS token for reconstruction
+            # Split batch back and remove CLS token for reconstruction (if using distance module)
             thermal_decoded = target_batch[:B_qi, :, :]
             rgb_decoded = target_batch[B_qi:, :, :]
 
-            thermal_recon = thermal_decoded[:, 1:, :]  # Remove CLS token
-            rgb_recon = rgb_decoded[:, 1:, :]  # Remove CLS token
+            if self.use_distance_module:
+                thermal_recon = thermal_decoded[:, 1:, :]  # Remove CLS token
+                rgb_recon = rgb_decoded[:, 1:, :]  # Remove CLS token
+            else:
+                thermal_recon = thermal_decoded
+                rgb_recon = rgb_decoded
 
             # Pair 3: Query Thermal ← Similar RGB
             thermal_pred = self.prediction_thermal_head(thermal_recon)
             thermal_target = self.patchify(query_thermal)
-            cls_attn_map = query_cls_score if use_cls_attn_weight else None
+            cls_attn_map = query_cls_score if exclude_ratio > 0 else None
             recon_losses_dict['inter_t2r'] = self.calculate_recon_loss(thermal_pred, mask_query_inter, thermal_target, cls_attn_map=cls_attn_map)
 
             # Pair 4: Similar RGB ← Query Thermal
             rgb_pred = self.prediction_rgb_head(rgb_recon)
             rgb_target = self.patchify(similar_rgb)
-            cls_attn_map = sim_rgb_cls_score if use_cls_attn_weight else None
+            cls_attn_map = sim_rgb_cls_score if exclude_ratio > 0 else None
             recon_losses_dict['inter_r2t'] = self.calculate_recon_loss(rgb_pred, mask_rgb_inter, rgb_target, cls_attn_map=cls_attn_map)
 
             # ===== Distance Prediction (Bidirectional) =====
-            if distances is not None and 'inter' in distances:
+            if self.use_distance_module and distances is not None and 'inter' in distances:
                 # distances['inter']: [B] - similar_rgb와 query_thermal 간 거리 (-1은 invalid)
                 distance_gt = distances['inter'].to(query_thermal.device)
 
