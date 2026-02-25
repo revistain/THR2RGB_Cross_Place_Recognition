@@ -223,7 +223,7 @@ class CrossModalVPR_Net(nn.Module):
             args,
             norm_pix_loss=False,
             masked=True,
-            loss_type=self.recon_loss_type
+            loss_type=self.recon_loss_type,
         )
 
         # Aggregation layers
@@ -412,7 +412,7 @@ class CrossModalVPR_Net(nn.Module):
         # 최소 하나 이상의 유효한 pair가 있어야 함
         return any(recon_pairs.get(key) is not None for key in ['pos_thermal', 'similar_rgb', 'rgb_similar_rgb'])
 
-    def _get_cls_score(self, backbone_out):
+    def _get_cls_attn_map(self, backbone_out):
         """Extract CLS attention score from backbone output (MHA average)"""
         if "cls_attention" in backbone_out:
             # cls_attention: [B, num_heads, N] → [B, N]
@@ -437,12 +437,12 @@ class CrossModalVPR_Net(nn.Module):
         similar_rgb = recon_pairs.get('similar_rgb')
         rgb_similar_rgb = recon_pairs.get('rgb_similar_rgb')
 
-        use_cls_masking = (self.masking_method == 'CLS')
+        use_cls_masking = (self.masking_method in ['CLSDown', 'CLSTop'])
 
         # Query thermal의 full feature (global descriptor용 및 inter-modal reference용)
         query_thermal_out = self.shared_backbone(query_thermal, return_attention=use_cls_masking)
         query_thermal_full = query_thermal_out["x_norm_patchtokens"]
-        query_cls_score = self._get_cls_score(query_thermal_out) if use_cls_masking else None
+        query_cls_score = self._get_cls_attn_map(query_thermal_out) if use_cls_masking else None
 
         # Loss dictionary 초기화
         recon_losses_dict = {
@@ -456,7 +456,7 @@ class CrossModalVPR_Net(nn.Module):
         }
 
         mask_thermal = None
-
+        use_cls_attn_weight = self.args.recon_attn_scale
         # ===== Pair 1: Query Thermal ← Pos Thermal (intra-modal thermal, uni) =====
         if pos_thermal is not None:
             pos_thermal_out = self.shared_backbone(pos_thermal)
@@ -482,7 +482,8 @@ class CrossModalVPR_Net(nn.Module):
             query_pred = self.prediction_thermal_head(query_dec)
             query_target = self.patchify(query_thermal)
 
-            recon_losses_dict['intra_thermal'] = self.calculate_recon_loss(query_pred, mask_query, query_target)
+            cls_attn_map = query_cls_score if use_cls_attn_weight else None
+            recon_losses_dict['intra_thermal'] = self.calculate_recon_loss(query_pred, mask_query, query_target, cls_attn_map=cls_attn_map)
             mask_thermal = mask_query
 
             # Distance prediction for Intra-Thermal
@@ -502,7 +503,7 @@ class CrossModalVPR_Net(nn.Module):
 
             # Similar RGB의 cls_score 필요
             sim_rgb_out_attn = self.shared_backbone(similar_rgb, return_attention=use_cls_masking)
-            sim_rgb_cls_score = self._get_cls_score(sim_rgb_out_attn) if use_cls_masking else None
+            sim_rgb_cls_score = self._get_cls_attn_map(sim_rgb_out_attn) if use_cls_masking else None
 
             sim_rgb_visible, mask_sim_rgb, B_sr, N_sr, D_sr, _ = self.croco_like_encoder(
                 similar_rgb, modality='rgb', cls_score=sim_rgb_cls_score
@@ -524,7 +525,8 @@ class CrossModalVPR_Net(nn.Module):
             sim_rgb_pred = self.prediction_rgb_head(sim_rgb_dec)
             sim_rgb_target = self.patchify(similar_rgb)
 
-            recon_losses_dict['intra_rgb'] = self.calculate_recon_loss(sim_rgb_pred, mask_sim_rgb, sim_rgb_target)
+            cls_attn_map = sim_rgb_cls_score if use_cls_attn_weight else None
+            recon_losses_dict['intra_rgb'] = self.calculate_recon_loss(sim_rgb_pred, mask_sim_rgb, sim_rgb_target, cls_attn_map=cls_attn_map)
 
             # Distance prediction for Intra-RGB
             if distances is not None and 'intra_rgb' in distances:
@@ -540,7 +542,7 @@ class CrossModalVPR_Net(nn.Module):
         if similar_rgb is not None:
             sim_rgb_out = self.shared_backbone(similar_rgb, return_attention=use_cls_masking)
             sim_rgb_full = sim_rgb_out["x_norm_patchtokens"]
-            sim_rgb_cls_score = self._get_cls_score(sim_rgb_out) if use_cls_masking else None
+            sim_rgb_cls_score = self._get_cls_attn_map(sim_rgb_out) if use_cls_masking else None
 
             # Masked encoding for both directions
             query_visible_inter, mask_query_inter, B_qi, N_qi, D_qi, _ = self.croco_like_encoder(
@@ -581,12 +583,14 @@ class CrossModalVPR_Net(nn.Module):
             # Pair 3: Query Thermal ← Similar RGB
             thermal_pred = self.prediction_thermal_head(thermal_recon)
             thermal_target = self.patchify(query_thermal)
-            recon_losses_dict['inter_t2r'] = self.calculate_recon_loss(thermal_pred, mask_query_inter, thermal_target)
+            cls_attn_map = query_cls_score if use_cls_attn_weight else None
+            recon_losses_dict['inter_t2r'] = self.calculate_recon_loss(thermal_pred, mask_query_inter, thermal_target, cls_attn_map=cls_attn_map)
 
             # Pair 4: Similar RGB ← Query Thermal
             rgb_pred = self.prediction_rgb_head(rgb_recon)
             rgb_target = self.patchify(similar_rgb)
-            recon_losses_dict['inter_r2t'] = self.calculate_recon_loss(rgb_pred, mask_rgb_inter, rgb_target)
+            cls_attn_map = sim_rgb_cls_score if use_cls_attn_weight else None
+            recon_losses_dict['inter_r2t'] = self.calculate_recon_loss(rgb_pred, mask_rgb_inter, rgb_target, cls_attn_map=cls_attn_map)
 
             # ===== Distance Prediction (Bidirectional) =====
             if distances is not None and 'inter' in distances:
@@ -645,8 +649,9 @@ class CrossModalVPR_Net(nn.Module):
 
         return final_emb, patch_emb, recon_losses, masks
 
-    def calculate_recon_loss(self, pred, mask, target):
-        return self.reconstruction_criterion(pred=pred, mask=mask, target=target)
+    def calculate_recon_loss(self, pred, mask, target, cls_attn_map=None):
+        exclude_ratio = getattr(self.args, 'recon_exclude_bottom_ratio', 0.0)
+        return self.reconstruction_criterion(pred=pred, mask=mask, target=target, cls_attn_map=cls_attn_map, exclude_ratio=exclude_ratio)
 
     @torch.no_grad()
     def visualize_reconstruction(self, query_thermal, recon_pairs, batch_idx=0):
@@ -665,7 +670,7 @@ class CrossModalVPR_Net(nn.Module):
         similar_rgb = recon_pairs.get('similar_rgb')
         rgb_similar_rgb = recon_pairs.get('rgb_similar_rgb')
 
-        use_cls_masking = (self.masking_method == 'CLS')
+        use_cls_masking = (self.masking_method in ['CLSDown', 'CLSTop'])
 
         # 배치에서 하나만 추출
         query_t = query_thermal[batch_idx:batch_idx+1]
@@ -675,7 +680,7 @@ class CrossModalVPR_Net(nn.Module):
         # Query thermal의 full feature + cls_score
         query_thermal_out = self.shared_backbone(query_t, return_attention=use_cls_masking)
         query_thermal_full = query_thermal_out["x_norm_patchtokens"]
-        query_cls_score = self._get_cls_score(query_thermal_out) if use_cls_masking else None
+        query_cls_score = self._get_cls_attn_map(query_thermal_out) if use_cls_masking else None
 
         # Pair 1: Intra Thermal
         if pos_thermal is not None:
@@ -713,7 +718,7 @@ class CrossModalVPR_Net(nn.Module):
 
             # Similar RGB의 cls_score
             sim_rgb_out = self.shared_backbone(sim_rgb, return_attention=use_cls_masking)
-            sim_rgb_cls_score = self._get_cls_score(sim_rgb_out) if use_cls_masking else None
+            sim_rgb_cls_score = self._get_cls_attn_map(sim_rgb_out) if use_cls_masking else None
 
             sim_visible, mask, B, N, D, _ = self.croco_like_encoder(
                 sim_rgb, modality='rgb', cls_score=sim_rgb_cls_score
@@ -743,7 +748,7 @@ class CrossModalVPR_Net(nn.Module):
             sim_rgb = similar_rgb[batch_idx:batch_idx+1]
             sim_rgb_out = self.shared_backbone(sim_rgb, return_attention=use_cls_masking)
             sim_rgb_full = sim_rgb_out["x_norm_patchtokens"]
-            sim_rgb_cls_score = self._get_cls_score(sim_rgb_out) if use_cls_masking else None
+            sim_rgb_cls_score = self._get_cls_attn_map(sim_rgb_out) if use_cls_masking else None
 
             query_visible, mask_t, B_t, N_t, D_t, _ = self.croco_like_encoder(
                 query_t, modality='thermal', cls_score=query_cls_score

@@ -325,7 +325,7 @@ class BaseSTheReODual(data.Dataset):
             img = cv2.imread(path, cv2.IMREAD_COLOR)
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         
-        if self.args.isRGBGreyscale:
+        if self.args.is_rgb_grey_scale:
             img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
             

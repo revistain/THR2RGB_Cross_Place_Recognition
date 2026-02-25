@@ -90,174 +90,97 @@ class MaskedMSE(torch.nn.Module):
         if 'GV' in args.recon_loss_type:
             self.grad_criterion = GradientVariance(patch_size=14).to('cuda')
         
-    def forward(self, pred, mask, target):
-        """
-        Args:
-            pred: [B, 256, 588] - predicted patches
-            mask: [B, 256] - binary mask
-            target: [B, 256, 588] - target patches
-        Returns:
-            loss: scalar or [B] depending on reduction
-        """
-        if self.norm_pix_loss:
-            mean = target.mean(dim=-1, keepdim=True)
-            var = target.var(dim=-1, keepdim=True)
-            target = (target - mean) / (var + 1.e-6)**.5
-        
-        # ========== Loss 계산 (type별로) ==========
-        if self.loss_type == 'mse':
-            # MSE Loss (기존)
-            loss = (pred - target) ** 2  # [B, 256, 588]
-            loss = loss.mean(dim=-1)     # [B, 256]
-            
-        elif self.loss_type == 'l1':
-            # L1 Loss
-            loss = torch.abs(pred - target)  # [B, 256, 588]
-            loss = loss.mean(dim=-1)         # [B, 256]
-            
-        elif self.loss_type == 'GV':
-            pred_img = unpatchify(pred, self.args.resize[0], self.args.resize[1])
-            target_img = unpatchify(target, self.args.resize[0], self.args.resize[1])
-            loss = self.grad_criterion(pred_img, target_img)  # [B, 256]
+    def forward(self, pred, mask, target, cls_attn_map=None, exclude_ratio=0.0):
+            if self.norm_pix_loss:
+                mean = target.mean(dim=-1, keepdim=True)
+                var = target.var(dim=-1, keepdim=True)
+                target = (target - mean) / (var + 1.e-6)**.5
 
-        elif self.loss_type == 'GV+l1':
-            # L1 loss: [B, 256, 588] -> [B, 256]
-            l1_loss = torch.abs(pred - target).mean(dim=-1)  # [B, 256]
+            # ========== Attention 기반 하위 N% 패치 제외 ==========
+            # cls_attn_map: [B, N] - 원본 attention map
+            # exclude_ratio > 0이면 하위 N% 패치를 mask에서 제외
+            if cls_attn_map is not None and exclude_ratio > 0:
+                # masked 패치 중 하위 exclude_ratio%를 제외
+                # mask: [B, N] (True = masked = loss 계산 대상)
+                masked_count = mask.sum(dim=-1)  # [B]
+                k = (masked_count * exclude_ratio).int()  # 제외할 패치 수
 
-            # GV loss: [B, 256]
-            pred_img = unpatchify(pred, self.args.resize[0], self.args.resize[1])
-            target_img = unpatchify(target, self.args.resize[0], self.args.resize[1])
-            GV_loss = self.grad_criterion(pred_img, target_img)  # [B, 256]
+                # 배치별로 처리
+                exclude_mask = torch.zeros_like(mask)
+                for b in range(mask.shape[0]):
+                    if k[b] > 0:
+                        # masked 패치들의 attention score만 추출
+                        masked_indices = mask[b].nonzero(as_tuple=True)[0]  # masked 패치 인덱스
+                        masked_attn = cls_attn_map[b, masked_indices]  # 해당 패치들의 attention
 
-            # 합산: [B, 256]
-            loss = l1_loss + GV_loss * 0.1
-            # mask 적용은 아래에서 처리
-               
-        elif self.loss_type == 'ssim':
-            # SSIM Loss (이미지로 변환 필요)
-            pred_img = unpatchify(pred, self.args.resize[0], self.args.resize[1])    # [B, 3, 224, 224]
-            target_img = unpatchify(target, self.args.resize[0], self.args.resize[1])
-            
-            # MS-SSIM (1 - SSIM, higher is worse)
-            ssim_value = ms_ssim(
-                pred_img, 
-                target_img, 
-                data_range=1.0,  # normalized to [0, 1]
-                size_average=False  # [B]
-            )
-            
-            loss = 1 - ssim_value  # [B]
-            
-            # Masked 영역만 (patch level로 변환)
-            if self.masked:
-                # SSIM은 이미지 전체에 대한 loss이므로
-                # mask 비율로 scaling
-                mask_ratio = mask.float().mean(dim=1)  # [B]
-                loss = loss * mask_ratio
-            
-            # reduction 처리
-            if self.reduction == 'none':
-                return loss
-            elif self.reduction == 'mean':
-                return loss.mean()
-            else:
-                return loss.sum()
-            
-        elif self.loss_type == 'mse+ssim':
-            # MSE + SSIM 조합
-            mse_loss = (pred - target) ** 2
-            mse_loss = mse_loss.mean(dim=-1)  # [B, 256]
-            
-            # SSIM
-            pred_img = unpatchify(pred, self.args.resize[0], self.args.resize[1])
-            target_img = unpatchify(target, self.args.resize[0], self.args.resize[1])
-            ssim_value = ms_ssim(
-                pred_img, 
-                target_img, 
-                data_range=1.0,
-                size_average=False
-            )
-            ssim_loss = 1 - ssim_value  # [B]
-            
-            # MSE는 patch-level, SSIM은 image-level
-            # MSE 먼저 처리
-            if self.masked:
-                mse_loss = (mse_loss * mask).sum(dim=-1) / mask.sum(dim=-1)  # [B]
-            else:
-                mse_loss = mse_loss.mean(dim=-1)  # [B]
-            
-            # SSIM에 mask 비율 적용
-            if self.masked:
-                mask_ratio = mask.float().mean(dim=1)
-                ssim_loss = ssim_loss * mask_ratio
-            
-            # 조합 (0.5 : 0.5)
-            # ssim_ratio = 0.84
-            ssim_ratio = 0.5
-            loss = ssim_ratio * mse_loss + (1-ssim_ratio) * ssim_loss  # [B]
-            
-            # reduction
-            if self.reduction == 'none':
-                return loss
-            elif self.reduction == 'mean':
-                return loss.mean()
-            else:
-                return loss.sum()
-        elif self.loss_type == 'l1+ssim':
-            # l1 + SSIM 조합
-            l1_loss = torch.abs(pred - target)
-            l1_loss = l1_loss.mean(dim=-1)  # [B, 256]
-            
-            # SSIM
-            pred_img = unpatchify(pred, self.args.resize[0], self.args.resize[1])
-            target_img = unpatchify(target, self.args.resize[0], self.args.resize[1])
-            ssim_value = ms_ssim(
-                pred_img, 
-                target_img, 
-                data_range=1.0,
-                size_average=False
-            )
-            ssim_loss = 1 - ssim_value  # [B]
-            
-            # MSE는 patch-level, SSIM은 image-level
-            # MSE 먼저 처리
-            if self.masked:
-                l1_loss = (l1_loss * mask).sum(dim=-1) / mask.sum(dim=-1)  # [B]
-            else:
-                l1_loss = l1_loss.mean(dim=-1)  # [B]
-            
-            # SSIM에 mask 비율 적용
-            if self.masked:
-                mask_ratio = mask.float().mean(dim=1)
-                ssim_loss = ssim_loss * mask_ratio
-            
-            # 조합 (0.5 : 0.5)
-            # ssim_ratio = 0.84
-            ssim_ratio = 0.5
-            loss = ssim_ratio * l1_loss + (1-ssim_ratio) * ssim_loss  # [B]
-            
-            # reduction
-            if self.reduction == 'none':
-                return loss
-            elif self.reduction == 'mean':
-                return loss.mean()
-            else:
-                return loss.sum()
-         
-        else:
-            raise ValueError(f"Unknown loss_type: {self.loss_type}")
-        # =========================================
-        
-        # MSE, L1은 patch-level이므로 mask 적용
-        if self.loss_type in ['mse', 'l1', 'GV', 'GV+l1']:
-            if self.masked:
-                loss = (loss * mask).sum(dim=-1) / mask.sum(dim=-1)  # [B]
-            else:
-                loss = loss.mean(dim=-1)  # [B]
+                        # 하위 k[b]개의 attention을 가진 패치 인덱스 찾기
+                        _, low_attn_idx = masked_attn.topk(k[b].item(), largest=False)
+                        exclude_indices = masked_indices[low_attn_idx]
+                        exclude_mask[b, exclude_indices] = True
 
-            if self.reduction == 'none':
-                return loss  # [B]
-            elif self.reduction == 'mean':
-                return loss.mean()  # scalar
+                # 하위 attention 패치들을 mask에서 제외
+                mask = mask & ~exclude_mask
+
+            # ========== Loss 계산 ==========
+            if self.loss_type == 'mse':
+                loss = (pred - target) ** 2  # [B, 256, 588]
+                loss = loss.mean(dim=-1)     # [B, 256] - 차원을 먼저 맞춰줍니다!
+
+            elif self.loss_type == 'l1':
+                loss = torch.abs(pred - target)  # [B, 256, 588]
+                loss = loss.mean(dim=-1)         # [B, 256]
+
+            elif self.loss_type == 'ssim':
+                pred_img = unpatchify(pred, self.args.resize[0], self.args.resize[1])
+                target_img = unpatchify(target, self.args.resize[0], self.args.resize[1])
+                ssim_value = ms_ssim(pred_img, target_img, data_range=1.0, size_average=False)
+
+                loss = 1 - ssim_value  # [B] (이미지 단위 스칼라)
+
+                if self.masked:
+                    mask_ratio = mask.float().mean(dim=1)
+                    loss = loss * mask_ratio
+
+                if self.reduction == 'none': return loss
+                elif self.reduction == 'mean': return loss.mean()
+                else: return loss.sum()
+
+            elif self.loss_type == 'mse+ssim':
+                mse_loss = (pred - target) ** 2
+                mse_loss = mse_loss.mean(dim=-1)  # [B, 256]
+
+                if self.masked:
+                    mse_loss = (mse_loss * mask).sum(dim=-1) / mask.sum(dim=-1).clamp(min=1e-6)
+                else:
+                    mse_loss = mse_loss.mean(dim=-1)
+
+                # SSIM 파트
+                pred_img = unpatchify(pred, self.args.resize[0], self.args.resize[1])
+                target_img = unpatchify(target, self.args.resize[0], self.args.resize[1])
+                ssim_value = ms_ssim(pred_img, target_img, data_range=1.0, size_average=False)
+                ssim_loss = 1 - ssim_value  # [B]
+
+                if self.masked:
+                    ssim_loss = ssim_loss * mask.float().mean(dim=1)
+
+                ssim_ratio = 0.5
+                loss = ssim_ratio * mse_loss + (1-ssim_ratio) * ssim_loss  # [B]
+
+                if self.reduction == 'none': return loss
+                elif self.reduction == 'mean': return loss.mean()
+                else: return loss.sum()
+
             else:
-                return loss.sum()  # scalar
+                raise ValueError(f"Unknown loss_type: {self.loss_type}")
+
+            # =========================================
+            # 단일 패치 레벨 Loss (MSE, L1) 최종 정리 (위에 해당 안 된 것들)
+            if self.loss_type in ['mse', 'l1']:
+                if self.masked:
+                    loss = (loss * mask).sum(dim=-1) / mask.sum(dim=-1).clamp(min=1e-6)
+                else:
+                    loss = loss.mean(dim=-1)
+
+                if self.reduction == 'none': return loss
+                elif self.reduction == 'mean': return loss.mean()
+                else: return loss.sum()

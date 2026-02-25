@@ -25,10 +25,16 @@ class RandomMask(nn.Module):
             noise = torch.rand(x.size(0), self.num_patches, device=x.device) 
             argsort = torch.argsort(noise, dim=1) 
             return argsort < self.num_mask
-        elif self.masking_method == 'CLS':
+        elif self.masking_method == 'CLSDown':
             # cls_score: [B,N] / 신기하다
             assert cls_score is not None
             ids_shuffle = torch.argsort(cls_score, dim=1, descending=True)
             ranks = torch.argsort(ids_shuffle, dim=1)
             return ranks < self.num_mask
-                    
+        elif self.masking_method == 'CLSTop':
+            # cls_score: [B,N] / 신기하다
+            assert cls_score is not None
+            ids_shuffle = torch.argsort(cls_score, dim=1, descending=False)
+            ranks = torch.argsort(ids_shuffle, dim=1)
+            return ranks < self.num_mask
+                                
