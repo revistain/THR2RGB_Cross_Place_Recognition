@@ -122,6 +122,69 @@ class L2Norm(nn.Module):
         return F.normalize(x, p=2, dim=self.dim)
 
 from timm.models.layers import trunc_normal_
+
+# ========== Cross-Attention Regularization Losses ==========
+def smoothness_loss(attn_map, h_feat, w_feat):
+    """
+    Horn-Schunck style smoothness loss for cross-attention.
+    Penalizes spatial gradient of attention map to encourage smooth attention.
+
+    Args:
+        attn_map: [B, N_query, N_key] attention weights
+        h_feat, w_feat: spatial dimensions of key patches
+
+    Returns:
+        scalar loss
+    """
+    B, N_q, N_k = attn_map.shape
+
+    # Reshape attention to spatial grid: [B, N_q, h, w]
+    attn_2d = attn_map.view(B, N_q, h_feat, w_feat)
+
+    # Compute spatial gradients (finite differences)
+    # ∂A/∂x: difference along width
+    grad_x = attn_2d[:, :, :, 1:] - attn_2d[:, :, :, :-1]  # [B, N_q, h, w-1]
+    # ∂A/∂y: difference along height
+    grad_y = attn_2d[:, :, 1:, :] - attn_2d[:, :, :-1, :]  # [B, N_q, h-1, w]
+
+    # Horn-Schunck: (∂A/∂x)^2 + (∂A/∂y)^2
+    loss = (grad_x ** 2).mean() + (grad_y ** 2).mean()
+
+    return loss
+
+
+def cycle_consistency_loss(attn_t2r, attn_r2t):
+    """
+    Cycle consistency loss for bidirectional cross-attention.
+    Ensures attn_T2R @ attn_R2T ≈ Identity.
+
+    Args:
+        attn_t2r: [B, N_t, N_r] - thermal query attending to RGB key
+        attn_r2t: [B, N_r, N_t] - RGB query attending to thermal key
+
+    Returns:
+        scalar loss
+    """
+    B, N_t, N_r = attn_t2r.shape
+
+    # Forward cycle: T → R → T
+    # attn_t2r @ attn_r2t: [B, N_t, N_r] @ [B, N_r, N_t] = [B, N_t, N_t]
+    cycle_t = torch.bmm(attn_t2r, attn_r2t)  # [B, N_t, N_t]
+
+    # Target: Identity matrix
+    identity_t = torch.eye(N_t, device=attn_t2r.device).unsqueeze(0).expand(B, -1, -1)
+
+    # L2 loss between cycle and identity
+    loss_t = F.mse_loss(cycle_t, identity_t)
+
+    # Backward cycle: R → T → R
+    cycle_r = torch.bmm(attn_r2t, attn_t2r)  # [B, N_r, N_r]
+    identity_r = torch.eye(N_r, device=attn_r2t.device).unsqueeze(0).expand(B, -1, -1)
+    loss_r = F.mse_loss(cycle_r, identity_r)
+
+    return (loss_t + loss_r) / 2
+
+
 class DistanceModule(nn.Module):
     def __init__(self, decoder_dim):
         super().__init__()
@@ -458,6 +521,8 @@ class CrossModalVPR_Net(nn.Module):
             'distance_intra_thermal': None,  # Intra-Thermal distance loss
             'distance_intra_rgb': None,      # Intra-RGB distance loss
             'distance_inter': None,          # Inter-modal distance loss
+            'smoothness': None,              # Cross-attention smoothness loss
+            'cycle': None,                   # Cycle consistency loss
         }
 
         mask_thermal = None
@@ -590,9 +655,44 @@ class CrossModalVPR_Net(nn.Module):
             target_batch = torch.cat([query_inter_dec_with_cls, rgb_inter_dec_with_cls], dim=0)
             ref_batch = torch.cat([sim_rgb_ref, query_ref], dim=0)
 
-            for blk in self.decoder_blocks:
-                target_batch = blk(target_batch, ref_batch)
+            # Check if we need cross-attention for regularization
+            use_smoothness = getattr(self.args, 'use_smoothness_loss', False)
+            use_cycle = getattr(self.args, 'use_cycle_loss', False)
+            need_cross_attn = use_smoothness or use_cycle
+
+            for i, blk in enumerate(self.decoder_blocks):
+                # Only get attention from last layer for efficiency
+                return_attn = need_cross_attn and (i == len(self.decoder_blocks) - 1)
+                target_batch = blk(target_batch, ref_batch, return_attention=return_attn)
+
             target_batch = self.decoder_norm(target_batch)
+
+            # Extract cross-attention and compute regularization losses
+            if need_cross_attn:
+                # Get cross-attention from last decoder block: [2B, N_q, N_k]
+                cross_attn = self.decoder_blocks[-1].cross_attn_weights
+
+                # Split batch: T2R and R2T
+                attn_t2r = cross_attn[:B_qi, :, :]  # [B, N_t, N_r] thermal query → RGB key
+                attn_r2t = cross_attn[B_qi:, :, :]  # [B, N_r, N_t] RGB query → thermal key
+
+                # If using distance module, remove CLS token from attention
+                if self.use_distance_module:
+                    attn_t2r = attn_t2r[:, 1:, :]  # [B, N_t, N_r]
+                    attn_r2t = attn_r2t[:, 1:, :]  # [B, N_r, N_t]
+
+                h_feat = int(query_thermal.shape[2] / 14)
+                w_feat = int(query_thermal.shape[3] / 14)
+
+                # Smoothness loss (Horn-Schunck style)
+                if use_smoothness:
+                    smooth_t2r = smoothness_loss(attn_t2r, h_feat, w_feat)
+                    smooth_r2t = smoothness_loss(attn_r2t, h_feat, w_feat)
+                    recon_losses_dict['smoothness'] = (smooth_t2r + smooth_r2t) / 2
+
+                # Cycle consistency loss
+                if use_cycle:
+                    recon_losses_dict['cycle'] = cycle_consistency_loss(attn_t2r, attn_r2t)
 
             # Split batch back and remove CLS token for reconstruction (if using distance module)
             thermal_decoded = target_batch[:B_qi, :, :]

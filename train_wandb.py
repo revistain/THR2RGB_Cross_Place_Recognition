@@ -323,6 +323,19 @@ if __name__ == "__main__":
                         overall_loss += (combined_distance_loss * distance_weight)
                         loss_log["train/distance_loss_combined"] = combined_distance_loss.item() * distance_weight / scale_factor
 
+                    # Cross-attention regularization losses (Smoothness & Cycle)
+                    if getattr(args, 'use_smoothness_loss', False) and recon_loss.get('smoothness') is not None:
+                        smoothness_weight = getattr(args, 'smoothness_weight', 0.1)
+                        smoothness_loss_val = recon_loss['smoothness']
+                        overall_loss += (smoothness_loss_val * smoothness_weight)
+                        loss_log["train/smoothness_loss"] = smoothness_loss_val.item() * smoothness_weight
+
+                    if getattr(args, 'use_cycle_loss', False) and recon_loss.get('cycle') is not None:
+                        cycle_weight = getattr(args, 'cycle_weight', 0.1)
+                        cycle_loss_val = recon_loss['cycle']
+                        overall_loss += (cycle_loss_val * cycle_weight)
+                        loss_log["train/cycle_loss"] = cycle_loss_val.item() * cycle_weight
+
                     wandb.log(loss_log, step=global_step)
 
                 overall_loss /= (args.train_batch_size * args.negs_num_per_query)

@@ -98,6 +98,16 @@ class Parser():
 
         # Test options
         self.parser.add_argument("--use_reranking", type=str, default="none", choices=['recon']) # reranking 사용여부 및 선택
+
+        # Cross-attention regularization (Smoothness & Cycle Consistency)
+        self.parser.add_argument("--use_smoothness_loss", action='store_true', default=False,
+                            help="Enable smoothness loss on cross-attention (Horn-Schunck style)")
+        self.parser.add_argument("--smoothness_weight", type=float, default=0.1,
+                            help="Weight for smoothness loss")
+        self.parser.add_argument("--use_cycle_loss", action='store_true', default=False,
+                            help="Enable cycle consistency loss (attn_T2R @ attn_R2T ≈ I)")
+        self.parser.add_argument("--cycle_weight", type=float, default=0.1,
+                            help="Weight for cycle consistency loss")
         
     def parse_arguments(self):
         args = self.parser.parse_args()
