@@ -421,6 +421,14 @@ class TripletsSTheReODual(BaseSTheReODual):
         ]
         self.rgb_queries_paths = np.delete(self.rgb_queries_paths, queries_without_any_hard_positive)
         self.t_queries_paths = np.delete(self.t_queries_paths, queries_without_any_hard_positive)
+        self.queries_utms = np.delete(self.queries_utms, queries_without_any_hard_positive, axis=0)
+
+        if len(queries_without_any_hard_positive) > 0:
+            self.soft_positives_per_query = np.delete(self.soft_positives_per_query, queries_without_any_hard_positive, axis=0)
+            
+        self.rgb_img_paths = list(self.rgb_database_paths) + list(self.rgb_queries_paths)
+        self.t_img_paths = list(self.t_database_paths) + list(self.t_queries_paths)
+        # ----------------------------------------------------
 
         self.queries_num = len(self.rgb_queries_paths)
         self.use_align_rgb = use_align_rgb

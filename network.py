@@ -155,33 +155,22 @@ def smoothness_loss(attn_map, h_feat, w_feat):
 
 def cycle_consistency_loss(attn_t2r, attn_r2t):
     """
-    Cycle consistency loss for bidirectional cross-attention.
-    Ensures attn_T2R @ attn_R2T ≈ Identity.
-
-    Args:
-        attn_t2r: [B, N_t, N_r] - thermal query attending to RGB key
-        attn_r2t: [B, N_r, N_t] - RGB query attending to thermal key
-
-    Returns:
-        scalar loss
+    Negative Log-Likelihood style cycle consistency.
     """
-    B, N_t, N_r = attn_t2r.shape
-
-    # Forward cycle: T → R → T
-    # attn_t2r @ attn_r2t: [B, N_t, N_r] @ [B, N_r, N_t] = [B, N_t, N_t]
-    cycle_t = torch.bmm(attn_t2r, attn_r2t)  # [B, N_t, N_t]
-
-    # Target: Identity matrix
-    identity_t = torch.eye(N_t, device=attn_t2r.device).unsqueeze(0).expand(B, -1, -1)
-
-    # L2 loss between cycle and identity
-    loss_t = F.mse_loss(cycle_t, identity_t)
-
-    # Backward cycle: R → T → R
-    cycle_r = torch.bmm(attn_r2t, attn_t2r)  # [B, N_r, N_r]
-    identity_r = torch.eye(N_r, device=attn_r2t.device).unsqueeze(0).expand(B, -1, -1)
-    loss_r = F.mse_loss(cycle_r, identity_r)
-
+    # Forward cycle: [B, N_t, N_t]
+    cycle_t = torch.bmm(attn_t2r, attn_r2t)
+    # Backward cycle: [B, N_r, N_r]
+    cycle_r = torch.bmm(attn_r2t, attn_t2r)
+    
+    # 대각선 원소(정답 위치)만 추출
+    diag_t = cycle_t.diagonal(dim1=-2, dim2=-1)  # [B, N_t]
+    diag_r = cycle_r.diagonal(dim1=-2, dim2=-1)  # [B, N_r]
+    
+    # -log(대각선 확률) -> 확률이 1에 가까워질수록 loss는 0으로 감
+    # 0이 되어 log가 터지는 것을 막기 위해 1e-8 추가
+    loss_t = -torch.log(diag_t + 1e-8).mean()
+    loss_r = -torch.log(diag_r + 1e-8).mean()
+    
     return (loss_t + loss_r) / 2
 
 
