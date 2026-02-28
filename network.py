@@ -102,28 +102,32 @@ class AffinityAggregator(nn.Module):
         self.col_linear = nn.Linear(num_patches, 1)
 
     def forward(self, patch_tokens):
-        # patch_tokens: (B, N, C)
+        # patch_tokens: (B, M, C) where M can vary (256 for full, ~64 for masked)
 
         # Step 1: L2 normalize patch tokens (cosine similarity로 변환)
         patch_tokens_norm = F.normalize(patch_tokens, p=2, dim=-1)
 
         # Step 2: Affinity matrix (값 범위: -1 ~ 1)
-        affinity = patch_tokens_norm @ patch_tokens_norm.transpose(-1, -2)  # (B, N, N)
+        affinity = patch_tokens_norm @ patch_tokens_norm.transpose(-1, -2)  # (B, M, M)
 
-        # Step 3: Row-wise linear (N → C)
+        # Step 3: Adaptive pooling to fixed size (M, M) → (num_patches, num_patches)
+        # 이렇게 하면 visible tokens 수에 관계없이 동일한 크기로 처리
+        affinity = F.adaptive_avg_pool2d(
+            affinity.unsqueeze(1),  # (B, 1, M, M)
+            (self.num_patches, self.num_patches)  # (256, 256)
+        ).squeeze(1)  # (B, 256, 256)
+
+        # Step 4: Row-wise linear (N → C)
         x = self.row_linear(affinity)  # (B, N, C)
 
-        # Step 4: Transpose
+        # Step 5: Transpose
         x = x.transpose(-1, -2)  # (B, C, N)
 
-        # Step 5: Col-wise linear (N → 1)
+        # Step 6: Col-wise linear (N → 1)
         x = self.col_linear(x)  # (B, C, 1)
 
-        # Step 6: Squeeze
+        # Step 7: Squeeze
         x = x.squeeze(-1)  # (B, C)
-
-        # Step 7: L2 normalize output (GeM과 동일한 scale)
-        x = F.normalize(x, p=2, dim=-1)
 
         return x
 
@@ -227,6 +231,11 @@ class CrossModalVPR_Net(nn.Module):
             num_patches=self.patch_count,  # (224/14)^2 = 256
             embed_dim=self.output_dim      # 768
         )
+
+        # Descriptor mixer (concat 후 channel mixing)
+        # GeM (C) + Affinity (C) = 2C → mixer_dim
+        self.mixer_dim = args.affinity_dim  # 파라미터 이름은 그대로 사용
+        self.descriptor_mixer = nn.Linear(self.output_dim * 2, self.mixer_dim)
 
         # CLS token positional embedding for decoder (learnable)
         self.decoder_cls_pos = nn.Parameter(torch.zeros(1, 1, self.output_dim))
@@ -388,11 +397,11 @@ class CrossModalVPR_Net(nn.Module):
                 # CroCo 태우기전 결과저장 (paried_thermal 뒤에서 안써서 clone 안했음)
                 out = paired_thermal
 
-                # ========== Affinity descriptor 계산 ==========
-                # Thermal affinity descriptor (full patch tokens 사용)
-                thermal_affinity_desc = self.affinity_aggregator(paired_thermal_full)  # (B, C)
-                # RGB affinity descriptor
-                rgb_affinity_desc = self.affinity_aggregator(paired_rgb_full)  # (B, C)
+                # ========== Affinity descriptor 계산 (MASKED tokens에서!) ==========
+                # Masked visible tokens에서 affinity 계산 → MIM 원리에 맞게
+                # partial structural info로 reconstruction을 도와야 함
+                thermal_affinity_desc = self.affinity_aggregator(thermal_visible)  # (B, C) from ~64 tokens
+                rgb_affinity_desc = self.affinity_aggregator(rgb_visible)  # (B, C) from ~64 tokens
 
                 # CroCo Decoder forward (bidirectional)
                 # - mask_token 추가된 feature embedding들에 decoder의 positional embedding 추가
@@ -452,15 +461,17 @@ class CrossModalVPR_Net(nn.Module):
         W_feat = int(x.shape[3]/14)
         x_feat = patch_tokens.permute(0, 2, 1).view(B, D, H_feat, W_feat)
 
-        # ========== GeM + Affinity descriptor concat ==========
+        # ========== GeM + Affinity descriptor mixing ==========
         # GeM descriptor
         gem_desc = agg_layer(x_feat)  # (B, C)
 
         # Affinity descriptor (inference 때도 계산)
         affinity_desc = self.affinity_aggregator(patch_tokens)  # (B, C)
 
-        # Final VPR descriptor: concat GeM + Affinity
-        global_desc = torch.cat([gem_desc, affinity_desc], dim=-1)  # (B, 2C)
+        # Concat → L2 Norm → Mixer
+        concat_desc = torch.cat([gem_desc, affinity_desc], dim=-1)  # (B, 2C)
+        concat_desc = F.normalize(concat_desc, p=2, dim=-1)  # L2 normalize
+        global_desc = self.descriptor_mixer(concat_desc)  # (B, mixer_dim)
 
         return global_desc, patch_tokens, [recon_loss_thermal, recon_loss_rgb], mask_thermal
 
@@ -471,8 +482,8 @@ class CrossModalVPR_Net(nn.Module):
             flags = flags.to(x.device)
 
         is_rgb = (flags == 1)
-        # Output dimension: 2 * output_dim (GeM + Affinity concat)
-        final_emb = torch.zeros((x.size(0), self.output_dim * 2), device=x.device) # GeM + Affinity descriptor
+        # Output dimension: mixer_dim (GeM + Affinity → mixer)
+        final_emb = torch.zeros((x.size(0), self.mixer_dim), device=x.device) # Mixed descriptor
         patch_emb = torch.zeros((x.size(0), self.patch_count, self.output_dim), device=x.device) # feature embedding들 모음
         masks = torch.zeros((x.size(0), self.patch_count), dtype=torch.bool, device=x.device) # masking 모음
         recon_losses = None

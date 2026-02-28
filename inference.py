@@ -43,8 +43,8 @@ def inference(args, eval_ds, model):
                 pin_memory=(args.device == "cuda")
             )
 
-            # Descriptor dimension: 2 * features_dim (GeM + Affinity concat)
-            descriptor_dim = args.features_dim * 2
+            # Descriptor dimension: affinity_dim (mixer output)
+            descriptor_dim = args.affinity_dim
             database_features = np.empty((eval_ds.database_num, descriptor_dim), dtype="float32")
 
             for inputs, indices, flags in tqdm(database_dataloader, ncols=100, desc="DB features"):

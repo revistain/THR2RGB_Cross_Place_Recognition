@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=0
+CUDA_VISIBLE_DEVICES=3
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=4 \
@@ -10,14 +10,14 @@ python3 train_wandb.py \
     --lr 3e-5 \
     --train_seq Campus \
     --test_seq Urban Residential \
-    --comment "CroCo(lr3e-5)-posAsPaired-mixerCLS(L2norm)" \
+    --comment "CroCo-maskedAffinity-CLS-intranorm" \
     --croco_mask_ratio 0.8 \
     --recon_weight 10 \
     --use_recon_loss \
     --recon_loss_type 'l1' \
     --num_decoder_depth 8 \
-    --use_pos_as_aligned_rgb
-
+    --use_pos_as_aligned_rgb \
+    --affinity_dim 32
 # Scene 종류 : ['Campus', 'Residential', 'Urban', 'KAIST', 'SNU', 'Valley'] 
 # recon_loss_type: ['mse', 'l1', 'ssim', 'mse+ssim']
 ## ~/.local/share/claude/versions/2.1.19

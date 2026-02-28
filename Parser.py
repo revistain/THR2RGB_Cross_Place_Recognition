@@ -81,6 +81,7 @@ class Parser():
         self.parser.add_argument("--recon_weight", type=float, default=1) # loss = (triplet_loss + recon_weight * reconstruction_loss)
         self.parser.add_argument("--croco_mask_ratio", type=float, default=0.75) # CroCo masking Ratio
         self.parser.add_argument("--num_decoder_depth", type=int, default=8) # decoder의 layer 개수
+        self.parser.add_argument("--affinity_dim", type=int, default=384) # Affinity descriptor 출력 차원
 
         # Training options
         self.parser.add_argument("--use_pos_as_aligned_rgb", action='store_true', default=False) # CroCo는 동시에 찍은 사진은 reference로 사용하는데, 이게 키면 pos로 수집한걸 사용
