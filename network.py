@@ -83,6 +83,51 @@ class CroCoDecoderBlock(nn.Module):
 
         return x
 
+class AffinityAggregator(nn.Module):
+    """
+    Patch tokens에서 affinity matrix를 계산하고 descriptor로 변환
+
+    Input: (B, N, C) patch tokens
+    Output: (B, C) affinity descriptor
+    """
+    def __init__(self, num_patches=256, embed_dim=768):
+        super().__init__()
+        self.num_patches = num_patches
+        self.embed_dim = embed_dim
+
+        # (B, N, N) → (B, N, C)
+        self.row_linear = nn.Linear(num_patches, embed_dim)
+
+        # (B, C, N) → (B, C, 1)
+        self.col_linear = nn.Linear(num_patches, 1)
+
+    def forward(self, patch_tokens):
+        # patch_tokens: (B, N, C)
+
+        # Step 1: L2 normalize patch tokens (cosine similarity로 변환)
+        patch_tokens_norm = F.normalize(patch_tokens, p=2, dim=-1)
+
+        # Step 2: Affinity matrix (값 범위: -1 ~ 1)
+        affinity = patch_tokens_norm @ patch_tokens_norm.transpose(-1, -2)  # (B, N, N)
+
+        # Step 3: Row-wise linear (N → C)
+        x = self.row_linear(affinity)  # (B, N, C)
+
+        # Step 4: Transpose
+        x = x.transpose(-1, -2)  # (B, C, N)
+
+        # Step 5: Col-wise linear (N → 1)
+        x = self.col_linear(x)  # (B, C, 1)
+
+        # Step 6: Squeeze
+        x = x.squeeze(-1)  # (B, C)
+
+        # Step 7: L2 normalize output (GeM과 동일한 scale)
+        x = F.normalize(x, p=2, dim=-1)
+
+        return x
+
+
 class GeM(nn.Module):
     def __init__(self, p=3, eps=1e-6, work_with_tokens=False):
         super().__init__()
@@ -176,6 +221,16 @@ class CrossModalVPR_Net(nn.Module):
             GeM(work_with_tokens=None),
             Flatten()
         )
+
+        # Affinity aggregator for structural/geometric descriptor
+        self.affinity_aggregator = AffinityAggregator(
+            num_patches=self.patch_count,  # (224/14)^2 = 256
+            embed_dim=self.output_dim      # 768
+        )
+
+        # CLS token positional embedding for decoder (learnable)
+        self.decoder_cls_pos = nn.Parameter(torch.zeros(1, 1, self.output_dim))
+        nn.init.trunc_normal_(self.decoder_cls_pos, std=0.02)
 
     def _set_mask_token(self, dec_embed_dim):
         self.mask_token = nn.Parameter(torch.zeros(1, 1, dec_embed_dim))
@@ -333,6 +388,12 @@ class CrossModalVPR_Net(nn.Module):
                 # CroCo 태우기전 결과저장 (paried_thermal 뒤에서 안써서 clone 안했음)
                 out = paired_thermal
 
+                # ========== Affinity descriptor 계산 ==========
+                # Thermal affinity descriptor (full patch tokens 사용)
+                thermal_affinity_desc = self.affinity_aggregator(paired_thermal_full)  # (B, C)
+                # RGB affinity descriptor
+                rgb_affinity_desc = self.affinity_aggregator(paired_rgb_full)  # (B, C)
+
                 # CroCo Decoder forward (bidirectional)
                 # - mask_token 추가된 feature embedding들에 decoder의 positional embedding 추가
                 thermal_full_dec = thermal_full + self.decoder_pos_embed
@@ -340,9 +401,18 @@ class CrossModalVPR_Net(nn.Module):
                 paired_thermal_dec = paired_thermal_full + self.decoder_pos_embed
                 paired_rgb_dec = paired_rgb_full + self.decoder_pos_embed
 
+                # ========== CLS token prepend ==========
+                # Affinity descriptor를 CLS token으로 사용
+                thermal_cls = thermal_affinity_desc.unsqueeze(1) + self.decoder_cls_pos  # (B, 1, C)
+                rgb_cls = rgb_affinity_desc.unsqueeze(1) + self.decoder_cls_pos  # (B, 1, C)
+
+                # CLS token을 decoder input 앞에 prepend
+                thermal_full_dec_with_cls = torch.cat([thermal_cls, thermal_full_dec], dim=1)  # (B, N+1, C)
+                rgb_full_dec_with_cls = torch.cat([rgb_cls, rgb_full_dec], dim=1)  # (B, N+1, C)
+
                 # 연산 효율 위해 decoder 태우기전 batch로 구성
-                target_full_dec = torch.cat([thermal_full_dec, rgb_full_dec], dim=0)
-                ref_full_dec = torch.cat([paired_rgb_dec, paired_thermal_dec], dim=0)
+                target_full_dec = torch.cat([thermal_full_dec_with_cls, rgb_full_dec_with_cls], dim=0)  # (2B, N+1, C)
+                ref_full_dec = torch.cat([paired_rgb_dec, paired_thermal_dec], dim=0)  # (2B, N, C) - reference는 CLS 없이
 
                 # decoder 통과
                 for blk in self.decoder_blocks:
@@ -350,13 +420,20 @@ class CrossModalVPR_Net(nn.Module):
                 target_full_dec = self.decoder_norm(target_full_dec)
 
                 # batch 다시 분리
-                thermal_reconed_dec = target_full_dec[:thermal_full_dec.shape[0], :, :]
-                rgb_reconed_dec = target_full_dec[thermal_full_dec.shape[0]:, :, :]
+                thermal_reconed_dec = target_full_dec[:thermal_full_dec_with_cls.shape[0], :, :]  # (B, N+1, C)
+                rgb_reconed_dec = target_full_dec[thermal_full_dec_with_cls.shape[0]:, :, :]  # (B, N+1, C)
+
+                # ========== CLS token 분리 (reconstruction에서 제외) ==========
+                thermal_cls_output = thermal_reconed_dec[:, 0:1, :]  # (B, 1, C) - 추후 활용 가능
+                thermal_patch_output = thermal_reconed_dec[:, 1:, :]  # (B, N, C) - reconstruction용
+
+                rgb_cls_output = rgb_reconed_dec[:, 0:1, :]  # (B, 1, C)
+                rgb_patch_output = rgb_reconed_dec[:, 1:, :]  # (B, N, C)
 
                 # Prediction Head
                 # - MLP로 decoded feature embedding -> pixel level
-                reconstructed_thermal_patches = self.prediction_thermal_head(thermal_reconed_dec)
-                reconstructed_rgb_patches = self.prediction_rgb_head(rgb_reconed_dec)
+                reconstructed_thermal_patches = self.prediction_thermal_head(thermal_patch_output)
+                reconstructed_rgb_patches = self.prediction_rgb_head(rgb_patch_output)
                 target_thermal_patches = self.patchify(x)
                 target_rgb_patches = self.patchify(paired_rgb)
 
@@ -375,9 +452,15 @@ class CrossModalVPR_Net(nn.Module):
         W_feat = int(x.shape[3]/14)
         x_feat = patch_tokens.permute(0, 2, 1).view(B, D, H_feat, W_feat)
 
-        # Aggregation -> Descriptor
-        # - feature embedding -> GeM -> Descriptor
-        global_desc = agg_layer(x_feat)
+        # ========== GeM + Affinity descriptor concat ==========
+        # GeM descriptor
+        gem_desc = agg_layer(x_feat)  # (B, C)
+
+        # Affinity descriptor (inference 때도 계산)
+        affinity_desc = self.affinity_aggregator(patch_tokens)  # (B, C)
+
+        # Final VPR descriptor: concat GeM + Affinity
+        global_desc = torch.cat([gem_desc, affinity_desc], dim=-1)  # (B, 2C)
 
         return global_desc, patch_tokens, [recon_loss_thermal, recon_loss_rgb], mask_thermal
 
@@ -388,7 +471,8 @@ class CrossModalVPR_Net(nn.Module):
             flags = flags.to(x.device)
 
         is_rgb = (flags == 1)
-        final_emb = torch.zeros((x.size(0), self.output_dim), device=x.device) # GeM된 descriptor 모음
+        # Output dimension: 2 * output_dim (GeM + Affinity concat)
+        final_emb = torch.zeros((x.size(0), self.output_dim * 2), device=x.device) # GeM + Affinity descriptor
         patch_emb = torch.zeros((x.size(0), self.patch_count, self.output_dim), device=x.device) # feature embedding들 모음
         masks = torch.zeros((x.size(0), self.patch_count), dtype=torch.bool, device=x.device) # masking 모음
         recon_losses = None
