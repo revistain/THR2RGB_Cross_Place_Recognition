@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=1
+CUDA_VISIBLE_DEVICES=2
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=4 \
@@ -10,13 +10,16 @@ python3 train_wandb.py \
     --lr 3e-5 \
     --train_seq Campus \
     --test_seq Urban Residential \
-    --comment "CroCo-beforeA6000(Sthereo,lr3e-5)-posAsPaired" \
+    --comment "CroCo-beforeA6000(Sthereo,lr3e-5)-posAsPaired-affinCRW-aff-dim64" \
     --croco_mask_ratio 0.8 \
     --recon_weight 10 \
     --use_recon_loss \
     --recon_loss_type 'l1' \
     --num_decoder_depth 8 \
-    --use_pos_as_aligned_rgb
+    --use_pos_as_aligned_rgb \
+    --affinity_dim 64 \
+    --crw_weight 0.01 \
+    --smooth_weight 0.1
 
 # Scene 종류 : ['Campus', 'Residential', 'Urban', 'KAIST', 'SNU', 'Valley'] 
 # recon_loss_type: ['mse', 'l1', 'ssim', 'mse+ssim']

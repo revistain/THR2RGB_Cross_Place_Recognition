@@ -9,6 +9,168 @@ from pathlib import Path
 from croco.models.masking import RandomMask
 from croco.models.criterion import MaskedMSE
 
+
+class AffinityAggregator(nn.Module):
+    """
+    Patch tokens에서 affinity matrix를 계산하고 descriptor로 변환
+
+    Input: (B, N, C) patch tokens (variable N for masked tokens)
+    Output: (B, C) affinity descriptor
+    """
+    def __init__(self, num_patches=256, embed_dim=768):
+        super().__init__()
+        self.num_patches = num_patches
+        self.embed_dim = embed_dim
+
+        # (B, N, N) → (B, N, C)
+        self.row_linear = nn.Linear(num_patches, embed_dim)
+        # (B, C, N) → (B, C, 1)
+        self.col_linear = nn.Linear(num_patches, 1)
+
+    def forward(self, patch_tokens):
+        # patch_tokens: (B, N, C) - N can be variable (masked tokens)
+
+        # L2 normalize patch tokens before affinity
+        patch_tokens_norm = F.normalize(patch_tokens, p=2, dim=-1)
+
+        # Affinity matrix
+        affinity = patch_tokens_norm @ patch_tokens_norm.transpose(-1, -2)  # (B, N, N)
+
+        # Adaptive pooling to fixed size (handles variable N from masking)
+        affinity = F.adaptive_avg_pool2d(
+            affinity.unsqueeze(1),
+            (self.num_patches, self.num_patches)
+        ).squeeze(1)  # (B, 256, 256)
+
+        # Row-wise linear (N → C)
+        x = self.row_linear(affinity)  # (B, N, C)
+
+        # Transpose and col-wise linear (N → 1)
+        x = x.transpose(-1, -2)  # (B, C, N)
+        x = self.col_linear(x)  # (B, C, 1)
+        x = x.squeeze(-1)  # (B, C)
+
+        return x
+
+
+class CRWLoss(nn.Module):
+    """
+    Contrastive Random Walk Loss for cross-modal correspondence
+
+    Based on: "Self-Supervised Any-Point Tracking by Contrastive Random Walks"
+
+    Three components:
+    1. Cycle consistency: thermal → RGB → thermal should return to origin
+    2. Warp-label: independent random horizontal flip per image to prevent
+       spatial shortcut (model cannot just match "same position")
+    3. Smoothness loss: neighboring patches should have similar transition
+       distributions (spatial continuity prior)
+    """
+    def __init__(self, temperature=0.07, grid_size=16):
+        super().__init__()
+        # Small temperature (0.07) produces peaked softmax → clear correspondences
+        # sqrt(embed_dim) is too large (~19.6), making softmax nearly uniform
+        self.temperature = temperature
+        self.grid_size = grid_size  # 224 / 14 = 16
+
+    def _get_flip_perm(self, H, W, device):
+        """
+        Horizontal flip permutation for H×W patch grid.
+        patch at (r, c) → (r, W-1-c), index: r*W+c → r*W+(W-1-c)
+        """
+        idx = torch.arange(H * W, device=device)
+        r = idx // W
+        c = idx % W
+        return r * W + (W - 1 - c)  # (N,)
+
+    def _apply_flip(self, tokens, flip_mask, H, W):
+        """
+        Spatially flip patch tokens for a subset of the batch.
+        Uses soft masking (no in-place ops) to preserve gradient flow.
+
+        Args:
+            tokens: (B, N, C)
+            flip_mask: (B,) bool — True means flip this sample
+        Returns:
+            (B, N, C) with flipped samples reordered
+        """
+        B = tokens.shape[0]
+        perm = self._get_flip_perm(H, W, tokens.device)  # (N,)
+        flipped = tokens[:, perm, :]  # (B, N, C) — all flipped, gradient flows
+
+        # Soft mask: select flipped or original per sample without in-place
+        mask = flip_mask.view(B, 1, 1).to(tokens.dtype)
+        return flipped * mask + tokens * (1.0 - mask)
+
+    def _warp_target(self, B, N, flip_T, flip_R, flip_perm, device):
+        """
+        Compute warp-label target for cycle consistency.
+
+        When T and R have the same flip state → patches spatially aligned → identity target.
+        When T and R have different flip states → thermal-side patch i corresponds to
+        RGB-side patch flip_perm[i] → target is flip_perm.
+
+        Returns: (B, N) long tensor
+        """
+        identity = torch.arange(N, device=device)
+        target = torch.stack([
+            identity if (flip_T[b] == flip_R[b]) else flip_perm
+            for b in range(B)
+        ])  # (B, N)
+        return target
+
+    def forward(self, patch_tokens_thermal, patch_tokens_rgb):
+        """
+        Args:
+            patch_tokens_thermal: (B, N, C) full patch tokens from thermal
+            patch_tokens_rgb:     (B, N, C) full patch tokens from RGB
+        Returns:
+            crw_loss:    scalar cycle-consistency loss (with warp-label)
+            smooth_loss: scalar spatial smoothness loss
+        """
+        B, N, C = patch_tokens_thermal.shape
+        H = W = self.grid_size
+
+        # ── Warp-label: independent random horizontal flip per sample ──────────
+        # Prevents the shortcut of matching patches solely by spatial position.
+        flip_T = torch.rand(B, device=patch_tokens_thermal.device) > 0.5
+        flip_R = torch.rand(B, device=patch_tokens_rgb.device) > 0.5
+
+        tokens_T = self._apply_flip(patch_tokens_thermal, flip_T, H, W)
+        tokens_R = self._apply_flip(patch_tokens_rgb,     flip_R, H, W)
+
+        # ── L2 normalize ────────────────────────────────────────────────────────
+        F_T = F.normalize(tokens_T, p=2, dim=-1)  # (B, N, C)
+        F_R = F.normalize(tokens_R, p=2, dim=-1)  # (B, N, C)
+
+        # ── Transition matrices ──────────────────────────────────────────────────
+        # A_T2R[b,i,j] = P(thermal patch i → RGB patch j)
+        A_T2R = F.softmax(torch.bmm(F_T, F_R.transpose(-1, -2)) / self.temperature, dim=-1)  # (B, N, N)
+        A_R2T = F.softmax(torch.bmm(F_R, F_T.transpose(-1, -2)) / self.temperature, dim=-1)  # (B, N, N)
+
+        # ── Cycle consistency ────────────────────────────────────────────────────
+        # cycle[b,i,:] = probability distribution over where patch i returns to
+        cycle = torch.bmm(A_T2R, A_R2T)  # (B, N, N)
+
+        # Warp-label target: identity when flip states match, flip_perm otherwise
+        flip_perm = self._get_flip_perm(H, W, cycle.device)  # (N,)
+        target = self._warp_target(B, N, flip_T, flip_R, flip_perm, cycle.device)  # (B, N)
+
+        crw_loss = F.cross_entropy(cycle.view(B * N, N), target.view(B * N))
+
+        # ── Smoothness loss ──────────────────────────────────────────────────────
+        # Neighboring query patches should have similar transition distributions.
+        # Reshape A_T2R query dimension to spatial grid: (B, H, W, N)
+        A_spatial = A_T2R.reshape(B, H, W, N)  # reshape handles non-contiguous tensors
+
+        # Horizontal neighbors (same row, adjacent columns)
+        smooth_h = (A_spatial[:, :, :-1, :] - A_spatial[:, :, 1:, :]).pow(2).mean()
+        # Vertical neighbors (same column, adjacent rows)
+        smooth_v = (A_spatial[:, :-1, :, :] - A_spatial[:, 1:, :, :]).pow(2).mean()
+        smooth_loss = smooth_h + smooth_v
+
+        return crw_loss, smooth_loss
+
 class CroCoDecoderBlock(nn.Module):
     def __init__(self, dim=768, num_heads=12, mlp_ratio=4.0, drop_path=0.0):
         super().__init__()
@@ -165,17 +327,29 @@ class CrossModalVPR_Net(nn.Module):
             loss_type=self.recon_loss_type
         )
 
-        # Aggregation layers
+        # Aggregation layers (without L2Norm - will normalize individually after)
         self.rgb_aggregation = nn.Sequential(
-            L2Norm(),
             GeM(work_with_tokens=None),
             Flatten(),
         )
         self.thermal_aggregation = nn.Sequential(
-            L2Norm(),
             GeM(work_with_tokens=None),
             Flatten()
         )
+
+        # Affinity aggregator
+        self.affinity_aggregator = AffinityAggregator(
+            num_patches=self.patch_count,  # (224/14)^2 = 256
+            embed_dim=self.output_dim
+        )
+
+        # Descriptor mixer: concat(GeM, Affinity) → final descriptor
+        # Input: 2 * output_dim (768*2=1536 for ViT-B, 384*2=768 for ViT-S)
+        self.affinity_dim = args.affinity_dim
+        self.descriptor_mixer = nn.Linear(self.output_dim * 2, self.affinity_dim)
+
+        # CRW Loss for cross-modal correspondence
+        self.crw_loss_fn = CRWLoss(temperature=0.07, grid_size=int(args.resize[0] / 14))
 
     def _set_mask_token(self, dec_embed_dim):
         self.mask_token = nn.Parameter(torch.zeros(1, 1, dec_embed_dim))
@@ -304,6 +478,8 @@ class CrossModalVPR_Net(nn.Module):
         """Forward pass for a single modality."""
         recon_loss_thermal = None
         recon_loss_rgb = None
+        crw_loss = None
+        smooth_loss = None
         mask_thermal = None
 
         if modality == 'rgb':
@@ -364,6 +540,9 @@ class CrossModalVPR_Net(nn.Module):
                 # - masked된 부분에 대해 loss 계산
                 recon_loss_thermal = self.calculate_recon_loss(reconstructed_thermal_patches, mask_thermal, target_thermal_patches)
                 recon_loss_rgb = self.calculate_recon_loss(reconstructed_rgb_patches, mask_rgb, target_rgb_patches)
+
+                # CRW loss: cycle consistency + smoothness between full thermal and RGB patch tokens
+                crw_loss, smooth_loss = self.crw_loss_fn(paired_thermal_full, paired_rgb_full)
             else:
                 # inference 때
                 out = self.shared_backbone(x)
@@ -375,11 +554,21 @@ class CrossModalVPR_Net(nn.Module):
         W_feat = int(x.shape[3]/14)
         x_feat = patch_tokens.permute(0, 2, 1).view(B, D, H_feat, W_feat)
 
-        # Aggregation -> Descriptor
-        # - feature embedding -> GeM -> Descriptor
-        global_desc = agg_layer(x_feat)
+        # GeM descriptor
+        gem_desc = agg_layer(x_feat)  # (B, C)
 
-        return global_desc, patch_tokens, [recon_loss_thermal, recon_loss_rgb], mask_thermal
+        # Affinity descriptor (from full patch tokens for VPR)
+        affinity_desc = self.affinity_aggregator(patch_tokens)  # (B, C)
+
+        # Individual L2 normalization
+        gem_desc = F.normalize(gem_desc, p=2, dim=-1)
+        affinity_desc = F.normalize(affinity_desc, p=2, dim=-1)
+
+        # Concat and mix
+        concat_desc = torch.cat([gem_desc, affinity_desc], dim=-1)  # (B, 2C)
+        global_desc = self.descriptor_mixer(concat_desc)  # (B, affinity_dim)
+
+        return global_desc, patch_tokens, [recon_loss_thermal, recon_loss_rgb, crw_loss, smooth_loss], mask_thermal
 
     def forward(self, x, flags, paired_rgb=None, return_mask=False):
         if not isinstance(flags, torch.Tensor):
@@ -388,7 +577,7 @@ class CrossModalVPR_Net(nn.Module):
             flags = flags.to(x.device)
 
         is_rgb = (flags == 1)
-        final_emb = torch.zeros((x.size(0), self.output_dim), device=x.device) # GeM된 descriptor 모음
+        final_emb = torch.zeros((x.size(0), self.affinity_dim), device=x.device) # mixed descriptor 모음
         patch_emb = torch.zeros((x.size(0), self.patch_count, self.output_dim), device=x.device) # feature embedding들 모음
         masks = torch.zeros((x.size(0), self.patch_count), dtype=torch.bool, device=x.device) # masking 모음
         recon_losses = None

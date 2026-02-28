@@ -43,13 +43,13 @@ def inference(args, eval_ds, model):
                 pin_memory=(args.device == "cuda")
             )
 
-            database_features = np.empty((eval_ds.database_num, args.features_dim), dtype="float32")
+            database_features = np.empty((eval_ds.database_num, args.affinity_dim), dtype="float32")
 
             for inputs, indices, flags in tqdm(database_dataloader, ncols=100, desc="DB features"):
                 flags_int = [1 if f == 'rgb' else 0 for f in flags]
                 flags = torch.tensor(flags_int, dtype=torch.long, device=args.device)
                 outputs = model(inputs.to(args.device), flags)
-                features = outputs[0].view(-1, args.features_dim)
+                features = outputs[0].view(-1, args.affinity_dim)
 
                 indices_npy = indices.numpy()
                 database_features[indices_npy, :] = features.cpu().numpy()
@@ -66,13 +66,13 @@ def inference(args, eval_ds, model):
                 pin_memory=(args.device == "cuda")
             )
 
-            queries_features = np.empty((eval_ds.queries_num, args.features_dim), dtype="float32")
+            queries_features = np.empty((eval_ds.queries_num, args.affinity_dim), dtype="float32")
 
             for inputs, indices, flags in tqdm(queries_dataloader, ncols=100, desc="Query features"):
                 flags_int = [1 if f == 'rgb' else 0 for f in flags]
                 flags = torch.tensor(flags_int, dtype=torch.long, device=args.device)
                 outputs = model(inputs.to(args.device), flags)
-                features = outputs[0].view(-1, args.features_dim)
+                features = outputs[0].view(-1, args.affinity_dim)
 
                 indices_npy = indices.numpy() - eval_ds.database_num
                 queries_features[indices_npy, :] = features.cpu().numpy()
@@ -80,7 +80,7 @@ def inference(args, eval_ds, model):
             logging.info(f"Extracted {eval_ds.queries_num} query features in {time.time() - start_time:.2f}s")
 
         # 3. Find nearest neighbors using FAISS
-        faiss_index = faiss.IndexFlatL2(args.features_dim)
+        faiss_index = faiss.IndexFlatL2(args.affinity_dim)
         faiss_index.add(database_features)
 
         start_time = time.time()

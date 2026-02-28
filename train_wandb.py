@@ -238,6 +238,24 @@ if __name__ == "__main__":
                             * recon_weight / (args.train_batch_size * args.negs_num_per_query),
                     }, step=global_step)
 
+                # Add CRW loss (cycle consistency) and smoothness loss
+                if recon_loss is not None and len(recon_loss) > 2 and recon_loss[2] is not None:
+                    crw_loss = recon_loss[2]
+                    overall_loss += (crw_loss * args.crw_weight)
+
+                    smooth_loss = recon_loss[3] if len(recon_loss) > 3 and recon_loss[3] is not None else None
+                    if smooth_loss is not None:
+                        overall_loss += (smooth_loss * args.smooth_weight)
+
+                    log_dict = {
+                        "train/crw_loss": crw_loss.item() * args.crw_weight
+                            / (args.train_batch_size * args.negs_num_per_query),
+                    }
+                    if smooth_loss is not None:
+                        log_dict["train/smooth_loss"] = smooth_loss.item() * args.smooth_weight \
+                            / (args.train_batch_size * args.negs_num_per_query)
+                    wandb.log(log_dict, step=global_step)
+
                 overall_loss /= (args.train_batch_size * args.negs_num_per_query)
 
                 del global_features, query_features, positive_features, negative_features

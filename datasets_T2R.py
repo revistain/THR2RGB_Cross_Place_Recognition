@@ -489,7 +489,7 @@ class TripletsSTheReODual(BaseSTheReODual):
 
     def get_best_positive_index(self, args, query_index, cache, query_features):
         positives_features = cache[self.hard_positives_per_query[query_index]]
-        faiss_index = faiss.IndexFlatL2(args.features_dim)
+        faiss_index = faiss.IndexFlatL2(args.affinity_dim)
         faiss_index.add(positives_features)
         # Search the best positive (within 10 meters AND nearest in features space)
         _, best_positive_num = faiss_index.search(query_features.reshape(1, -1), 1)
@@ -498,7 +498,7 @@ class TripletsSTheReODual(BaseSTheReODual):
 
     def get_hardest_negatives_indexes(self, args, cache, query_features, neg_samples):
         neg_features = cache[neg_samples]
-        faiss_index = faiss.IndexFlatL2(args.features_dim)
+        faiss_index = faiss.IndexFlatL2(args.affinity_dim)
         faiss_index.add(neg_features)
         # Search the 10 nearest negatives (further than 25 meters and nearest in features space)
         _, neg_nums = faiss_index.search(query_features.reshape(1, -1), self.negs_num_per_query)
@@ -527,7 +527,7 @@ class TripletsSTheReODual(BaseSTheReODual):
 
         subset_ds = Subset(self, database_indexes + list(sampled_queries_indexes + self.database_num))
 
-        cache = self.compute_cache(args, model, subset_ds, cache_shape=(len(self), args.features_dim))
+        cache = self.compute_cache(args, model, subset_ds, cache_shape=(len(self), args.affinity_dim))
         for query_index in tqdm(sampled_queries_indexes, ncols=100):
             query_features = self.get_query_features(query_index, cache)
             best_positive_index = self.get_best_positive_index(args, query_index, cache, query_features)

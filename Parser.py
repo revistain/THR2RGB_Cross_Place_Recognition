@@ -82,6 +82,11 @@ class Parser():
         self.parser.add_argument("--croco_mask_ratio", type=float, default=0.75) # CroCo masking Ratio
         self.parser.add_argument("--num_decoder_depth", type=int, default=8) # decoder의 layer 개수
 
+        # Affinity descriptor + CRW loss settings
+        self.parser.add_argument("--affinity_dim", type=int, default=384) # output dim after mixer (GeM + Affinity concat → mixer)
+        self.parser.add_argument("--crw_weight", type=float, default=0.01)   # weight for CRW cycle consistency loss (crw ≈ ln(N)≈5.5 vs triplet ≈ 0.5)
+        self.parser.add_argument("--smooth_weight", type=float, default=0.1) # weight for CRW spatial smoothness loss
+
         # Training options
         self.parser.add_argument("--use_pos_as_aligned_rgb", action='store_true', default=False) # CroCo는 동시에 찍은 사진은 reference로 사용하는데, 이게 키면 pos로 수집한걸 사용
         self.parser.add_argument("--use_fast_track", action='store_true', default=False) # training 빠르게 건너뛰어서 실험할때 사용
