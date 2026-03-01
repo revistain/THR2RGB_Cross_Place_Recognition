@@ -1,0 +1,62 @@
+2026-03-01 09:16:47   Use 1 GPUs and 80 CPUs
+2026-03-01 09:16:47   There are 2 queries without any positives
+2026-03-01 09:16:48   [Train - ['Campus']] Database: 1207, Queries: 18415, Total: 19622
+2026-03-01 09:16:48   [Test - Urban] Database: 955, Queries: 13810, Total: 14765
+2026-03-01 09:16:48   [Test - Residential] Database: 496, Queries: 9029, Total: 9525
+2026-03-01 09:16:48   using MLP layer as FFN
+2026-03-01 09:16:52   Start training epoch: 00
+2026-03-01 09:19:39   Epoch[00](1/2): current batch triplet loss = 0.32883283, average epoch triplet loss = 0.38330816
+2026-03-01 09:22:24   Epoch[00](2/2): current batch triplet loss = 0.30889028, average epoch triplet loss = 0.35223457
+2026-03-01 09:22:24   epoch 00 time: 0:05:32, 
+2026-03-01 09:22:24   Learning rate: 1.40e-05
+2026-03-01 09:22:24   ===== Evaluating Sequence: Urban =====
+2026-03-01 09:22:29   Extracted 955 database features in 5.30s
+2026-03-01 09:23:22   Extracted 13810 query features in 53.04s
+2026-03-01 09:23:22   FAISS search completed in 0.22s
+2026-03-01 09:23:24   Recalls: 18.059377262853005,34.93120926864591,42.69370021723389,50.27516292541636
+2026-03-01 09:23:24   Recalls for Urban: R@1: 18.1, R@5: 34.9, R@10: 42.7, R@20: 50.3
+2026-03-01 09:23:24   ================================================
+2026-03-01 09:23:24   ===== Evaluating Sequence: Residential =====
+2026-03-01 09:23:28   Extracted 496 database features in 3.61s
+2026-03-01 09:24:03   Extracted 9029 query features in 34.90s
+2026-03-01 09:24:03   FAISS search completed in 0.11s
+2026-03-01 09:24:04   Recalls: 19.81393288293277,38.25451323513124,47.203455532174104,56.00841732196257
+2026-03-01 09:24:04   Recalls for Residential: R@1: 19.8, R@5: 38.3, R@10: 47.2, R@20: 56.0
+2026-03-01 09:24:04   ================================================
+2026-03-01 09:24:07   Improved: previous best R@1 = 0.0, current R@1 = 18.9
+2026-03-01 09:24:13   Start training epoch: 01
+2026-03-01 09:26:56   Epoch[01](1/2): current batch triplet loss = 0.12308830, average epoch triplet loss = 0.16868317
+2026-03-01 09:29:39   Epoch[01](2/2): current batch triplet loss = 0.14267936, average epoch triplet loss = 0.14554848
+2026-03-01 09:29:39   epoch 01 time: 0:05:26, 
+2026-03-01 09:29:39   Learning rate: 2.30e-05
+2026-03-01 09:29:39   ===== Evaluating Sequence: Urban =====
+2026-03-01 09:29:45   Extracted 955 database features in 5.33s
+2026-03-01 09:30:38   Extracted 13810 query features in 53.11s
+2026-03-01 09:30:38   FAISS search completed in 0.22s
+2026-03-01 09:30:40   Recalls: 20.369297610427225,35.49601737871108,42.10716871832006,48.96451846488052
+2026-03-01 09:30:40   Recalls for Urban: R@1: 20.4, R@5: 35.5, R@10: 42.1, R@20: 49.0
+2026-03-01 09:30:40   ================================================
+2026-03-01 09:30:40   ===== Evaluating Sequence: Residential =====
+2026-03-01 09:30:44   Extracted 496 database features in 3.60s
+2026-03-01 09:31:18   Extracted 9029 query features in 34.83s
+2026-03-01 09:31:19   FAISS search completed in 0.11s
+2026-03-01 09:31:20   Recalls: 20.76641931553882,36.90331155166685,43.91405471259276,52.03234023701406
+2026-03-01 09:31:20   Recalls for Residential: R@1: 20.8, R@5: 36.9, R@10: 43.9, R@20: 52.0
+2026-03-01 09:31:20   ================================================
+2026-03-01 09:31:29   Improved: previous best R@1 = 18.9, current R@1 = 20.6
+2026-03-01 09:31:35   Best R@1: 20.57
+2026-03-01 09:31:35   Trained for 02 epochs, in total in 0:14:47
+2026-03-01 09:31:35   ===== Evaluating Sequence: Urban =====
+2026-03-01 09:31:40   Extracted 955 database features in 5.30s
+2026-03-01 09:32:33   Extracted 13810 query features in 52.64s
+2026-03-01 09:32:33   FAISS search completed in 0.22s
+2026-03-01 09:32:35   Recalls: 20.369297610427225,35.49601737871108,42.10716871832006,48.96451846488052
+2026-03-01 09:32:35   Recalls for Urban: R@1: 20.4, R@5: 35.5, R@10: 42.1, R@20: 49.0
+2026-03-01 09:32:35   ================================================
+2026-03-01 09:32:35   ===== Evaluating Sequence: Residential =====
+2026-03-01 09:32:38   Extracted 496 database features in 3.52s
+2026-03-01 09:33:13   Extracted 9029 query features in 34.89s
+2026-03-01 09:33:13   FAISS search completed in 0.10s
+2026-03-01 09:33:14   Recalls: 20.76641931553882,36.90331155166685,43.91405471259276,52.03234023701406
+2026-03-01 09:33:15   Recalls for Residential: R@1: 20.8, R@5: 36.9, R@10: 43.9, R@20: 52.0
+2026-03-01 09:33:15   ================================================

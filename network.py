@@ -102,70 +102,77 @@ class CRWLoss(nn.Module):
         mask = flip_mask.view(B, 1, 1).to(tokens.dtype)
         return flipped * mask + tokens * (1.0 - mask)
 
-    def _warp_target(self, B, N, flip_T, flip_R, flip_perm, device):
+    def _warp_target(self, B, N, flip_fwd, flip_bwd, flip_perm, device):
         """
-        Compute warp-label target for cycle consistency.
+        Label Warping target for cycle consistency (ECCV 2024 method).
 
-        When T and R have the same flip state → patches spatially aligned → identity target.
-        When T and R have different flip states → thermal-side patch i corresponds to
-        RGB-side patch flip_perm[i] → target is flip_perm.
+        Compare flip_T_forward vs flip_T_backward:
+        - Same flip state → cycle lands on same spatial position → identity target
+        - Different flip → spatial warp between start/end → flip_perm target
 
         Returns: (B, N) long tensor
         """
         identity = torch.arange(N, device=device)
         target = torch.stack([
-            identity if (flip_T[b] == flip_R[b]) else flip_perm
+            identity if (flip_fwd[b] == flip_bwd[b]) else flip_perm
             for b in range(B)
         ])  # (B, N)
         return target
 
     def forward(self, patch_tokens_thermal, patch_tokens_rgb):
         """
+        Label Warping CRW Loss (ECCV 2024 method).
+
+        Key idea: Apply DIFFERENT augmentations to thermal at cycle start vs end.
+        This prevents the transformer from using positional shortcuts.
+
         Args:
             patch_tokens_thermal: (B, N, C) full patch tokens from thermal
             patch_tokens_rgb:     (B, N, C) full patch tokens from RGB
         Returns:
-            crw_loss:    scalar cycle-consistency loss (with warp-label)
+            crw_loss:    scalar cycle-consistency loss (with label warping)
             smooth_loss: scalar spatial smoothness loss
         """
         B, N, C = patch_tokens_thermal.shape
         H = W = self.grid_size
 
-        # ── Warp-label: independent random horizontal flip per sample ──────────
-        # Prevents the shortcut of matching patches solely by spatial position.
-        flip_T = torch.rand(B, device=patch_tokens_thermal.device) > 0.5
-        flip_R = torch.rand(B, device=patch_tokens_rgb.device) > 0.5
+        # ── Label Warping: 3 independent flips ──────────────────────────────────
+        # flip_T_fwd: augmentation for cycle START (thermal in A_T2R)
+        # flip_T_bwd: augmentation for cycle END (thermal in A_R2T) — independent!
+        # flip_R:     augmentation for intermediate RGB
+        flip_T_fwd = torch.rand(B, device=patch_tokens_thermal.device) > 0.5
+        flip_T_bwd = torch.rand(B, device=patch_tokens_thermal.device) > 0.5
+        flip_R     = torch.rand(B, device=patch_tokens_rgb.device) > 0.5
 
-        tokens_T = self._apply_flip(patch_tokens_thermal, flip_T, H, W)
-        tokens_R = self._apply_flip(patch_tokens_rgb,     flip_R, H, W)
+        tokens_T_fwd = self._apply_flip(patch_tokens_thermal, flip_T_fwd, H, W)
+        tokens_T_bwd = self._apply_flip(patch_tokens_thermal, flip_T_bwd, H, W)
+        tokens_R     = self._apply_flip(patch_tokens_rgb,     flip_R,     H, W)
 
         # ── L2 normalize ────────────────────────────────────────────────────────
-        F_T = F.normalize(tokens_T, p=2, dim=-1)  # (B, N, C)
-        F_R = F.normalize(tokens_R, p=2, dim=-1)  # (B, N, C)
+        F_T_fwd = F.normalize(tokens_T_fwd, p=2, dim=-1)  # (B, N, C)
+        F_T_bwd = F.normalize(tokens_T_bwd, p=2, dim=-1)  # (B, N, C)
+        F_R     = F.normalize(tokens_R,     p=2, dim=-1)  # (B, N, C)
 
         # ── Transition matrices ──────────────────────────────────────────────────
-        # A_T2R[b,i,j] = P(thermal patch i → RGB patch j)
-        A_T2R = F.softmax(torch.bmm(F_T, F_R.transpose(-1, -2)) / self.temperature, dim=-1)  # (B, N, N)
-        A_R2T = F.softmax(torch.bmm(F_R, F_T.transpose(-1, -2)) / self.temperature, dim=-1)  # (B, N, N)
+        # A_T2R: T_fwd → R
+        # A_R2T: R → T_bwd (NOTE: uses T_bwd, not T_fwd!)
+        A_T2R = F.softmax(torch.bmm(F_T_fwd, F_R.transpose(-1, -2)) / self.temperature, dim=-1)
+        A_R2T = F.softmax(torch.bmm(F_R, F_T_bwd.transpose(-1, -2)) / self.temperature, dim=-1)
 
         # ── Cycle consistency ────────────────────────────────────────────────────
-        # cycle[b,i,:] = probability distribution over where patch i returns to
+        # cycle: T_fwd → R → T_bwd
+        # Start and end have DIFFERENT augmentations → label warping target
         cycle = torch.bmm(A_T2R, A_R2T)  # (B, N, N)
 
-        # Warp-label target: identity when flip states match, flip_perm otherwise
+        # Label Warping target: compare flip_T_fwd vs flip_T_bwd
         flip_perm = self._get_flip_perm(H, W, cycle.device)  # (N,)
-        target = self._warp_target(B, N, flip_T, flip_R, flip_perm, cycle.device)  # (B, N)
+        target = self._warp_target(B, N, flip_T_fwd, flip_T_bwd, flip_perm, cycle.device)
 
         crw_loss = F.cross_entropy(cycle.view(B * N, N), target.view(B * N))
 
         # ── Smoothness loss ──────────────────────────────────────────────────────
-        # Neighboring query patches should have similar transition distributions.
-        # Reshape A_T2R query dimension to spatial grid: (B, H, W, N)
-        A_spatial = A_T2R.reshape(B, H, W, N)  # reshape handles non-contiguous tensors
-
-        # Horizontal neighbors (same row, adjacent columns)
+        A_spatial = A_T2R.reshape(B, H, W, N)
         smooth_h = (A_spatial[:, :, :-1, :] - A_spatial[:, :, 1:, :]).pow(2).mean()
-        # Vertical neighbors (same column, adjacent rows)
         smooth_v = (A_spatial[:, :-1, :, :] - A_spatial[:, 1:, :, :]).pow(2).mean()
         smooth_loss = smooth_h + smooth_v
 
@@ -400,6 +407,105 @@ class CrossModalVPR_Net(nn.Module):
         x = torch.einsum('nchpwq->nhwpqc', x)
         x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 3))
         return x
+
+    def unpatchify(self, x, H, W):
+        """
+        Reverse of patchify: (B, L, p**2 * 3) → (B, 3, H, W)
+        """
+        p = 14
+        h, w = H // p, W // p
+        B = x.shape[0]
+        x = x.reshape(B, h, w, p, p, 3)
+        x = torch.einsum('nhwpqc->nchpwq', x)
+        return x.reshape(B, 3, H, W)
+
+    @torch.no_grad()
+    def forward_for_viz(self, thermal_img, rgb_img):
+        """
+        Visualization-only forward pass for a single pair (B=1).
+        Must be called in model.eval() state.
+
+        Args:
+            thermal_img: (1, 3, H, W)
+            rgb_img:     (1, 3, H, W)
+        Returns:
+            dict with all visualization tensors (CPU)
+        """
+        H, W = thermal_img.shape[2], thermal_img.shape[3]
+
+        # ── 1. Full backbone pass + attention ────────────────────────────────
+        out_t = self.shared_backbone(thermal_img, return_attention=True)
+        out_r = self.shared_backbone(rgb_img,     return_attention=True)
+
+        patch_t = out_t['x_norm_patchtokens']   # (1, N, C)
+        patch_r = out_r['x_norm_patchtokens']   # (1, N, C)
+
+        # cls_attention: (1, num_heads, N)
+        backbone_attn_t = out_t.get('cls_attention')
+        backbone_attn_r = out_r.get('cls_attention')
+
+        # ── 2. Masked encoder (random masks generated each call) ─────────────
+        t_vis, mask_t, pB,  pN,  pD,  _ = self.croco_like_encoder(thermal_img)
+        r_vis, mask_r, pBr, pNr, pDr, _ = self.croco_like_encoder(rgb_img)
+
+        t_full = self.croco_encoded_mask_expension(t_vis, mask_t, pB,  pN,  pD)
+        r_full = self.croco_encoded_mask_expension(r_vis, mask_r, pBr, pNr, pDr)
+
+        # ── 3. Decoder: thermal (target=thermal, ref=rgb_full) ───────────────
+        t_dec = t_full + self.decoder_pos_embed
+        r_ref = patch_r + self.decoder_pos_embed  # full RGB as reference
+
+        x = t_dec
+        for blk in self.decoder_blocks:
+            x = blk(x, r_ref, return_attention=True)
+        x = self.decoder_norm(x)
+        # clone before RGB decoder overwrites the weights
+        decoder_cross_attn_t = self.decoder_blocks[-1].cross_attn_weights.clone()
+
+        recon_t_patches = self.prediction_thermal_head(x)
+        recon_t_img     = self.unpatchify(recon_t_patches, H, W)
+
+        # ── 4. Decoder: RGB (target=rgb, ref=thermal_full) ───────────────────
+        r_dec = r_full + self.decoder_pos_embed
+        t_ref = patch_t + self.decoder_pos_embed  # full thermal as reference
+
+        y = r_dec
+        for blk in self.decoder_blocks:
+            y = blk(y, t_ref, return_attention=True)
+        y = self.decoder_norm(y)
+        decoder_cross_attn_r = self.decoder_blocks[-1].cross_attn_weights.clone()
+
+        recon_r_patches = self.prediction_rgb_head(y)
+        recon_r_img     = self.unpatchify(recon_r_patches, H, W)
+
+        # ── 5. Affinity matrices (self-similarity) ───────────────────────────
+        pt_norm = F.normalize(patch_t, p=2, dim=-1)
+        pr_norm = F.normalize(patch_r, p=2, dim=-1)
+        aff_t = (pt_norm @ pt_norm.transpose(-1, -2)).squeeze(0)  # (N, N)
+        aff_r = (pr_norm @ pr_norm.transpose(-1, -2)).squeeze(0)  # (N, N)
+
+        # ── 6. Transition matrices A_T2R, A_R2T, Cycle ───────────────────────
+        temp  = self.crw_loss_fn.temperature
+        A_T2R = F.softmax(torch.bmm(pt_norm, pr_norm.transpose(-1, -2)) / temp, dim=-1).squeeze(0)
+        A_R2T = F.softmax(torch.bmm(pr_norm, pt_norm.transpose(-1, -2)) / temp, dim=-1).squeeze(0)
+        cycle = torch.mm(A_T2R, A_R2T)  # (N, N)
+
+        return {
+            'thermal_orig':         thermal_img,           # (1, 3, H, W)
+            'rgb_orig':             rgb_img,               # (1, 3, H, W)
+            'recon_thermal':        recon_t_img,           # (1, 3, H, W)
+            'recon_rgb':            recon_r_img,           # (1, 3, H, W)
+            'mask_thermal':         mask_t,                # (1, N) bool
+            'mask_rgb':             mask_r,                # (1, N) bool
+            'backbone_attn_t':      backbone_attn_t,       # (1, num_heads, N) or None
+            'backbone_attn_r':      backbone_attn_r,       # (1, num_heads, N) or None
+            'decoder_cross_attn_t': decoder_cross_attn_t, # (1, N_q, N_ref)
+            'decoder_cross_attn_r': decoder_cross_attn_r, # (1, N_q, N_ref)
+            'affinity_t':           aff_t,                 # (N, N)
+            'affinity_r':           aff_r,                 # (N, N)
+            'A_T2R':                A_T2R,                 # (N, N)
+            'cycle':                cycle,                 # (N, N)
+        }
 
     def croco_like_encoder(self, x, modality='thermal'):
         """Masked encoder following CroCo style."""

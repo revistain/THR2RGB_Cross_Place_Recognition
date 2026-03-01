@@ -22,6 +22,7 @@ import inference
 
 import network
 import network_only_GeM
+import epoch_visualizer
 from pathlib import Path
 
 
@@ -326,6 +327,14 @@ if __name__ == "__main__":
             if not_improved_num >= args.patience:
                 print(f"Performance did not improve for {not_improved_num} epochs.")
                 logging.info(f"Performance did not improve for {not_improved_num} epochs. Stop training.")
+
+        # Per-epoch visualization (only when CroCo decoder is enabled)
+        if args.use_recon_loss:
+            epoch_visualizer.save_epoch_visualizations(
+                args, model, test_ds_list[0], epoch_num,
+                save_dir=os.path.join(args.save_dir, 'viz'),
+                n_samples=5,
+            )
 
         print(f"Comment: {args.comment} :: Epoch {epoch_num:02d}")
         import gc

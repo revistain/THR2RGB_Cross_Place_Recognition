@@ -1,0 +1,23 @@
+2026-03-01 09:17:28   The outputs are being saved in default/crw-only/260301_091728
+2026-03-01 09:17:28   Use 1 GPUs and 80 CPUs
+2026-03-01 09:17:28   There are 2 queries without any positives
+2026-03-01 09:17:28   [Train - ['Campus']] Database: 1207, Queries: 18415, Total: 19622
+2026-03-01 09:17:28   [Test - Urban] Database: 955, Queries: 13810, Total: 14765
+2026-03-01 09:17:28   [Test - Residential] Database: 496, Queries: 9029, Total: 9525
+2026-03-01 09:17:28   using MLP layer as FFN
+2026-03-01 09:17:31   Start training epoch: 00
+2026-03-01 09:17:31   Cache: 1 / 2
+2026-03-01 09:17:35   
+Traceback (most recent call last):
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/train_wandb.py", line 172, in <module>
+    triplets_ds.compute_triplets(args, model)
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 457, in compute_triplets
+    self.compute_triplets_partial(args, model)
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 530, in compute_triplets_partial
+    cache = self.compute_cache(args, model, subset_ds, cache_shape=(len(self), args.affinity_dim))
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 479, in compute_cache
+    cache[indexes.numpy()] = global_features.cpu().numpy()
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/datasets_T2R.py", line 557, in __setitem__
+    assert vals.shape[1] == self.shape[1], f"{vals.shape[1]} {self.shape[1]}"
+AssertionError: 768 384
+
