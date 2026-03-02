@@ -1,0 +1,26 @@
+2026-03-02 07:57:12   using MLP layer as FFN
+2026-03-02 07:57:12   
+Traceback (most recent call last):
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/eval.py", line 34, in <module>
+    model = network.CrossModalVPR_Net(
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/network.py", line 428, in __init__
+    self.shared_backbone = get_backbone(pretrained_foundation, foundation_model_path, args=args)
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/network.py", line 1004, in get_backbone
+    backbone = vit_small(patch_size=14, img_size=518, init_values=1, block_chunks=0, num_register_tokens=num_register_tokens)
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/backbone/vision_transformer.py", line 457, in vit_small
+    model = DinoVisionTransformer(
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/backbone/vision_transformer.py", line 136, in __init__
+    blocks_list = [
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/backbone/vision_transformer.py", line 137, in <listcomp>
+    block_fn(
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/backbone/dinov2/block.py", line 119, in __init__
+    self.adapter = VanillaAdapter(adapter_dim, adapter_dim // 2)
+TypeError: unsupported operand type(s) for //: 'NoneType' and 'int'
+
+2026-03-02 07:57:53   using MLP layer as FFN
+2026-03-02 07:57:55   ===== Evaluating Sequence: Urban =====
+2026-03-02 07:57:55   Using GMRW re-ranking (top-10, score: trace)
+2026-03-02 07:57:59   Extracted 955 database features in 3.53s
+2026-03-02 07:58:17   Extracted 13810 query features in 18.45s
+2026-03-02 07:58:17   FAISS search (top-25) completed in 0.26s
+2026-03-02 07:58:17   Starting GMRW re-ranking with top-10 candidates...

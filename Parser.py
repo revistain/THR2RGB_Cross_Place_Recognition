@@ -92,7 +92,20 @@ class Parser():
         self.parser.add_argument("--use_fast_track", action='store_true', default=False) # training 빠르게 건너뛰어서 실험할때 사용
         
         # Test options
-        self.parser.add_argument("--use_reranking", type=str, default="none", choices=['recon']) # reranking 사용여부 및 선택
+        self.parser.add_argument("--use_reranking", type=str, default="none", choices=['recon', 'gmrw']) # reranking 사용여부 및 선택
+
+        # ============== 2-Stage GMRW Settings ==============
+        self.parser.add_argument("--use_2stage", action='store_true', default=False)  # 2-stage GMRW 사용여부
+        self.parser.add_argument("--gmrw_weight", type=float, default=1.0)  # GMRW loss weight
+        self.parser.add_argument("--use_label_warp", action='store_true', default=True)  # Label warping 사용여부
+        self.parser.add_argument("--use_smoothness_loss", action='store_true', default=False)  # Smoothness loss 사용여부
+        self.parser.add_argument("--smoothness_weight", type=float, default=0.1)  # Smoothness loss weight
+        self.parser.add_argument("--score_method", type=str, default="trace", choices=["trace", "entropy"])  # Matching score method
+        self.parser.add_argument("--freeze_encoder", action='store_true', default=True)  # 2-stage시 encoder freeze
+        self.parser.add_argument("--freeze_decoder", action='store_true', default=False)  # 2-stage시 decoder freeze
+        self.parser.add_argument("--train_with_negatives", action='store_true', default=False)  # Negative pair도 학습
+        self.parser.add_argument("--neg_margin", type=float, default=0.1)  # Margin for negative pairs
+        self.parser.add_argument("--rerank_top_k", type=int, default=10)  # Re-ranking top-K candidates
         
     def parse_arguments(self):
         args = self.parser.parse_args()

@@ -1,0 +1,156 @@
+2026-03-01 11:55:43   The outputs are being saved in default/nn-mixer-recon-only/260301_115543
+2026-03-01 11:55:43   Use 1 GPUs and 80 CPUs
+2026-03-01 11:55:43   There are 2 queries without any positives
+2026-03-01 11:55:43   [Train - ['Campus']] Database: 1207, Queries: 18415, Total: 19622
+2026-03-01 11:55:43   [Test - Urban] Database: 955, Queries: 13810, Total: 14765
+2026-03-01 11:55:43   [Test - Residential] Database: 496, Queries: 9029, Total: 9525
+2026-03-01 11:55:43   using MLP layer as FFN
+2026-03-01 11:55:47   Start training epoch: 00
+2026-03-01 11:55:47   Cache: 1 / 2
+2026-03-01 11:56:07   Finish computing triplets
+2026-03-01 11:56:07   Start loading 1000 triplets as 250 batches
+2026-03-01 12:00:55   Epoch[00](1/2): current batch triplet loss = 0.29566678, average epoch triplet loss = 0.37039631
+2026-03-01 12:00:55   Cache: 2 / 2
+2026-03-01 12:01:13   Finish computing triplets
+2026-03-01 12:01:13   Start loading 1000 triplets as 250 batches
+2026-03-01 12:05:56   Epoch[00](2/2): current batch triplet loss = 0.28157446, average epoch triplet loss = 0.32899460
+2026-03-01 12:05:56   epoch 00 time: 0:10:09, 
+2026-03-01 12:05:56   Learning rate: 1.40e-05
+2026-03-01 12:05:56   ===== Evaluating Sequence: Urban =====
+2026-03-01 12:06:05   Extracted 955 database features in 8.43s
+2026-03-01 12:07:43   Extracted 13810 query features in 98.44s
+2026-03-01 12:07:43   FAISS search completed in 0.24s
+2026-03-01 12:07:45   Recalls: 10.043446777697321,20.325850832729905,25.264301230992036,30.564808110065172
+2026-03-01 12:07:45   Recalls for Urban: R@1: 10.0, R@5: 20.3, R@10: 25.3, R@20: 30.6
+2026-03-01 12:07:45   ================================================
+2026-03-01 12:07:45   ===== Evaluating Sequence: Residential =====
+2026-03-01 12:07:50   Extracted 496 database features in 5.04s
+2026-03-01 12:08:54   Extracted 9029 query features in 63.54s
+2026-03-01 12:08:54   FAISS search completed in 0.12s
+2026-03-01 12:08:55   Recalls: 15.11795326171226,26.702846383874185,32.40668955587551,38.79720899324399
+2026-03-01 12:08:55   Recalls for Residential: R@1: 15.1, R@5: 26.7, R@10: 32.4, R@20: 38.8
+2026-03-01 12:08:55   ================================================
+2026-03-01 12:08:58   Improved: previous best R@1 = 0.0, current R@1 = 12.6
+2026-03-01 12:08:58   Loaded backend Agg version v2.2.
+2026-03-01 12:08:58   findfont: Matching sans\-serif:style=normal:variant=normal:weight=normal:stretch=normal:size=10.0.
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSerif-BoldItalic.ttf', name='DejaVu Serif', style='italic', variant='normal', weight=700, stretch='normal', size='scalable')) = 11.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSans.ttf', name='DejaVu Sans', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 0.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSerif-Bold.ttf', name='DejaVu Serif', style='normal', variant='normal', weight=700, stretch='normal', size='scalable')) = 10.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXSizFourSymReg.ttf', name='STIXSizeFourSym', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSansMono.ttf', name='DejaVu Sans Mono', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXNonUniBolIta.ttf', name='STIXNonUnicode', style='italic', variant='normal', weight=700, stretch='normal', size='scalable')) = 11.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXSizThreeSymReg.ttf', name='STIXSizeThreeSym', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXSizThreeSymBol.ttf', name='STIXSizeThreeSym', style='normal', variant='normal', weight=700, stretch='normal', size='scalable')) = 10.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/cmtt10.ttf', name='cmtt10', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXNonUniBol.ttf', name='STIXNonUnicode', style='normal', variant='normal', weight=700, stretch='normal', size='scalable')) = 10.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSerif.ttf', name='DejaVu Serif', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSansMono-Bold.ttf', name='DejaVu Sans Mono', style='normal', variant='normal', weight=700, stretch='normal', size='scalable')) = 10.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXGeneralBol.ttf', name='STIXGeneral', style='normal', variant='normal', weight=700, stretch='normal', size='scalable')) = 10.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSerifDisplay.ttf', name='DejaVu Serif Display', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSans-Bold.ttf', name='DejaVu Sans', style='normal', variant='normal', weight=700, stretch='normal', size='scalable')) = 0.33499999999999996
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/cmex10.ttf', name='cmex10', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSansDisplay.ttf', name='DejaVu Sans Display', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSansMono-Oblique.ttf', name='DejaVu Sans Mono', style='oblique', variant='normal', weight=400, stretch='normal', size='scalable')) = 11.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/cmss10.ttf', name='cmss10', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXNonUni.ttf', name='STIXNonUnicode', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXSizOneSymBol.ttf', name='STIXSizeOneSym', style='normal', variant='normal', weight=700, stretch='normal', size='scalable')) = 10.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/cmb10.ttf', name='cmb10', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/cmsy10.ttf', name='cmsy10', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXGeneralBolIta.ttf', name='STIXGeneral', style='italic', variant='normal', weight=700, stretch='normal', size='scalable')) = 11.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXSizFourSymBol.ttf', name='STIXSizeFourSym', style='normal', variant='normal', weight=700, stretch='normal', size='scalable')) = 10.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXSizTwoSymBol.ttf', name='STIXSizeTwoSym', style='normal', variant='normal', weight=700, stretch='normal', size='scalable')) = 10.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXNonUniIta.ttf', name='STIXNonUnicode', style='italic', variant='normal', weight=400, stretch='normal', size='scalable')) = 11.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSerif-Italic.ttf', name='DejaVu Serif', style='italic', variant='normal', weight=400, stretch='normal', size='scalable')) = 11.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXGeneral.ttf', name='STIXGeneral', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXGeneralItalic.ttf', name='STIXGeneral', style='italic', variant='normal', weight=400, stretch='normal', size='scalable')) = 11.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSansMono-BoldOblique.ttf', name='DejaVu Sans Mono', style='oblique', variant='normal', weight=700, stretch='normal', size='scalable')) = 11.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/cmr10.ttf', name='cmr10', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSans-Oblique.ttf', name='DejaVu Sans', style='oblique', variant='normal', weight=400, stretch='normal', size='scalable')) = 1.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXSizFiveSymReg.ttf', name='STIXSizeFiveSym', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSans-BoldOblique.ttf', name='DejaVu Sans', style='oblique', variant='normal', weight=700, stretch='normal', size='scalable')) = 1.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/cmmi10.ttf', name='cmmi10', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXSizTwoSymReg.ttf', name='STIXSizeTwoSym', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXSizOneSymReg.ttf', name='STIXSizeOneSym', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: Matching sans\-serif:style=normal:variant=normal:weight=normal:stretch=normal:size=10.0 to DejaVu Sans ('/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSans.ttf') with score of 0.050000.
+2026-03-01 12:08:58   findfont: Matching sans\-serif:style=normal:variant=normal:weight=normal:stretch=normal:size=8.0.
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSerif-BoldItalic.ttf', name='DejaVu Serif', style='italic', variant='normal', weight=700, stretch='normal', size='scalable')) = 11.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSans.ttf', name='DejaVu Sans', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 0.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSerif-Bold.ttf', name='DejaVu Serif', style='normal', variant='normal', weight=700, stretch='normal', size='scalable')) = 10.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXSizFourSymReg.ttf', name='STIXSizeFourSym', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSansMono.ttf', name='DejaVu Sans Mono', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXNonUniBolIta.ttf', name='STIXNonUnicode', style='italic', variant='normal', weight=700, stretch='normal', size='scalable')) = 11.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXSizThreeSymReg.ttf', name='STIXSizeThreeSym', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXSizThreeSymBol.ttf', name='STIXSizeThreeSym', style='normal', variant='normal', weight=700, stretch='normal', size='scalable')) = 10.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/cmtt10.ttf', name='cmtt10', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXNonUniBol.ttf', name='STIXNonUnicode', style='normal', variant='normal', weight=700, stretch='normal', size='scalable')) = 10.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSerif.ttf', name='DejaVu Serif', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSansMono-Bold.ttf', name='DejaVu Sans Mono', style='normal', variant='normal', weight=700, stretch='normal', size='scalable')) = 10.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXGeneralBol.ttf', name='STIXGeneral', style='normal', variant='normal', weight=700, stretch='normal', size='scalable')) = 10.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSerifDisplay.ttf', name='DejaVu Serif Display', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSans-Bold.ttf', name='DejaVu Sans', style='normal', variant='normal', weight=700, stretch='normal', size='scalable')) = 0.33499999999999996
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/cmex10.ttf', name='cmex10', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSansDisplay.ttf', name='DejaVu Sans Display', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSansMono-Oblique.ttf', name='DejaVu Sans Mono', style='oblique', variant='normal', weight=400, stretch='normal', size='scalable')) = 11.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/cmss10.ttf', name='cmss10', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXNonUni.ttf', name='STIXNonUnicode', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXSizOneSymBol.ttf', name='STIXSizeOneSym', style='normal', variant='normal', weight=700, stretch='normal', size='scalable')) = 10.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/cmb10.ttf', name='cmb10', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/cmsy10.ttf', name='cmsy10', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXGeneralBolIta.ttf', name='STIXGeneral', style='italic', variant='normal', weight=700, stretch='normal', size='scalable')) = 11.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXSizFourSymBol.ttf', name='STIXSizeFourSym', style='normal', variant='normal', weight=700, stretch='normal', size='scalable')) = 10.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXSizTwoSymBol.ttf', name='STIXSizeTwoSym', style='normal', variant='normal', weight=700, stretch='normal', size='scalable')) = 10.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXNonUniIta.ttf', name='STIXNonUnicode', style='italic', variant='normal', weight=400, stretch='normal', size='scalable')) = 11.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSerif-Italic.ttf', name='DejaVu Serif', style='italic', variant='normal', weight=400, stretch='normal', size='scalable')) = 11.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXGeneral.ttf', name='STIXGeneral', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXGeneralItalic.ttf', name='STIXGeneral', style='italic', variant='normal', weight=400, stretch='normal', size='scalable')) = 11.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSansMono-BoldOblique.ttf', name='DejaVu Sans Mono', style='oblique', variant='normal', weight=700, stretch='normal', size='scalable')) = 11.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/cmr10.ttf', name='cmr10', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSans-Oblique.ttf', name='DejaVu Sans', style='oblique', variant='normal', weight=400, stretch='normal', size='scalable')) = 1.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXSizFiveSymReg.ttf', name='STIXSizeFiveSym', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSans-BoldOblique.ttf', name='DejaVu Sans', style='oblique', variant='normal', weight=700, stretch='normal', size='scalable')) = 1.335
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/cmmi10.ttf', name='cmmi10', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXSizTwoSymReg.ttf', name='STIXSizeTwoSym', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: score(FontEntry(fname='/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/STIXSizOneSymReg.ttf', name='STIXSizeOneSym', style='normal', variant='normal', weight=400, stretch='normal', size='scalable')) = 10.05
+2026-03-01 12:08:58   findfont: Matching sans\-serif:style=normal:variant=normal:weight=normal:stretch=normal:size=8.0 to DejaVu Sans ('/home/jwkim/.local/lib/python3.10/site-packages/matplotlib/mpl-data/fonts/ttf/DejaVuSans.ttf') with score of 0.050000.
+2026-03-01 12:09:04   Start training epoch: 01
+2026-03-01 12:09:04   Cache: 1 / 2
+2026-03-01 12:09:23   Finish computing triplets
+2026-03-01 12:09:23   Start loading 1000 triplets as 250 batches
+2026-03-01 12:14:12   Epoch[01](1/2): current batch triplet loss = 0.11920681, average epoch triplet loss = 0.14632762
+2026-03-01 12:14:12   Cache: 2 / 2
+2026-03-01 12:14:25   Finish computing triplets
+2026-03-01 12:14:25   Start loading 1000 triplets as 250 batches
+2026-03-01 12:17:12   Epoch[01](2/2): current batch triplet loss = 0.12569872, average epoch triplet loss = 0.13337096
+2026-03-01 12:17:12   epoch 01 time: 0:08:08, 
+2026-03-01 12:17:13   Learning rate: 2.30e-05
+2026-03-01 12:17:13   ===== Evaluating Sequence: Urban =====
+2026-03-01 12:17:18   Extracted 955 database features in 5.62s
+2026-03-01 12:18:21   Extracted 13810 query features in 63.10s
+2026-03-01 12:18:21   FAISS search completed in 0.27s
+2026-03-01 12:18:23   Recalls: 26.81390296886314,41.83924692251991,47.81317885590152,53.46125995655322
+2026-03-01 12:18:23   Recalls for Urban: R@1: 26.8, R@5: 41.8, R@10: 47.8, R@20: 53.5
+2026-03-01 12:18:23   ================================================
+2026-03-01 12:18:23   ===== Evaluating Sequence: Residential =====
+2026-03-01 12:18:27   Extracted 496 database features in 3.57s
+2026-03-01 12:19:08   Extracted 9029 query features in 41.44s
+2026-03-01 12:19:08   FAISS search completed in 0.10s
+2026-03-01 12:19:09   Recalls: 25.528851478569052,41.22272676929892,48.68756229925795,55.76475800199358
+2026-03-01 12:19:09   Recalls for Residential: R@1: 25.5, R@5: 41.2, R@10: 48.7, R@20: 55.8
+2026-03-01 12:19:09   ================================================
+2026-03-01 12:19:18   Improved: previous best R@1 = 12.6, current R@1 = 26.2
+2026-03-01 12:19:24   Best R@1: 26.17
+2026-03-01 12:19:24   Trained for 02 epochs, in total in 0:23:40
+2026-03-01 12:19:24   ===== Evaluating Sequence: Urban =====
+2026-03-01 12:19:29   Extracted 955 database features in 5.46s
+2026-03-01 12:20:31   Extracted 13810 query features in 61.60s
+2026-03-01 12:20:31   FAISS search completed in 0.25s
+2026-03-01 12:20:33   Recalls: 26.81390296886314,41.83924692251991,47.81317885590152,53.46125995655322
+2026-03-01 12:20:33   Recalls for Urban: R@1: 26.8, R@5: 41.8, R@10: 47.8, R@20: 53.5
+2026-03-01 12:20:33   ================================================
+2026-03-01 12:20:33   ===== Evaluating Sequence: Residential =====
+2026-03-01 12:20:36   Extracted 496 database features in 3.54s
+2026-03-01 12:21:18   Extracted 9029 query features in 41.36s
+2026-03-01 12:21:18   FAISS search completed in 0.11s
+2026-03-01 12:21:19   Recalls: 25.528851478569052,41.22272676929892,48.68756229925795,55.76475800199358
+2026-03-01 12:21:19   Recalls for Residential: R@1: 25.5, R@5: 41.2, R@10: 48.7, R@20: 55.8
+2026-03-01 12:21:19   ================================================

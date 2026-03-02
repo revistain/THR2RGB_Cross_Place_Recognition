@@ -10,173 +10,294 @@ from croco.models.masking import RandomMask
 from croco.models.criterion import MaskedMSE
 
 
+# ============== 2-Stage GMRW Components ==============
+
+class LabelWarping(nn.Module):
+    """
+    Random affine augmentation + label warping for shortcut prevention
+    Based on GMRW (Self-Supervised Any-Point Tracking by Contrastive Random Walks, ECCV 2024)
+    """
+    def __init__(self, num_patches=256, H=16, W=16):
+        super().__init__()
+        self.num_patches = num_patches
+        self.H = H
+        self.W = W
+
+    def generate_random_affine(self, B, device):
+        """Random affine transformation matrix"""
+        # Random rotation: -15 to 15 degrees
+        angle = (torch.rand(B, device=device) * 30 - 15) * (3.14159 / 180)
+        # Random scale: 0.85 to 1.15
+        scale = torch.rand(B, device=device) * 0.3 + 0.85
+        # Random translation: -0.1 to 0.1
+        tx = torch.rand(B, device=device) * 0.2 - 0.1
+        ty = torch.rand(B, device=device) * 0.2 - 0.1
+
+        cos_a = torch.cos(angle)
+        sin_a = torch.sin(angle)
+
+        # Affine matrix [2, 3]
+        affine = torch.zeros(B, 2, 3, device=device)
+        affine[:, 0, 0] = scale * cos_a
+        affine[:, 0, 1] = -scale * sin_a
+        affine[:, 0, 2] = tx
+        affine[:, 1, 0] = scale * sin_a
+        affine[:, 1, 1] = scale * cos_a
+        affine[:, 1, 2] = ty
+
+        return affine
+
+    def apply_affine_to_features(self, features, affine):
+        """
+        Apply affine transformation to patch features
+        features: (B, N, C) where N = H * W
+        affine: (B, 2, 3)
+        """
+        B, N, C = features.shape
+        H, W = self.H, self.W
+
+        # Reshape to spatial
+        feat_spatial = features.view(B, H, W, C).permute(0, 3, 1, 2)  # (B, C, H, W)
+
+        # Generate sampling grid
+        grid = F.affine_grid(affine, (B, C, H, W), align_corners=False)
+
+        # Sample
+        feat_warped = F.grid_sample(feat_spatial, grid, align_corners=False, mode='bilinear', padding_mode='zeros')
+
+        # Reshape back
+        return feat_warped.permute(0, 2, 3, 1).reshape(B, N, C)
+
+    def compute_warped_label(self, affine_t, affine_r):
+        """
+        Compute warped identity label: T_t @ T_r^(-1)
+        Returns: (B, N, N) warped one-hot labels, (B, N) valid mask
+        """
+        B = affine_t.size(0)
+        H, W = self.H, self.W
+        N = H * W
+        device = affine_t.device
+
+        # Initial coordinate grid: (B, H, W, 2) normalized [-1, 1]
+        grid_y, grid_x = torch.meshgrid(
+            torch.linspace(-1, 1, H, device=device),
+            torch.linspace(-1, 1, W, device=device),
+            indexing='ij'
+        )
+        init_grid = torch.stack([grid_x, grid_y], dim=-1)  # (H, W, 2)
+        init_grid = init_grid.unsqueeze(0).expand(B, -1, -1, -1)  # (B, H, W, 2)
+
+        # Apply T_t to grid
+        grid_t = self._apply_affine_to_grid(init_grid, affine_t)
+
+        # Apply T_r^(-1) to grid_t
+        affine_r_inv = self._invert_affine(affine_r)
+        grid_final = self._apply_affine_to_grid(grid_t, affine_r_inv)
+
+        # Convert to indices
+        grid_final_idx = grid_final.reshape(B, N, 2)
+        # Normalize to [0, H-1] and [0, W-1]
+        idx_x = ((grid_final_idx[..., 0] + 1) / 2 * (W - 1)).round().long()
+        idx_y = ((grid_final_idx[..., 1] + 1) / 2 * (H - 1)).round().long()
+
+        # Valid mask: within bounds
+        valid = (idx_x >= 0) & (idx_x < W) & (idx_y >= 0) & (idx_y < H)
+
+        # Convert to 1D index
+        idx_1d = idx_y * W + idx_x  # (B, N)
+        idx_1d = idx_1d.clamp(0, N - 1)  # Safety clamp
+
+        # Create one-hot label
+        label = F.one_hot(idx_1d, num_classes=N).float()  # (B, N, N)
+
+        # Mask invalid positions
+        label = label * valid.unsqueeze(-1).float()
+
+        return label, valid.float()
+
+    def _apply_affine_to_grid(self, grid, affine):
+        """Apply affine transform to coordinate grid"""
+        B, H, W, _ = grid.shape
+        grid_flat = grid.reshape(B, -1, 2)  # (B, H*W, 2)
+
+        # Homogeneous coordinates
+        ones = torch.ones(B, H*W, 1, device=grid.device)
+        grid_homo = torch.cat([grid_flat, ones], dim=-1)  # (B, H*W, 3)
+
+        # Apply affine: (B, 2, 3) @ (B, 3, H*W) -> (B, 2, H*W)
+        grid_transformed = torch.bmm(affine, grid_homo.transpose(1, 2))
+        grid_transformed = grid_transformed.transpose(1, 2).reshape(B, H, W, 2)
+
+        return grid_transformed
+
+    def _invert_affine(self, affine):
+        """Invert 2x3 affine matrix"""
+        B = affine.size(0)
+        # Extract rotation/scale (2x2) and translation (2x1)
+        A = affine[:, :, :2]  # (B, 2, 2)
+        t = affine[:, :, 2:]  # (B, 2, 1)
+
+        # Invert A
+        A_inv = torch.inverse(A)
+
+        # New translation: -A_inv @ t
+        t_inv = -torch.bmm(A_inv, t)
+
+        # Combine
+        affine_inv = torch.cat([A_inv, t_inv], dim=-1)
+        return affine_inv
+
+    def forward(self, thermal_feat, rgb_feat):
+        """
+        Apply augmentation and compute warped labels
+
+        Args:
+            thermal_feat: (B, N, C) thermal patch features
+            rgb_feat: (B, N, C) RGB patch features
+
+        Returns:
+            thermal_aug: (B, N, C) augmented thermal features
+            rgb_aug: (B, N, C) augmented RGB features
+            warped_label: (B, N, N) target label
+            valid_mask: (B, N) valid positions
+        """
+        B = thermal_feat.size(0)
+        device = thermal_feat.device
+
+        # Generate random affines
+        affine_t = self.generate_random_affine(B, device)
+        affine_r = self.generate_random_affine(B, device)
+
+        # Apply to features
+        thermal_aug = self.apply_affine_to_features(thermal_feat, affine_t)
+        rgb_aug = self.apply_affine_to_features(rgb_feat, affine_r)
+
+        # Compute warped label
+        warped_label, valid_mask = self.compute_warped_label(affine_t, affine_r)
+
+        return thermal_aug, rgb_aug, warped_label, valid_mask
+
+
+class GMRWLoss(nn.Module):
+    """
+    GMRW Loss with Label Warping
+    Based on GMRW (Self-Supervised Any-Point Tracking by Contrastive Random Walks, ECCV 2024)
+    """
+    def __init__(self, use_smoothness=False, smoothness_weight=0.1, edge_constant=150.0):
+        super().__init__()
+        self.use_smoothness = use_smoothness
+        self.smoothness_weight = smoothness_weight
+        self.edge_constant = edge_constant
+
+    def forward(self, cycle, warped_label, valid_mask, flow=None, image=None):
+        """
+        Args:
+            cycle: (B, N, N) cycle consistency matrix
+            warped_label: (B, N, N) warped target label
+            valid_mask: (B, N) valid positions
+            flow: (B, 2, H, W) optical flow (for smoothness)
+            image: (B, 3, H, W) image (for edge-aware smoothness)
+        """
+        B, N, _ = cycle.shape
+
+        # Cycle consistency loss with warped label
+        # For each position i, find probability of landing on warped target
+        # Sum probability mass on correct targets
+        correct_prob = (cycle * warped_label).sum(dim=-1)  # (B, N)
+
+        # Mask invalid positions
+        correct_prob = correct_prob * valid_mask
+
+        # -log(probability)
+        cycle_loss = -torch.log(correct_prob.clamp(min=1e-8))
+        cycle_loss = cycle_loss.sum() / (valid_mask.sum() + 1e-8)
+
+        total_loss = cycle_loss
+
+        # Smoothness loss (optional)
+        if self.use_smoothness and flow is not None and image is not None:
+            smooth_loss = self.smoothness_loss(flow, image)
+            total_loss = total_loss + self.smoothness_weight * smooth_loss
+        else:
+            smooth_loss = torch.tensor(0.0, device=cycle.device)
+
+        return total_loss, cycle_loss, smooth_loss
+
+    def smoothness_loss(self, flow, image):
+        """Edge-aware smoothness loss"""
+        dx = flow[:, :, :, 1:] - flow[:, :, :, :-1]
+        dy = flow[:, :, 1:, :] - flow[:, :, :-1, :]
+
+        img_dx = (image[:, :, :, 1:] - image[:, :, :, :-1]).abs().mean(dim=1, keepdim=True)
+        img_dy = (image[:, :, 1:, :] - image[:, :, :-1, :]).abs().mean(dim=1, keepdim=True)
+
+        wx = torch.exp(-self.edge_constant * img_dx)
+        wy = torch.exp(-self.edge_constant * img_dy)
+
+        loss_x = (wx * torch.sqrt(dx**2 + 1e-6)).mean()
+        loss_y = (wy * torch.sqrt(dy**2 + 1e-6)).mean()
+
+        return loss_x + loss_y
+
+
+# ============== End 2-Stage GMRW Components ==============
+
+
 class AffinityAggregator(nn.Module):
     """
     Patch tokens에서 affinity matrix를 계산하고 descriptor로 변환
 
-    Input: (B, N, C) patch tokens (variable N for masked tokens)
-    Output: (B, C) affinity descriptor
+    N→N mixing으로 spatial structure 유지 후 pooling
+
+    Input: (B, N, C) patch tokens
+    Output: (B, output_dim) affinity descriptor
     """
-    def __init__(self, num_patches=256, embed_dim=768):
+    def __init__(self, num_patches=256, embed_dim=768, output_dim=384):
         super().__init__()
         self.num_patches = num_patches
         self.embed_dim = embed_dim
+        self.output_dim = output_dim
 
-        # (B, N, N) → (B, N, C)
-        self.row_linear = nn.Linear(num_patches, embed_dim)
-        # (B, C, N) → (B, C, 1)
-        self.col_linear = nn.Linear(num_patches, 1)
+        # N→N spatial mixing (preserves structure)
+        self.row_mixer = nn.Linear(num_patches, num_patches)
+        self.col_mixer = nn.Linear(num_patches, num_patches)
+
+        # Final projection: N → output_dim
+        self.proj = nn.Linear(num_patches, output_dim)
+
+        # GeM pooling parameter
+        self.gem_p = nn.Parameter(torch.ones(1) * 3.0)
 
     def forward(self, patch_tokens):
-        # patch_tokens: (B, N, C) - N can be variable (masked tokens)
+        # patch_tokens: (B, N, C)
 
         # L2 normalize patch tokens before affinity
-        patch_tokens_norm = F.normalize(patch_tokens, p=2, dim=-1)
+        tokens_norm = F.normalize(patch_tokens, p=2, dim=-1)
 
-        # Affinity matrix
-        affinity = patch_tokens_norm @ patch_tokens_norm.transpose(-1, -2)  # (B, N, N)
+        # Self-affinity matrix
+        affinity = tokens_norm @ tokens_norm.transpose(-1, -2)  # (B, N, N)
 
-        # Adaptive pooling to fixed size (handles variable N from masking)
+        # Adaptive pooling to fixed size (handles variable N)
         affinity = F.adaptive_avg_pool2d(
             affinity.unsqueeze(1),
             (self.num_patches, self.num_patches)
-        ).squeeze(1)  # (B, 256, 256)
+        ).squeeze(1)  # (B, num_patches, num_patches)
 
-        # Row-wise linear (N → C)
-        x = self.row_linear(affinity)  # (B, N, C)
+        # N→N mixing (spatial context exchange)
+        x = self.row_mixer(affinity)  # (B, N, N) - each row mixes with other rows
+        x = self.col_mixer(x.transpose(-1, -2)).transpose(-1, -2)  # (B, N, N) - each col mixes
 
-        # Transpose and col-wise linear (N → 1)
-        x = x.transpose(-1, -2)  # (B, C, N)
-        x = self.col_linear(x)  # (B, C, 1)
-        x = x.squeeze(-1)  # (B, C)
+        # GeM pooling over columns → (B, N)
+        x = x.clamp(min=1e-6).pow(self.gem_p)
+        x = x.mean(dim=-1)  # (B, N)
+        x = x.pow(1.0 / self.gem_p)
+
+        # Project to output dim
+        x = self.proj(x)  # (B, output_dim)
 
         return x
 
 
-class CRWLoss(nn.Module):
-    """
-    Contrastive Random Walk Loss for cross-modal correspondence
-
-    Based on: "Self-Supervised Any-Point Tracking by Contrastive Random Walks"
-
-    Three components:
-    1. Cycle consistency: thermal → RGB → thermal should return to origin
-    2. Warp-label: independent random horizontal flip per image to prevent
-       spatial shortcut (model cannot just match "same position")
-    3. Smoothness loss: neighboring patches should have similar transition
-       distributions (spatial continuity prior)
-    """
-    def __init__(self, temperature=0.07, grid_size=16):
-        super().__init__()
-        # Small temperature (0.07) produces peaked softmax → clear correspondences
-        # sqrt(embed_dim) is too large (~19.6), making softmax nearly uniform
-        self.temperature = temperature
-        self.grid_size = grid_size  # 224 / 14 = 16
-
-    def _get_flip_perm(self, H, W, device):
-        """
-        Horizontal flip permutation for H×W patch grid.
-        patch at (r, c) → (r, W-1-c), index: r*W+c → r*W+(W-1-c)
-        """
-        idx = torch.arange(H * W, device=device)
-        r = idx // W
-        c = idx % W
-        return r * W + (W - 1 - c)  # (N,)
-
-    def _apply_flip(self, tokens, flip_mask, H, W):
-        """
-        Spatially flip patch tokens for a subset of the batch.
-        Uses soft masking (no in-place ops) to preserve gradient flow.
-
-        Args:
-            tokens: (B, N, C)
-            flip_mask: (B,) bool — True means flip this sample
-        Returns:
-            (B, N, C) with flipped samples reordered
-        """
-        B = tokens.shape[0]
-        perm = self._get_flip_perm(H, W, tokens.device)  # (N,)
-        flipped = tokens[:, perm, :]  # (B, N, C) — all flipped, gradient flows
-
-        # Soft mask: select flipped or original per sample without in-place
-        mask = flip_mask.view(B, 1, 1).to(tokens.dtype)
-        return flipped * mask + tokens * (1.0 - mask)
-
-    def _warp_target(self, B, N, flip_fwd, flip_bwd, flip_perm, device):
-        """
-        Label Warping target for cycle consistency (ECCV 2024 method).
-
-        Compare flip_T_forward vs flip_T_backward:
-        - Same flip state → cycle lands on same spatial position → identity target
-        - Different flip → spatial warp between start/end → flip_perm target
-
-        Returns: (B, N) long tensor
-        """
-        identity = torch.arange(N, device=device)
-        target = torch.stack([
-            identity if (flip_fwd[b] == flip_bwd[b]) else flip_perm
-            for b in range(B)
-        ])  # (B, N)
-        return target
-
-    def forward(self, patch_tokens_thermal, patch_tokens_rgb):
-        """
-        Label Warping CRW Loss (ECCV 2024 method).
-
-        Key idea: Apply DIFFERENT augmentations to thermal at cycle start vs end.
-        This prevents the transformer from using positional shortcuts.
-
-        Args:
-            patch_tokens_thermal: (B, N, C) full patch tokens from thermal
-            patch_tokens_rgb:     (B, N, C) full patch tokens from RGB
-        Returns:
-            crw_loss:    scalar cycle-consistency loss (with label warping)
-            smooth_loss: scalar spatial smoothness loss
-        """
-        B, N, C = patch_tokens_thermal.shape
-        H = W = self.grid_size
-
-        # ── Label Warping: 3 independent flips ──────────────────────────────────
-        # flip_T_fwd: augmentation for cycle START (thermal in A_T2R)
-        # flip_T_bwd: augmentation for cycle END (thermal in A_R2T) — independent!
-        # flip_R:     augmentation for intermediate RGB
-        flip_T_fwd = torch.rand(B, device=patch_tokens_thermal.device) > 0.5
-        flip_T_bwd = torch.rand(B, device=patch_tokens_thermal.device) > 0.5
-        flip_R     = torch.rand(B, device=patch_tokens_rgb.device) > 0.5
-
-        tokens_T_fwd = self._apply_flip(patch_tokens_thermal, flip_T_fwd, H, W)
-        tokens_T_bwd = self._apply_flip(patch_tokens_thermal, flip_T_bwd, H, W)
-        tokens_R     = self._apply_flip(patch_tokens_rgb,     flip_R,     H, W)
-
-        # ── L2 normalize ────────────────────────────────────────────────────────
-        F_T_fwd = F.normalize(tokens_T_fwd, p=2, dim=-1)  # (B, N, C)
-        F_T_bwd = F.normalize(tokens_T_bwd, p=2, dim=-1)  # (B, N, C)
-        F_R     = F.normalize(tokens_R,     p=2, dim=-1)  # (B, N, C)
-
-        # ── Transition matrices ──────────────────────────────────────────────────
-        # A_T2R: T_fwd → R
-        # A_R2T: R → T_bwd (NOTE: uses T_bwd, not T_fwd!)
-        A_T2R = F.softmax(torch.bmm(F_T_fwd, F_R.transpose(-1, -2)) / self.temperature, dim=-1)
-        A_R2T = F.softmax(torch.bmm(F_R, F_T_bwd.transpose(-1, -2)) / self.temperature, dim=-1)
-
-        # ── Cycle consistency ────────────────────────────────────────────────────
-        # cycle: T_fwd → R → T_bwd
-        # Start and end have DIFFERENT augmentations → label warping target
-        cycle = torch.bmm(A_T2R, A_R2T)  # (B, N, N)
-
-        # Label Warping target: compare flip_T_fwd vs flip_T_bwd
-        flip_perm = self._get_flip_perm(H, W, cycle.device)  # (N,)
-        target = self._warp_target(B, N, flip_T_fwd, flip_T_bwd, flip_perm, cycle.device)
-
-        crw_loss = F.cross_entropy(cycle.view(B * N, N), target.view(B * N))
-
-        # ── Smoothness loss ──────────────────────────────────────────────────────
-        A_spatial = A_T2R.reshape(B, H, W, N)
-        smooth_h = (A_spatial[:, :, :-1, :] - A_spatial[:, :, 1:, :]).pow(2).mean()
-        smooth_v = (A_spatial[:, :-1, :, :] - A_spatial[:, 1:, :, :]).pow(2).mean()
-        smooth_loss = smooth_h + smooth_v
-
-        return crw_loss, smooth_loss
 
 class CroCoDecoderBlock(nn.Module):
     def __init__(self, dim=768, num_heads=12, mlp_ratio=4.0, drop_path=0.0):
@@ -344,19 +465,31 @@ class CrossModalVPR_Net(nn.Module):
             Flatten()
         )
 
-        # Affinity aggregator
+        # Affinity aggregator with N→N mixing
+        self.affinity_dim = args.affinity_dim
         self.affinity_aggregator = AffinityAggregator(
             num_patches=self.patch_count,  # (224/14)^2 = 256
-            embed_dim=self.output_dim
+            embed_dim=self.output_dim,
+            output_dim=self.affinity_dim
         )
 
         # Descriptor mixer: concat(GeM, Affinity) → final descriptor
-        # Input: 2 * output_dim (768*2=1536 for ViT-B, 384*2=768 for ViT-S)
-        self.affinity_dim = args.affinity_dim
-        self.descriptor_mixer = nn.Linear(self.output_dim * 2, self.affinity_dim)
+        # Input: output_dim + affinity_dim
+        self.descriptor_mixer = nn.Linear(self.output_dim + self.affinity_dim, self.affinity_dim)
 
-        # CRW Loss for cross-modal correspondence
-        self.crw_loss_fn = CRWLoss(temperature=0.07, grid_size=int(args.resize[0] / 14))
+        # ============== 2-Stage GMRW Components ==============
+        H_feat = int(args.resize[0] / 14)
+        W_feat = int(args.resize[1] / 14)
+        self.label_warping = LabelWarping(
+            num_patches=self.patch_count,
+            H=H_feat,
+            W=W_feat
+        )
+        self.gmrw_loss_fn = GMRWLoss(
+            use_smoothness=getattr(args, 'use_smoothness_loss', False),
+            smoothness_weight=getattr(args, 'smoothness_weight', 0.1)
+        )
+        self.gmrw_temperature = 0.07
 
     def _set_mask_token(self, dec_embed_dim):
         self.mask_token = nn.Parameter(torch.zeros(1, 1, dec_embed_dim))
@@ -485,7 +618,7 @@ class CrossModalVPR_Net(nn.Module):
         aff_r = (pr_norm @ pr_norm.transpose(-1, -2)).squeeze(0)  # (N, N)
 
         # ── 6. Transition matrices A_T2R, A_R2T, Cycle ───────────────────────
-        temp  = self.crw_loss_fn.temperature
+        temp = 0.07  # standard temperature for contrastive learning
         A_T2R = F.softmax(torch.bmm(pt_norm, pr_norm.transpose(-1, -2)) / temp, dim=-1).squeeze(0)
         A_R2T = F.softmax(torch.bmm(pr_norm, pt_norm.transpose(-1, -2)) / temp, dim=-1).squeeze(0)
         cycle = torch.mm(A_T2R, A_R2T)  # (N, N)
@@ -584,8 +717,6 @@ class CrossModalVPR_Net(nn.Module):
         """Forward pass for a single modality."""
         recon_loss_thermal = None
         recon_loss_rgb = None
-        crw_loss = None
-        smooth_loss = None
         mask_thermal = None
 
         if modality == 'rgb':
@@ -646,9 +777,6 @@ class CrossModalVPR_Net(nn.Module):
                 # - masked된 부분에 대해 loss 계산
                 recon_loss_thermal = self.calculate_recon_loss(reconstructed_thermal_patches, mask_thermal, target_thermal_patches)
                 recon_loss_rgb = self.calculate_recon_loss(reconstructed_rgb_patches, mask_rgb, target_rgb_patches)
-
-                # CRW loss: cycle consistency + smoothness between full thermal and RGB patch tokens
-                crw_loss, smooth_loss = self.crw_loss_fn(paired_thermal_full, paired_rgb_full)
             else:
                 # inference 때
                 out = self.shared_backbone(x)
@@ -674,7 +802,7 @@ class CrossModalVPR_Net(nn.Module):
         concat_desc = torch.cat([gem_desc, affinity_desc], dim=-1)  # (B, 2C)
         global_desc = self.descriptor_mixer(concat_desc)  # (B, affinity_dim)
 
-        return global_desc, patch_tokens, [recon_loss_thermal, recon_loss_rgb, crw_loss, smooth_loss], mask_thermal
+        return global_desc, patch_tokens, [recon_loss_thermal, recon_loss_rgb], mask_thermal
 
     def forward(self, x, flags, paired_rgb=None, return_mask=False):
         if not isinstance(flags, torch.Tensor):
@@ -709,6 +837,152 @@ class CrossModalVPR_Net(nn.Module):
 
     def calculate_recon_loss(self, pred, mask, target):
         return self.reconstruction_criterion(pred=pred, mask=mask, target=target)
+
+    # ============== 2-Stage GMRW Methods ==============
+
+    def stage2_forward_gmrw(self, thermal_img, rgb_img, use_warp=True):
+        """
+        2-stage forward with GMRW loss
+
+        Args:
+            thermal_img: (B, 3, H, W)
+            rgb_img: (B, 3, H, W)
+            use_warp: whether to use label warping
+
+        Returns:
+            loss: total GMRW loss
+            cycle: (B, N, N) cycle matrix
+            A_T2R: (B, N, N) transition matrix T→R
+            warped_label: (B, N, N) target label
+        """
+        # Encoder
+        thermal_out = self.shared_backbone(thermal_img)
+        rgb_out = self.shared_backbone(rgb_img)
+
+        patch_T = thermal_out["x_norm_patchtokens"]  # (B, N, C)
+        patch_R = rgb_out["x_norm_patchtokens"]
+
+        # Label Warping (augmentation) - only during training
+        if use_warp and self.training:
+            patch_T_aug, patch_R_aug, warped_label, valid_mask = \
+                self.label_warping(patch_T, patch_R)
+        else:
+            patch_T_aug = patch_T
+            patch_R_aug = patch_R
+            B, N, C = patch_T.shape
+            warped_label = torch.eye(N, device=patch_T.device)
+            warped_label = warped_label.unsqueeze(0).expand(B, -1, -1)
+            valid_mask = torch.ones(B, N, device=patch_T.device)
+
+        # Decoder (bidirectional cross-attention)
+        T_dec = patch_T_aug + self.decoder_pos_embed
+        R_dec = patch_R_aug + self.decoder_pos_embed
+
+        for blk in self.decoder_blocks:
+            T_new = blk(T_dec, R_dec)
+            R_new = blk(R_dec, T_dec)
+            T_dec, R_dec = T_new, R_new
+
+        refined_T = self.decoder_norm(T_dec)
+        refined_R = self.decoder_norm(R_dec)
+
+        # Cross-modal affinity
+        T_norm = F.normalize(refined_T, dim=-1)
+        R_norm = F.normalize(refined_R, dim=-1)
+        affinity = T_norm @ R_norm.transpose(-1, -2) / self.gmrw_temperature
+
+        # Transition probabilities
+        A_T2R = F.softmax(affinity, dim=-1)
+        A_R2T = F.softmax(affinity, dim=-2)
+
+        # Cycle matrix: T→R→T
+        cycle = A_T2R @ A_R2T  # (B, N, N)
+
+        # GMRW Loss
+        total_loss, cycle_loss, smooth_loss = self.gmrw_loss_fn(
+            cycle, warped_label, valid_mask
+        )
+
+        return total_loss, cycle, A_T2R, warped_label, cycle_loss, smooth_loss
+
+    def stage2_compute_score(self, cycle, method='trace'):
+        """
+        Compute matching score from cycle matrix (for inference)
+
+        Args:
+            cycle: (B, N, N) or (N, N) cycle matrix
+            method: 'trace' or 'entropy'
+
+        Returns:
+            score: (B,) or scalar matching score
+        """
+        if cycle.dim() == 2:
+            cycle = cycle.unsqueeze(0)
+
+        if method == 'trace':
+            # Higher diagonal sum = better cycle consistency
+            score = torch.diagonal(cycle, dim1=-2, dim2=-1).mean(dim=-1)
+        elif method == 'entropy':
+            # Lower entropy = more confident matching
+            entropy = -(cycle * torch.log(cycle.clamp(min=1e-8))).sum(dim=(-1, -2))
+            score = -entropy / cycle.size(-1) ** 2  # Normalize and negate
+        else:
+            raise ValueError(f"Unknown score method: {method}")
+
+        return score
+
+    def stage2_inference(self, thermal_img, rgb_img, score_method='trace'):
+        """
+        2-stage inference: compute matching score between thermal and RGB
+
+        Args:
+            thermal_img: (B, 3, H, W) or (1, 3, H, W)
+            rgb_img: (B, 3, H, W) or (1, 3, H, W)
+            score_method: 'trace' or 'entropy'
+
+        Returns:
+            score: (B,) matching score
+            cycle: (B, N, N) cycle matrix
+        """
+        with torch.no_grad():
+            # Encoder
+            thermal_out = self.shared_backbone(thermal_img)
+            rgb_out = self.shared_backbone(rgb_img)
+
+            patch_T = thermal_out["x_norm_patchtokens"]
+            patch_R = rgb_out["x_norm_patchtokens"]
+
+            # Decoder (bidirectional)
+            T_dec = patch_T + self.decoder_pos_embed
+            R_dec = patch_R + self.decoder_pos_embed
+
+            for blk in self.decoder_blocks:
+                T_new = blk(T_dec, R_dec)
+                R_new = blk(R_dec, T_dec)
+                T_dec, R_dec = T_new, R_new
+
+            refined_T = self.decoder_norm(T_dec)
+            refined_R = self.decoder_norm(R_dec)
+
+            # Cross-modal affinity
+            T_norm = F.normalize(refined_T, dim=-1)
+            R_norm = F.normalize(refined_R, dim=-1)
+            affinity = T_norm @ R_norm.transpose(-1, -2) / self.gmrw_temperature
+
+            # Transition probabilities
+            A_T2R = F.softmax(affinity, dim=-1)
+            A_R2T = F.softmax(affinity, dim=-2)
+
+            # Cycle matrix
+            cycle = A_T2R @ A_R2T
+
+            # Compute score
+            score = self.stage2_compute_score(cycle, method=score_method)
+
+        return score, cycle
+
+    # ============== End 2-Stage GMRW Methods ==============
+
 
 def get_backbone(pretrained_foundation, foundation_model_path, args=None):
     model_path = Path(foundation_model_path)
