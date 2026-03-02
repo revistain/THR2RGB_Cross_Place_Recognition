@@ -55,8 +55,9 @@ for seq in args.test_seq if args.test_seq else args.sequences:
     args.sequences = [seq]
     test_ds = datasets_T2R.BaseSTheReODual(args, DATASET_FOLDER, split='test')
 
-    if args.use_reranking == 'gmrw':
-        logging.info(f"Using GMRW re-ranking (top-{args.rerank_top_k}, score: {args.score_method})")
+    if args.use_reranking in ['gmrw', 'combined']:
+        method_name = "GMRW" if args.use_reranking == 'gmrw' else "Combined (GMRW+Distance)"
+        logging.info(f"Using {method_name} re-ranking (top-{args.rerank_top_k}, score: {args.score_method})")
         recalls, recalls_str, recalls_before, recalls_str_before = \
             inference.inference_with_reranking(args, test_ds, model)
         logging.info(f"Recalls on {seq} (before re-ranking): {recalls_str_before}")

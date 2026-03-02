@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=0
+CUDA_VISIBLE_DEVICES=1
 
 NCCL_P2P_DISABLE=1 \
 OMP_NUM_THREADS=4 \
@@ -11,7 +11,7 @@ python3 train_wandb_2stage.py \
     --lr 1e-4 \
     --train_seq Campus \
     --test_seq Urban Residential \
-    --comment "2stage-gmrw-warp" \
+    --comment "2stage-gmrw-dist-freeze" \
     --epochs_num 50 \
     --use_recon_loss \
     --recon_loss_type 'l1' \
@@ -22,8 +22,13 @@ python3 train_wandb_2stage.py \
     --gmrw_weight 1.0 \
     --use_label_warp \
     --score_method trace \
-    --freeze_encoder
+    --use_distance_loss \
+    --dist_weight 1.0 \
+    --dist_tau 10.0 \
+    --use_reranking gmrw \
+    --rerank_top_k 10
 
+    # --freeze_encoder \
 # Optional: train with negatives for margin loss
 # --train_with_negatives \
 # --neg_margin 0.1
@@ -31,3 +36,7 @@ python3 train_wandb_2stage.py \
 # Optional: smoothness loss
 # --use_smoothness_loss \
 # --smoothness_weight 0.1
+
+# Optional: combined scoring for inference
+# --score_method combined \
+# --score_alpha 0.5

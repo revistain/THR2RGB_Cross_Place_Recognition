@@ -214,41 +214,140 @@ def inference_with_reranking(args, eval_ds, model):
         gc.collect()
         torch.cuda.empty_cache()
 
-        # 4. Re-ranking with GMRW
+        # 4. Extract patch features for re-ranking (cached)
+        logging.info("Extracting patch features for re-ranking...")
         start_time = time.time()
-        final_predictions = []
 
         # Get actual model (handle DataParallel)
         actual_model = model.module if hasattr(model, 'module') else model
 
+        # Extract database patch features
+        database_patch_features = []
+        for inputs, indices, flags in tqdm(database_dataloader, ncols=100, desc="DB patch features"):
+            flags_int = [1 if f == 'rgb' else 0 for f in flags]
+            flags_tensor = torch.tensor(flags_int, dtype=torch.long)
+
+            # Get patch features from backbone
+            with torch.no_grad():
+                is_rgb = (flags_tensor == 1)
+                is_thermal = ~is_rgb
+
+                batch_patches = torch.zeros((inputs.size(0), actual_model.patch_count, actual_model.output_dim),
+                                            device='cpu')
+
+                if is_thermal.any():
+                    thermal_inputs = inputs[is_thermal].to(args.device)
+                    thermal_out = actual_model.shared_backbone(thermal_inputs)
+                    batch_patches[is_thermal] = thermal_out["x_norm_patchtokens"].cpu()
+
+                if is_rgb.any():
+                    rgb_inputs = inputs[is_rgb].to(args.device)
+                    rgb_out = actual_model.shared_backbone(rgb_inputs)
+                    batch_patches[is_rgb] = rgb_out["x_norm_patchtokens"].cpu()
+
+                database_patch_features.append(batch_patches)
+
+        database_patch_features = torch.cat(database_patch_features, dim=0)  # (DB_size, N, C)
+        logging.info(f"Database patch features extracted: {database_patch_features.shape}")
+
+        # Extract query patch features
+        queries_patch_features = []
+        for inputs, indices, flags in tqdm(queries_dataloader, ncols=100, desc="Query patch features"):
+            flags_int = [1 if f == 'rgb' else 0 for f in flags]
+            flags_tensor = torch.tensor(flags_int, dtype=torch.long)
+
+            with torch.no_grad():
+                is_rgb = (flags_tensor == 1)
+                is_thermal = ~is_rgb
+
+                batch_patches = torch.zeros((inputs.size(0), actual_model.patch_count, actual_model.output_dim),
+                                            device='cpu')
+
+                if is_thermal.any():
+                    thermal_inputs = inputs[is_thermal].to(args.device)
+                    thermal_out = actual_model.shared_backbone(thermal_inputs)
+                    batch_patches[is_thermal] = thermal_out["x_norm_patchtokens"].cpu()
+
+                if is_rgb.any():
+                    rgb_inputs = inputs[is_rgb].to(args.device)
+                    rgb_out = actual_model.shared_backbone(rgb_inputs)
+                    batch_patches[is_rgb] = rgb_out["x_norm_patchtokens"].cpu()
+
+                queries_patch_features.append(batch_patches)
+
+        queries_patch_features = torch.cat(queries_patch_features, dim=0)  # (Q_size, N, C)
+        logging.info(f"Query patch features extracted: {queries_patch_features.shape}")
+
+        # 5. Re-ranking with cached patch features
         logging.info(f"Starting GMRW re-ranking with top-{rerank_k} candidates...")
+        final_predictions = []
 
         for q_idx in tqdm(range(eval_ds.queries_num), ncols=100, desc="GMRW Re-ranking"):
-            # Get query image path and load
-            # Query: thermal, Database: RGB (cross-modal)
-            query_path = eval_ds.t_queries_paths[q_idx]
-            query_img = Image.open(query_path).convert('RGB')
-            query_tensor = transform(query_img).unsqueeze(0).to(args.device)  # (1, 3, H, W)
+            # Get cached query patch features
+            query_patches = queries_patch_features[q_idx].unsqueeze(0).to(args.device)  # (1, N, C)
 
             # Get top-K candidate indices
             candidates = initial_predictions[q_idx][:rerank_k]
 
-            # Load candidate RGB images
-            cand_tensors = []
-            for cand_idx in candidates:
-                cand_path = eval_ds.rgb_database_paths[cand_idx]
-                cand_img = Image.open(cand_path).convert('RGB')
-                cand_tensors.append(transform(cand_img))
-            cand_batch = torch.stack(cand_tensors).to(args.device)  # (K, 3, H, W)
+            # Get cached candidate patch features
+            cand_patches = database_patch_features[candidates].to(args.device)  # (K, N, C)
 
             # Expand query to match batch size
-            query_batch = query_tensor.expand(len(candidates), -1, -1, -1)  # (K, 3, H, W)
+            query_patches_batch = query_patches.expand(len(candidates), -1, -1)  # (K, N, C)
 
-            # Compute GMRW scores
+            # Compute scores using patch features directly (skip backbone)
             with torch.no_grad():
-                scores, _ = actual_model.stage2_inference(
-                    query_batch, cand_batch, score_method=score_method
-                )
+                if score_method in ['distance', 'combined']:
+                    alpha = getattr(args, 'score_alpha', 0.5)
+                    # Use stage2_forward_distance directly with patch features
+                    dist_loss, dist_score = actual_model.stage2_forward_distance(
+                        query_patches_batch, cand_patches, distance_gt=None
+                    )
+
+                    # Also compute GMRW trace score if combined
+                    if score_method == 'combined':
+                        # Decoder (bidirectional)
+                        T_dec = query_patches_batch + actual_model.decoder_pos_embed
+                        R_dec = cand_patches + actual_model.decoder_pos_embed
+
+                        for blk in actual_model.decoder_blocks:
+                            T_new = blk(T_dec, R_dec)
+                            R_new = blk(R_dec, T_dec)
+                            T_dec, R_dec = T_new, R_new
+
+                        refined_T = actual_model.decoder_norm(T_dec)
+                        refined_R = actual_model.decoder_norm(R_dec)
+
+                        T_norm = torch.nn.functional.normalize(refined_T, dim=-1)
+                        R_norm = torch.nn.functional.normalize(refined_R, dim=-1)
+                        affinity = T_norm @ R_norm.transpose(-1, -2) / actual_model.gmrw_temperature
+                        A_T2R = torch.nn.functional.softmax(affinity, dim=-1)
+                        A_R2T = torch.nn.functional.softmax(affinity, dim=-2)
+                        cycle = A_T2R @ A_R2T
+                        trace_score = actual_model.stage2_compute_score(cycle, method='trace')
+                        scores = alpha * trace_score + (1 - alpha) * dist_score
+                    else:
+                        scores = dist_score
+                else:
+                    # Original GMRW-only scoring with patch features
+                    T_dec = query_patches_batch + actual_model.decoder_pos_embed
+                    R_dec = cand_patches + actual_model.decoder_pos_embed
+
+                    for blk in actual_model.decoder_blocks:
+                        T_new = blk(T_dec, R_dec)
+                        R_new = blk(R_dec, T_dec)
+                        T_dec, R_dec = T_new, R_new
+
+                    refined_T = actual_model.decoder_norm(T_dec)
+                    refined_R = actual_model.decoder_norm(R_dec)
+
+                    T_norm = torch.nn.functional.normalize(refined_T, dim=-1)
+                    R_norm = torch.nn.functional.normalize(refined_R, dim=-1)
+                    affinity = T_norm @ R_norm.transpose(-1, -2) / actual_model.gmrw_temperature
+                    A_T2R = torch.nn.functional.softmax(affinity, dim=-1)
+                    A_R2T = torch.nn.functional.softmax(affinity, dim=-2)
+                    cycle = A_T2R @ A_R2T
+                    scores = actual_model.stage2_compute_score(cycle, method=score_method)
 
             # Re-rank by score (descending - higher score = better match)
             sorted_indices = scores.argsort(descending=True).cpu().numpy()
@@ -260,6 +359,10 @@ def inference_with_reranking(args, eval_ds, model):
                 reranked_candidates = np.concatenate([reranked_candidates, remaining])
 
             final_predictions.append(reranked_candidates)
+
+        # Cleanup
+        del database_patch_features
+        del queries_patch_features
 
         final_predictions = np.array(final_predictions)
         logging.info(f"GMRW re-ranking completed in {time.time() - start_time:.2f}s")

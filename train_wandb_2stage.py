@@ -113,6 +113,18 @@ if __name__ == "__main__":
     for param in model.parameters():
         param.requires_grad = False
 
+    # Unfreeze encoder adapters if not frozen
+    if not args.freeze_encoder:
+        # Only unfreeze adapters in backbone blocks
+        adapter_param_count = 0
+        for blk in model.module.shared_backbone.blocks:
+            for param in blk.adapter.parameters():
+                param.requires_grad = True
+                adapter_param_count += param.numel()
+        logging.info(f"Encoder adapters unfrozen for training ({adapter_param_count:,} params)")
+    else:
+        logging.info("Encoder (adapters) frozen")
+
     # Unfreeze decoder if not frozen
     if not args.freeze_decoder:
         for param in model.module.decoder_blocks.parameters():
@@ -122,12 +134,22 @@ if __name__ == "__main__":
         for param in model.module.decoder_pos_embed:
             param.requires_grad = True
         logging.info("Decoder blocks unfrozen for training")
+    else:
+        logging.info("Decoder blocks frozen")
 
     # Always train GMRW-related components
     for param in model.module.label_warping.parameters():
         param.requires_grad = True
     for param in model.module.gmrw_loss_fn.parameters():
         param.requires_grad = True
+    logging.info("GMRW modules unfrozen for training")
+
+    # Always train distance prediction components
+    for param in model.module.distance_head.parameters():
+        param.requires_grad = True
+    model.module.decoder_cls_token.requires_grad = True
+    model.module.decoder_pos_embed_with_cls.requires_grad = True
+    logging.info("Distance prediction modules unfrozen for training")
 
     # Count trainable parameters
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -139,9 +161,15 @@ if __name__ == "__main__":
 
     print("=" * 30)
     print(f"- 2-Stage Learning Rate: \t{args.lr}")
+    print(f"- Freeze Encoder: \t{args.freeze_encoder}")
+    print(f"- Freeze Decoder: \t{args.freeze_decoder}")
     print(f"- GMRW Weight: \t{args.gmrw_weight}")
     print(f"- Label Warp: \t{args.use_label_warp}")
     print(f"- Score Method: \t{args.score_method}")
+    print(f"- Distance Loss: \t{args.use_distance_loss}")
+    if args.use_distance_loss:
+        print(f"- Dist Weight: \t{args.dist_weight}")
+        print(f"- Dist Tau: \t{args.dist_tau}")
     print("=" * 30)
 
     if args.optim == "adam":
@@ -220,40 +248,85 @@ if __name__ == "__main__":
                 thermal_imgs = thermal_imgs.to(args.device)
                 pos_rgb_imgs = pos_rgb_imgs.to(args.device)
 
-                # 2-Stage GMRW Forward (positive pairs)
-                gmrw_loss, cycle, A_T2R, warped_label, cycle_loss, smooth_loss = \
-                    model.module.stage2_forward_gmrw(
-                        thermal_imgs,
-                        pos_rgb_imgs,
-                        use_warp=args.use_label_warp
-                    )
+                # 2-Stage Forward (GMRW + Distance if enabled)
+                if args.use_distance_loss:
+                    # Combined forward with distance prediction
+                    # Positive pairs: distance = 0 (aligned)
+                    pos_distance_gt = torch.zeros(B, device=args.device)
 
-                overall_loss = gmrw_loss * args.gmrw_weight
-
-                # Negative pairs (optional)
-                if args.train_with_negatives:
-                    neg_losses = []
-                    for neg_idx in range(2, size_of_batch):  # Skip query and positive
-                        neg_rgb_imgs = images[neg_idx::size_of_batch].to(args.device)
-
-                        neg_loss, neg_cycle, _, _, _, _ = model.module.stage2_forward_gmrw(
+                    gmrw_loss, dist_loss, pred_score, cycle, warped_label, cycle_loss, smooth_loss = \
+                        model.module.stage2_forward_combined(
                             thermal_imgs,
-                            neg_rgb_imgs,
+                            pos_rgb_imgs,
+                            distance_gt=pos_distance_gt,
                             use_warp=args.use_label_warp
                         )
 
-                        # Compute scores
-                        pos_score = model.module.stage2_compute_score(cycle, method=args.score_method)
-                        neg_score = model.module.stage2_compute_score(neg_cycle, method=args.score_method)
+                    overall_loss = args.gmrw_weight * gmrw_loss + args.dist_weight * dist_loss
 
-                        # Margin loss: pos_score should be higher than neg_score by margin
-                        margin_loss = torch.relu(neg_score - pos_score + args.neg_margin).mean()
-                        neg_losses.append(margin_loss)
+                    # Negative pairs with distance loss
+                    if args.train_with_negatives:
+                        neg_losses = []
+                        for neg_idx in range(2, size_of_batch):
+                            neg_rgb_imgs = images[neg_idx::size_of_batch].to(args.device)
 
-                    if neg_losses:
-                        neg_loss_avg = sum(neg_losses) / len(neg_losses)
-                        overall_loss = overall_loss + neg_loss_avg
-                        wandb.log({"train/neg_margin_loss": neg_loss_avg.item()}, step=global_step)
+                            # Negative distance: use large value (e.g., 100m)
+                            neg_distance_gt = torch.ones(B, device=args.device) * 100.0
+
+                            neg_gmrw, neg_dist, neg_pred, neg_cycle, _, _, _ = \
+                                model.module.stage2_forward_combined(
+                                    thermal_imgs,
+                                    neg_rgb_imgs,
+                                    distance_gt=neg_distance_gt,
+                                    use_warp=args.use_label_warp
+                                )
+
+                            # Margin loss on distance scores
+                            margin_loss = torch.relu(neg_pred - pred_score + args.neg_margin).mean()
+                            neg_losses.append(margin_loss + neg_dist)
+
+                        if neg_losses:
+                            neg_loss_avg = sum(neg_losses) / len(neg_losses)
+                            overall_loss = overall_loss + neg_loss_avg
+                            wandb.log({"train/neg_margin_loss": neg_loss_avg.item()}, step=global_step)
+
+                    wandb.log({"train/dist_loss": dist_loss.item(), "train/dist_score": pred_score.mean().item()}, step=global_step)
+
+                else:
+                    # Original GMRW-only forward
+                    gmrw_loss, cycle, A_T2R, warped_label, cycle_loss, smooth_loss = \
+                        model.module.stage2_forward_gmrw(
+                            thermal_imgs,
+                            pos_rgb_imgs,
+                            use_warp=args.use_label_warp
+                        )
+
+                    overall_loss = gmrw_loss * args.gmrw_weight
+
+                    # Negative pairs (optional)
+                    if args.train_with_negatives:
+                        neg_losses = []
+                        for neg_idx in range(2, size_of_batch):  # Skip query and positive
+                            neg_rgb_imgs = images[neg_idx::size_of_batch].to(args.device)
+
+                            neg_loss, neg_cycle, _, _, _, _ = model.module.stage2_forward_gmrw(
+                                thermal_imgs,
+                                neg_rgb_imgs,
+                                use_warp=args.use_label_warp
+                            )
+
+                            # Compute scores
+                            pos_score = model.module.stage2_compute_score(cycle, method=args.score_method)
+                            neg_score = model.module.stage2_compute_score(neg_cycle, method=args.score_method)
+
+                            # Margin loss: pos_score should be higher than neg_score by margin
+                            margin_loss = torch.relu(neg_score - pos_score + args.neg_margin).mean()
+                            neg_losses.append(margin_loss)
+
+                        if neg_losses:
+                            neg_loss_avg = sum(neg_losses) / len(neg_losses)
+                            overall_loss = overall_loss + neg_loss_avg
+                            wandb.log({"train/neg_margin_loss": neg_loss_avg.item()}, step=global_step)
 
                 optimizer.zero_grad()
                 overall_loss.backward()
@@ -299,8 +372,26 @@ if __name__ == "__main__":
         for seq, test_ds in zip(test_sequences, test_ds_list):
             logging.info(f"===== Evaluating Sequence: {seq} =====")
             args.current_epoch = epoch_num
-            recalls, recalls_str = inference.inference(args, test_ds, model)
-            logging.info(f"Recalls for {seq}: {recalls_str}")
+
+            # Use reranking if specified
+            if args.use_reranking != 'none':
+                recalls, recalls_str, recalls_before, recalls_str_before = inference.inference_with_reranking(args, test_ds, model)
+                logging.info(f"Recalls (before reranking) for {seq}: {recalls_str_before}")
+                logging.info(f"Recalls (after reranking) for {seq}: {recalls_str}")
+
+                # Log improvement to wandb
+                improvement = recalls[0] - recalls_before[0]
+                wandb.log({
+                    f"val/{seq}_R@1_before": recalls_before[0],
+                    f"val/{seq}_R@1_after": recalls[0],
+                    f"val/{seq}_R@1_improvement": improvement,
+                    f"val/{seq}_R@5_before": recalls_before[1],
+                    f"val/{seq}_R@5_after": recalls[1]
+                }, step=global_step)
+            else:
+                recalls, recalls_str = inference.inference(args, test_ds, model)
+                logging.info(f"Recalls for {seq}: {recalls_str}")
+
             logging.info(f"================================================")
             current_epoch_r1_list.append(recalls[0])
 

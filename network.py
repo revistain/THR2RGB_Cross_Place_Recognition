@@ -491,6 +491,10 @@ class CrossModalVPR_Net(nn.Module):
         )
         self.gmrw_temperature = 0.07
 
+        # ============== Distance Prediction Components ==============
+        self._set_distance_prediction_modules(self.output_dim)
+        self.dist_tau = getattr(args, 'dist_tau', 10.0)
+
     def _set_mask_token(self, dec_embed_dim):
         self.mask_token = nn.Parameter(torch.zeros(1, 1, dec_embed_dim))
         nn.init.normal_(self.mask_token, std=.02)
@@ -501,6 +505,30 @@ class CrossModalVPR_Net(nn.Module):
 
     def _set_mask_generator(self, num_patches, mask_ratio):
         self.mask_generator = RandomMask(num_patches, mask_ratio)
+
+    def _set_distance_prediction_modules(self, dec_embed_dim):
+        """Initialize distance prediction modules with CLS token"""
+        # CLS token for distance prediction
+        self.decoder_cls_token = nn.Parameter(torch.zeros(1, 1, dec_embed_dim))
+        nn.init.trunc_normal_(self.decoder_cls_token, std=0.02)
+
+        # Positional embedding with CLS (patch_count + 1)
+        self.decoder_pos_embed_with_cls = nn.Parameter(
+            torch.zeros(1, self.patch_count + 1, dec_embed_dim)
+        )
+        nn.init.trunc_normal_(self.decoder_pos_embed_with_cls, std=0.02)
+
+        # Distance prediction head: CLS token → scalar score
+        self.distance_head = nn.Sequential(
+            nn.Linear(dec_embed_dim, dec_embed_dim // 2),
+            nn.GELU(),
+            nn.Linear(dec_embed_dim // 2, 1)
+        )
+        # Initialize
+        nn.init.normal_(self.distance_head[0].weight, std=0.02)
+        nn.init.zeros_(self.distance_head[0].bias)
+        nn.init.normal_(self.distance_head[2].weight, std=0.02)
+        nn.init.zeros_(self.distance_head[2].bias)
 
     def _set_prediction_head(self, dec_embed_dim):
         hidden_dim = dec_embed_dim * 4
@@ -980,6 +1008,212 @@ class CrossModalVPR_Net(nn.Module):
             score = self.stage2_compute_score(cycle, method=score_method)
 
         return score, cycle
+
+    # ============== Distance Prediction Methods ==============
+
+    def distance_to_score(self, distance, tau=None):
+        """
+        Convert distance (meters) to similarity score (0~1)
+        Using exponential decay: closer = higher score
+        - 0m → 1.0
+        - 10m (tau) → 0.37
+        - 30m → 0.05
+        """
+        if tau is None:
+            tau = self.dist_tau
+        return torch.exp(-distance / tau)
+
+    def stage2_forward_distance(self, thermal_feat, rgb_feat, distance_gt=None, tau=None):
+        """
+        Stage 2: Bidirectional distance prediction using decoder CLS token.
+
+        Args:
+            thermal_feat: [B, N, D] - thermal patch features (from encoder)
+            rgb_feat: [B, N, D] - RGB patch features (from encoder)
+            distance_gt: [B] - GT distance in meters (None for inference)
+            tau: temperature for distance→score conversion
+
+        Returns:
+            loss: BCE loss if distance_gt is provided, else None
+            pred_score: [B] predicted matching scores (0~1, higher = closer)
+        """
+        if tau is None:
+            tau = self.dist_tau
+
+        B = thermal_feat.shape[0]
+
+        # Batch both directions: [thermal→RGB, RGB→thermal]
+        cls_tokens = self.decoder_cls_token.expand(2 * B, -1, -1)  # [2B, 1, D]
+
+        # Query: [thermal; rgb], Reference: [rgb; thermal]
+        query_feat = torch.cat([thermal_feat, rgb_feat], dim=0)  # [2B, N, D]
+        ref_feat = torch.cat([rgb_feat, thermal_feat], dim=0)    # [2B, N, D]
+
+        # Add CLS token to query
+        query_with_cls = torch.cat([cls_tokens, query_feat], dim=1)  # [2B, N+1, D]
+        query_with_cls = query_with_cls + self.decoder_pos_embed_with_cls
+
+        # Reference with positional embedding
+        ref_with_pos = ref_feat + self.decoder_pos_embed  # [2B, N, D]
+
+        # Decoder forward
+        x = query_with_cls
+        for blk in self.decoder_blocks:
+            x = blk(x, ref_with_pos)
+        x = self.decoder_norm(x)
+
+        # Extract CLS and predict scores
+        cls_output = x[:, 0, :]  # [2B, D]
+        pred_scores = torch.sigmoid(self.distance_head(cls_output).squeeze(-1))  # [2B]
+
+        # Average both directions
+        pred_score_1 = pred_scores[:B]   # thermal → RGB
+        pred_score_2 = pred_scores[B:]   # RGB → thermal
+        pred_score = (pred_score_1 + pred_score_2) / 2  # [B]
+
+        # Compute loss if GT provided
+        if distance_gt is not None:
+            target_score = self.distance_to_score(distance_gt, tau=tau)  # [B]
+            loss = F.binary_cross_entropy(pred_score, target_score)
+            return loss, pred_score
+
+        return None, pred_score
+
+    def stage2_forward_combined(self, thermal_img, rgb_img, distance_gt=None, use_warp=True):
+        """
+        2-stage forward with GMRW + Distance prediction combined.
+
+        Args:
+            thermal_img: (B, 3, H, W)
+            rgb_img: (B, 3, H, W)
+            distance_gt: (B,) GT distance in meters (optional)
+            use_warp: whether to use label warping for GMRW
+
+        Returns:
+            gmrw_loss: GMRW cycle consistency loss
+            dist_loss: Distance prediction loss (or 0 if no GT)
+            pred_score: (B,) predicted distance score
+            cycle: (B, N, N) cycle matrix
+            warped_label: (B, N, N) target label
+        """
+        # Encoder
+        thermal_out = self.shared_backbone(thermal_img)
+        rgb_out = self.shared_backbone(rgb_img)
+
+        patch_T = thermal_out["x_norm_patchtokens"]  # (B, N, C)
+        patch_R = rgb_out["x_norm_patchtokens"]
+        B, N, C = patch_T.shape
+
+        # ===== GMRW Branch =====
+        # Label Warping (augmentation) - only during training
+        if use_warp and self.training:
+            patch_T_aug, patch_R_aug, warped_label, valid_mask = \
+                self.label_warping(patch_T, patch_R)
+        else:
+            patch_T_aug = patch_T
+            patch_R_aug = patch_R
+            warped_label = torch.eye(N, device=patch_T.device).unsqueeze(0).expand(B, -1, -1)
+            valid_mask = torch.ones(B, N, device=patch_T.device)
+
+        # Decoder (bidirectional for GMRW)
+        T_dec = patch_T_aug + self.decoder_pos_embed
+        R_dec = patch_R_aug + self.decoder_pos_embed
+
+        for blk in self.decoder_blocks:
+            T_new = blk(T_dec, R_dec)
+            R_new = blk(R_dec, T_dec)
+            T_dec, R_dec = T_new, R_new
+
+        refined_T = self.decoder_norm(T_dec)
+        refined_R = self.decoder_norm(R_dec)
+
+        # Cross-modal affinity for GMRW
+        T_norm = F.normalize(refined_T, dim=-1)
+        R_norm = F.normalize(refined_R, dim=-1)
+        affinity = T_norm @ R_norm.transpose(-1, -2) / self.gmrw_temperature
+
+        # Transition probabilities
+        A_T2R = F.softmax(affinity, dim=-1)
+        A_R2T = F.softmax(affinity, dim=-2)
+
+        # Cycle matrix
+        cycle = A_T2R @ A_R2T  # (B, N, N)
+
+        # GMRW Loss
+        gmrw_loss, cycle_loss, smooth_loss = self.gmrw_loss_fn(
+            cycle, warped_label, valid_mask
+        )
+
+        # ===== Distance Branch =====
+        # Use original (non-warped) features for distance prediction
+        dist_loss, pred_score = self.stage2_forward_distance(
+            patch_T, patch_R, distance_gt
+        )
+
+        if dist_loss is None:
+            dist_loss = torch.tensor(0.0, device=patch_T.device)
+
+        return gmrw_loss, dist_loss, pred_score, cycle, warped_label, cycle_loss, smooth_loss
+
+    @torch.no_grad()
+    def stage2_inference_combined(self, thermal_img, rgb_img, score_method='trace', alpha=0.5):
+        """
+        2-stage inference with combined scoring (GMRW trace + distance).
+
+        Args:
+            thermal_img: (B, 3, H, W)
+            rgb_img: (B, 3, H, W)
+            score_method: 'trace', 'entropy', 'distance', or 'combined'
+            alpha: weight for combining (alpha * trace + (1-alpha) * dist)
+
+        Returns:
+            score: (B,) combined matching score
+            cycle: (B, N, N) cycle matrix
+            dist_score: (B,) distance prediction score
+        """
+        # Encoder
+        thermal_out = self.shared_backbone(thermal_img)
+        rgb_out = self.shared_backbone(rgb_img)
+
+        patch_T = thermal_out["x_norm_patchtokens"]
+        patch_R = rgb_out["x_norm_patchtokens"]
+
+        # Decoder (bidirectional)
+        T_dec = patch_T + self.decoder_pos_embed
+        R_dec = patch_R + self.decoder_pos_embed
+
+        for blk in self.decoder_blocks:
+            T_new = blk(T_dec, R_dec)
+            R_new = blk(R_dec, T_dec)
+            T_dec, R_dec = T_new, R_new
+
+        refined_T = self.decoder_norm(T_dec)
+        refined_R = self.decoder_norm(R_dec)
+
+        # GMRW cycle score
+        T_norm = F.normalize(refined_T, dim=-1)
+        R_norm = F.normalize(refined_R, dim=-1)
+        affinity = T_norm @ R_norm.transpose(-1, -2) / self.gmrw_temperature
+        A_T2R = F.softmax(affinity, dim=-1)
+        A_R2T = F.softmax(affinity, dim=-2)
+        cycle = A_T2R @ A_R2T
+
+        trace_score = self.stage2_compute_score(cycle, method='trace')
+
+        # Distance score
+        _, dist_score = self.stage2_forward_distance(patch_T, patch_R, distance_gt=None)
+
+        # Combine scores
+        if score_method == 'trace':
+            score = trace_score
+        elif score_method == 'distance':
+            score = dist_score
+        elif score_method == 'combined':
+            score = alpha * trace_score + (1 - alpha) * dist_score
+        else:
+            score = trace_score
+
+        return score, cycle, dist_score
 
     # ============== End 2-Stage GMRW Methods ==============
 
