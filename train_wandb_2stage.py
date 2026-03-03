@@ -144,13 +144,6 @@ if __name__ == "__main__":
         param.requires_grad = True
     logging.info("GMRW modules unfrozen for training")
 
-    # Always train distance prediction components
-    for param in model.module.distance_head.parameters():
-        param.requires_grad = True
-    model.module.decoder_cls_token.requires_grad = True
-    model.module.decoder_pos_embed_with_cls.requires_grad = True
-    logging.info("Distance prediction modules unfrozen for training")
-
     # Count trainable parameters
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
@@ -166,10 +159,6 @@ if __name__ == "__main__":
     print(f"- GMRW Weight: \t{args.gmrw_weight}")
     print(f"- Label Warp: \t{args.use_label_warp}")
     print(f"- Score Method: \t{args.score_method}")
-    print(f"- Distance Loss: \t{args.use_distance_loss}")
-    if args.use_distance_loss:
-        print(f"- Dist Weight: \t{args.dist_weight}")
-        print(f"- Dist Tau: \t{args.dist_tau}")
     print("=" * 30)
 
     if args.optim == "adam":
@@ -248,85 +237,40 @@ if __name__ == "__main__":
                 thermal_imgs = thermal_imgs.to(args.device)
                 pos_rgb_imgs = pos_rgb_imgs.to(args.device)
 
-                # 2-Stage Forward (GMRW + Distance if enabled)
-                if args.use_distance_loss:
-                    # Combined forward with distance prediction
-                    # Positive pairs: distance = 0 (aligned)
-                    pos_distance_gt = torch.zeros(B, device=args.device)
+                # 2-Stage Forward (GMRW only)
+                gmrw_loss, cycle, A_T2R, warped_label, cycle_loss, smooth_loss = \
+                    model.module.stage2_forward_gmrw(
+                        thermal_imgs,
+                        pos_rgb_imgs,
+                        use_warp=args.use_label_warp
+                    )
 
-                    gmrw_loss, dist_loss, pred_score, cycle, warped_label, cycle_loss, smooth_loss = \
-                        model.module.stage2_forward_combined(
+                overall_loss = args.gmrw_weight * gmrw_loss
+
+                # Negative pairs (optional)
+                if args.train_with_negatives:
+                    neg_losses = []
+                    for neg_idx in range(2, size_of_batch):  # Skip query and positive
+                        neg_rgb_imgs = images[neg_idx::size_of_batch].to(args.device)
+
+                        neg_loss, neg_cycle, _, _, _, _ = model.module.stage2_forward_gmrw(
                             thermal_imgs,
-                            pos_rgb_imgs,
-                            distance_gt=pos_distance_gt,
+                            neg_rgb_imgs,
                             use_warp=args.use_label_warp
                         )
 
-                    overall_loss = args.gmrw_weight * gmrw_loss + args.dist_weight * dist_loss
+                        # Compute scores
+                        pos_score = model.module.stage2_compute_score(cycle, method=args.score_method)
+                        neg_score = model.module.stage2_compute_score(neg_cycle, method=args.score_method)
 
-                    # Negative pairs with distance loss
-                    if args.train_with_negatives:
-                        neg_losses = []
-                        for neg_idx in range(2, size_of_batch):
-                            neg_rgb_imgs = images[neg_idx::size_of_batch].to(args.device)
+                        # Margin loss: pos_score should be higher than neg_score by margin
+                        margin_loss = torch.relu(neg_score - pos_score + args.neg_margin).mean()
+                        neg_losses.append(margin_loss)
 
-                            # Negative distance: use large value (e.g., 100m)
-                            neg_distance_gt = torch.ones(B, device=args.device) * 100.0
-
-                            neg_gmrw, neg_dist, neg_pred, neg_cycle, _, _, _ = \
-                                model.module.stage2_forward_combined(
-                                    thermal_imgs,
-                                    neg_rgb_imgs,
-                                    distance_gt=neg_distance_gt,
-                                    use_warp=args.use_label_warp
-                                )
-
-                            # Margin loss on distance scores
-                            margin_loss = torch.relu(neg_pred - pred_score + args.neg_margin).mean()
-                            neg_losses.append(margin_loss + neg_dist)
-
-                        if neg_losses:
-                            neg_loss_avg = sum(neg_losses) / len(neg_losses)
-                            overall_loss = overall_loss + neg_loss_avg
-                            wandb.log({"train/neg_margin_loss": neg_loss_avg.item()}, step=global_step)
-
-                    wandb.log({"train/dist_loss": dist_loss.item(), "train/dist_score": pred_score.mean().item()}, step=global_step)
-
-                else:
-                    # Original GMRW-only forward
-                    gmrw_loss, cycle, A_T2R, warped_label, cycle_loss, smooth_loss = \
-                        model.module.stage2_forward_gmrw(
-                            thermal_imgs,
-                            pos_rgb_imgs,
-                            use_warp=args.use_label_warp
-                        )
-
-                    overall_loss = gmrw_loss * args.gmrw_weight
-
-                    # Negative pairs (optional)
-                    if args.train_with_negatives:
-                        neg_losses = []
-                        for neg_idx in range(2, size_of_batch):  # Skip query and positive
-                            neg_rgb_imgs = images[neg_idx::size_of_batch].to(args.device)
-
-                            neg_loss, neg_cycle, _, _, _, _ = model.module.stage2_forward_gmrw(
-                                thermal_imgs,
-                                neg_rgb_imgs,
-                                use_warp=args.use_label_warp
-                            )
-
-                            # Compute scores
-                            pos_score = model.module.stage2_compute_score(cycle, method=args.score_method)
-                            neg_score = model.module.stage2_compute_score(neg_cycle, method=args.score_method)
-
-                            # Margin loss: pos_score should be higher than neg_score by margin
-                            margin_loss = torch.relu(neg_score - pos_score + args.neg_margin).mean()
-                            neg_losses.append(margin_loss)
-
-                        if neg_losses:
-                            neg_loss_avg = sum(neg_losses) / len(neg_losses)
-                            overall_loss = overall_loss + neg_loss_avg
-                            wandb.log({"train/neg_margin_loss": neg_loss_avg.item()}, step=global_step)
+                    if neg_losses:
+                        neg_loss_avg = sum(neg_losses) / len(neg_losses)
+                        overall_loss = overall_loss + neg_loss_avg
+                        wandb.log({"train/neg_margin_loss": neg_loss_avg.item()}, step=global_step)
 
                 optimizer.zero_grad()
                 overall_loss.backward()

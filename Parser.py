@@ -100,18 +100,12 @@ class Parser():
         self.parser.add_argument("--use_label_warp", action='store_true', default=False)  # Label warping 사용여부
         self.parser.add_argument("--use_smoothness_loss", action='store_true', default=False)  # Smoothness loss 사용여부
         self.parser.add_argument("--smoothness_weight", type=float, default=0.1)  # Smoothness loss weight
-        self.parser.add_argument("--score_method", type=str, default="trace", choices=["trace", "entropy", "distance", "combined"])  # Matching score method
+        self.parser.add_argument("--score_method", type=str, default="trace", choices=["trace", "entropy", "mnn"])  # Matching score method
         self.parser.add_argument("--freeze_encoder", action='store_true', default=False)  # 2-stage시 encoder freeze (플래그 주면 freeze)
         self.parser.add_argument("--freeze_decoder", action='store_true', default=False)  # 2-stage시 decoder freeze
         self.parser.add_argument("--train_with_negatives", action='store_true', default=False)  # Negative pair도 학습
         self.parser.add_argument("--neg_margin", type=float, default=0.1)  # Margin for negative pairs
         self.parser.add_argument("--rerank_top_k", type=int, default=10)  # Re-ranking top-K candidates
-
-        # ============== Distance Prediction Settings ==============
-        self.parser.add_argument("--use_distance_loss", action='store_true', default=False)  # Distance prediction 사용여부
-        self.parser.add_argument("--dist_weight", type=float, default=1.0)  # Distance loss weight
-        self.parser.add_argument("--dist_tau", type=float, default=10.0)  # Temperature for distance→score (meters)
-        self.parser.add_argument("--score_alpha", type=float, default=0.5)  # Weight for combined scoring (alpha*trace + (1-alpha)*dist)
 
     def parse_arguments(self):
         args = self.parser.parse_args()

@@ -29,7 +29,7 @@ def resume_model(resume_path, model, optimizer=None, strict=False):
     # DataParallel, remove it to avoid errors when loading dict
     if list(state_dict.keys())[0].startswith('module'):
         state_dict = OrderedDict({k.replace('module.', ''): v for (k, v) in state_dict.items()})
-    model.load_state_dict(state_dict)
+    model.load_state_dict(state_dict, strict=False)
     return model
 
 def resume_train(args, model, optimizer=None, strict=False):

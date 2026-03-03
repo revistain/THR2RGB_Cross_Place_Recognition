@@ -246649,3 +246649,37 @@ TypeError: unsupported operand type(s) for //: 'NoneType' and 'int'
 2026-03-02 09:03:11   STREAM b'IDAT' 41 8192
 2026-03-02 09:03:11   STREAM b'IHDR' 16 13
 2026-03-02 09:03:11   STREAM b'IDAT' 41 8192
+2026-03-02 11:11:18   The outputs are being saved in default
+2026-03-02 11:11:18   using MLP layer as FFN
+2026-03-02 11:11:20   
+Traceback (most recent call last):
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/eval.py", line 45, in <module>
+    model = utils.resume_model(resume_path, model)
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/utils.py", line 32, in resume_model
+    model.load_state_dict(state_dict)
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/nn/modules/module.py", line 2189, in load_state_dict
+    raise RuntimeError('Error(s) in loading state_dict for {}:\n\t{}'.format(
+RuntimeError: Error(s) in loading state_dict for CrossModalVPR_Net:
+	Missing key(s) in state_dict: "rgb_aggregation.0.p", "thermal_aggregation.0.p", "affinity_aggregator.gem_p", "affinity_aggregator.row_mixer.weight", "affinity_aggregator.row_mixer.bias", "affinity_aggregator.col_mixer.weight", "affinity_aggregator.col_mixer.bias", "affinity_aggregator.proj.weight", "affinity_aggregator.proj.bias", "descriptor_mixer.weight", "descriptor_mixer.bias". 
+	Unexpected key(s) in state_dict: "rgb_aggregation.1.p", "thermal_aggregation.1.p". 
+
+2026-03-02 11:13:04   The outputs are being saved in default
+2026-03-02 11:13:04   using MLP layer as FFN
+2026-03-02 11:13:06   ===== Evaluating Sequence: Urban =====
+2026-03-02 11:13:06   Using GMRW re-ranking (top-10, score: mnn)
+2026-03-02 11:13:17   Extracted 955 database features in 11.24s
+2026-03-02 11:14:25   Extracted 13810 query features in 67.36s
+2026-03-02 11:14:25   FAISS search (top-25) completed in 0.25s
+2026-03-02 11:14:25   Extracting patch features for re-ranking...
+2026-03-02 11:14:30   Database patch features extracted: torch.Size([955, 256, 384])
+2026-03-02 11:15:04   Query patch features extracted: torch.Size([13810, 256, 384])
+2026-03-02 11:15:04   Starting GMRW re-ranking with top-10 candidates...
+2026-03-02 12:02:07   GMRW re-ranking completed in 2861.59s
+2026-03-02 12:02:12   Recalls (before re-ranking): 63.0,71.6,75.8,77.8,79.2,80.1,80.8,81.2,81.6,81.8,82.2,82.3,82.5,82.7,82.9,83.0,83.1,83.2,83.3,83.4,83.4,83.5,83.5,83.6,83.7
+2026-03-02 12:02:12   Recalls (after re-ranking): 67.6,74.8,78.1,79.5,80.5,80.9,81.3,81.5,81.7,81.8,82.2,82.3,82.5,82.7,82.9,83.0,83.1,83.2,83.3,83.4,83.4,83.5,83.5,83.6,83.7
+2026-03-02 12:02:12   Before: R@1: 63.0, R@2: 71.6, R@3: 75.8, R@4: 77.8, R@5: 79.2, R@6: 80.1, R@7: 80.8, R@8: 81.2, R@9: 81.6, R@10: 81.8, R@11: 82.2, R@12: 82.3, R@13: 82.5, R@14: 82.7, R@15: 82.9, R@16: 83.0, R@17: 83.1, R@18: 83.2, R@19: 83.3, R@20: 83.4, R@21: 83.4, R@22: 83.5, R@23: 83.5, R@24: 83.6, R@25: 83.7
+2026-03-02 12:02:12   After:  R@1: 67.6, R@2: 74.8, R@3: 78.1, R@4: 79.5, R@5: 80.5, R@6: 80.9, R@7: 81.3, R@8: 81.5, R@9: 81.7, R@10: 81.8, R@11: 82.2, R@12: 82.3, R@13: 82.5, R@14: 82.7, R@15: 82.9, R@16: 83.0, R@17: 83.1, R@18: 83.2, R@19: 83.3, R@20: 83.4, R@21: 83.4, R@22: 83.5, R@23: 83.5, R@24: 83.6, R@25: 83.7
+2026-03-02 12:02:12   Improvement: R@1: +4.6, R@2: +3.2, R@3: +2.2, R@4: +1.7, R@5: +1.2, R@6: +0.8, R@7: +0.5, R@8: +0.3, R@9: +0.1, R@10: +0.0, R@11: +0.0, R@12: +0.0, R@13: +0.0, R@14: +0.0, R@15: +0.0, R@16: +0.0, R@17: +0.0, R@18: +0.0, R@19: +0.0, R@20: +0.0, R@21: +0.0, R@22: +0.0, R@23: +0.0, R@24: +0.0, R@25: +0.0
+2026-03-02 12:02:13   Recalls on Urban (before re-ranking): R@1: 63.0, R@2: 71.6, R@3: 75.8, R@4: 77.8, R@5: 79.2, R@6: 80.1, R@7: 80.8, R@8: 81.2, R@9: 81.6, R@10: 81.8, R@11: 82.2, R@12: 82.3, R@13: 82.5, R@14: 82.7, R@15: 82.9, R@16: 83.0, R@17: 83.1, R@18: 83.2, R@19: 83.3, R@20: 83.4, R@21: 83.4, R@22: 83.5, R@23: 83.5, R@24: 83.6, R@25: 83.7
+2026-03-02 12:02:13   Recalls on Urban (after re-ranking):  R@1: 67.6, R@2: 74.8, R@3: 78.1, R@4: 79.5, R@5: 80.5, R@6: 80.9, R@7: 81.3, R@8: 81.5, R@9: 81.7, R@10: 81.8, R@11: 82.2, R@12: 82.3, R@13: 82.5, R@14: 82.7, R@15: 82.9, R@16: 83.0, R@17: 83.1, R@18: 83.2, R@19: 83.3, R@20: 83.4, R@21: 83.4, R@22: 83.5, R@23: 83.5, R@24: 83.6, R@25: 83.7
+2026-03-02 12:02:13   ================================================

@@ -297,57 +297,32 @@ def inference_with_reranking(args, eval_ds, model):
 
             # Compute scores using patch features directly (skip backbone)
             with torch.no_grad():
-                if score_method in ['distance', 'combined']:
-                    alpha = getattr(args, 'score_alpha', 0.5)
-                    # Use stage2_forward_distance directly with patch features
-                    dist_loss, dist_score = actual_model.stage2_forward_distance(
-                        query_patches_batch, cand_patches, distance_gt=None
-                    )
+                # Unified GMRW-based scoring (trace, entropy)
+                T_dec = query_patches_batch + actual_model.decoder_pos_embed
+                R_dec = cand_patches + actual_model.decoder_pos_embed
 
-                    # Also compute GMRW trace score if combined
-                    if score_method == 'combined':
-                        # Decoder (bidirectional)
-                        T_dec = query_patches_batch + actual_model.decoder_pos_embed
-                        R_dec = cand_patches + actual_model.decoder_pos_embed
+                for blk in actual_model.decoder_blocks:
+                    T_new = blk(T_dec, R_dec)
+                    R_new = blk(R_dec, T_dec)
+                    T_dec, R_dec = T_new, R_new
 
-                        for blk in actual_model.decoder_blocks:
-                            T_new = blk(T_dec, R_dec)
-                            R_new = blk(R_dec, T_dec)
-                            T_dec, R_dec = T_new, R_new
+                refined_T = actual_model.decoder_norm(T_dec)
+                refined_R = actual_model.decoder_norm(R_dec)
 
-                        refined_T = actual_model.decoder_norm(T_dec)
-                        refined_R = actual_model.decoder_norm(R_dec)
+                T_norm = torch.nn.functional.normalize(refined_T, dim=-1)
+                R_norm = torch.nn.functional.normalize(refined_R, dim=-1)
+                affinity = T_norm @ R_norm.transpose(-1, -2) / actual_model.gmrw_temperature
+                A_T2R = torch.nn.functional.softmax(affinity, dim=-1)
+                A_R2T = torch.nn.functional.softmax(affinity, dim=-2)
+                cycle = A_T2R @ A_R2T
 
-                        T_norm = torch.nn.functional.normalize(refined_T, dim=-1)
-                        R_norm = torch.nn.functional.normalize(refined_R, dim=-1)
-                        affinity = T_norm @ R_norm.transpose(-1, -2) / actual_model.gmrw_temperature
-                        A_T2R = torch.nn.functional.softmax(affinity, dim=-1)
-                        A_R2T = torch.nn.functional.softmax(affinity, dim=-2)
-                        cycle = A_T2R @ A_R2T
-                        trace_score = actual_model.stage2_compute_score(cycle, method='trace')
-                        scores = alpha * trace_score + (1 - alpha) * dist_score
-                    else:
-                        scores = dist_score
-                else:
-                    # Original GMRW-only scoring with patch features
-                    T_dec = query_patches_batch + actual_model.decoder_pos_embed
-                    R_dec = cand_patches + actual_model.decoder_pos_embed
-
-                    for blk in actual_model.decoder_blocks:
-                        T_new = blk(T_dec, R_dec)
-                        R_new = blk(R_dec, T_dec)
-                        T_dec, R_dec = T_new, R_new
-
-                    refined_T = actual_model.decoder_norm(T_dec)
-                    refined_R = actual_model.decoder_norm(R_dec)
-
-                    T_norm = torch.nn.functional.normalize(refined_T, dim=-1)
-                    R_norm = torch.nn.functional.normalize(refined_R, dim=-1)
-                    affinity = T_norm @ R_norm.transpose(-1, -2) / actual_model.gmrw_temperature
-                    A_T2R = torch.nn.functional.softmax(affinity, dim=-1)
-                    A_R2T = torch.nn.functional.softmax(affinity, dim=-2)
-                    cycle = A_T2R @ A_R2T
-                    scores = actual_model.stage2_compute_score(cycle, method=score_method)
+                # Compute score (supports trace, entropy, mnn)
+                scores = actual_model.stage2_compute_score(
+                    cycle,
+                    method=score_method,
+                    A_T2R=A_T2R,
+                    A_R2T=A_R2T
+                )
 
             # Re-rank by score (descending - higher score = better match)
             sorted_indices = scores.argsort(descending=True).cpu().numpy()

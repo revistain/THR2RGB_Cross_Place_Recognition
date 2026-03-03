@@ -1,0 +1,77 @@
+2026-03-02 10:43:49   Use 8 GPUs and 80 CPUs
+2026-03-02 10:43:49   There are 2 queries without any positives
+2026-03-02 10:43:49   [Train - ['Campus']] Database: 1207, Queries: 18415, Total: 19622
+2026-03-02 10:43:50   [Test - Urban] Database: 955, Queries: 13810, Total: 14765
+2026-03-02 10:43:50   using MLP layer as FFN
+2026-03-02 10:43:50   Loading 1-stage checkpoint from ./logs/CroCo-beforeA6000(Sthereo,lr3e-5)-posAsPaired/260228_190611/best_model.pth
+2026-03-02 10:43:51   1-stage checkpoint loaded successfully
+2026-03-02 10:43:51   Encoder adapters unfrozen for training (1,776,384 params)
+2026-03-02 10:43:51   Decoder blocks unfrozen for training
+2026-03-02 10:43:51   GMRW modules unfrozen for training
+2026-03-02 10:43:51   Trainable params: 20,716,032 / 46,387,099 (44.66%)
+2026-03-02 10:43:51   Start 2-stage training epoch: 00
+2026-03-02 10:44:18   Epoch[00](1/2): current batch loss = 8.27116489, average epoch loss = 8.27116489
+2026-03-02 10:44:36   Epoch[00](2/2): current batch loss = 5.39503336, average epoch loss = 6.83309913
+2026-03-02 10:44:36   epoch 00 time: 0:00:44
+2026-03-02 10:44:36   Learning rate: 2.80e-06
+2026-03-02 10:44:36   ===== Evaluating Sequence: Urban =====
+2026-03-02 10:44:43   Extracted 955 database features in 7.05s
+2026-03-02 10:45:56   Extracted 13810 query features in 73.48s
+2026-03-02 10:45:57   FAISS search completed in 0.25s
+2026-03-02 10:45:58   Recalls: 62.976104272266475,79.21795800144822,81.81028240405503,83.3816075307748
+2026-03-02 10:45:58   Recalls for Urban: R@1: 63.0, R@5: 79.2, R@10: 81.8, R@20: 83.4
+2026-03-02 10:45:58   ================================================
+2026-03-02 10:45:58   Start 2-stage training epoch: 01
+2026-03-02 10:46:16   Epoch[01](1/2): current batch loss = 5.84822655, average epoch loss = 5.84822655
+2026-03-02 10:46:34   Epoch[01](2/2): current batch loss = 6.90514231, average epoch loss = 6.37668443
+2026-03-02 10:46:34   epoch 01 time: 0:00:35
+2026-03-02 10:46:34   Learning rate: 4.60e-06
+2026-03-02 10:46:34   ===== Evaluating Sequence: Urban =====
+2026-03-02 10:46:42   Extracted 955 database features in 7.35s
+2026-03-02 10:47:54   Extracted 13810 query features in 72.35s
+2026-03-02 10:47:54   FAISS search completed in 0.24s
+2026-03-02 10:47:56   Recalls: 62.92541636495294,79.17451122375091,81.79580014482259,83.35988414192614
+2026-03-02 10:47:56   Recalls for Urban: R@1: 62.9, R@5: 79.2, R@10: 81.8, R@20: 83.4
+2026-03-02 10:47:56   ================================================
+2026-03-02 10:47:57   Start 2-stage training epoch: 02
+2026-03-02 10:48:15   Epoch[02](1/2): current batch loss = 5.59921265, average epoch loss = 5.59921265
+2026-03-02 10:48:33   Epoch[02](2/2): current batch loss = 5.31264973, average epoch loss = 5.45593119
+2026-03-02 10:48:33   epoch 02 time: 0:00:35
+2026-03-02 10:48:33   Learning rate: 6.40e-06
+2026-03-02 10:48:33   ===== Evaluating Sequence: Urban =====
+2026-03-02 10:48:39   Extracted 955 database features in 6.90s
+2026-03-02 10:49:47   Extracted 13810 query features in 67.67s
+2026-03-02 10:49:47   FAISS search completed in 0.26s
+2026-03-02 10:49:48   Recalls: 62.903692976104274,79.18175235336713,81.77407675597394,83.35264301230993
+2026-03-02 10:49:49   Recalls for Urban: R@1: 62.9, R@5: 79.2, R@10: 81.8, R@20: 83.4
+2026-03-02 10:49:49   ================================================
+2026-03-02 10:49:50   Start 2-stage training epoch: 03
+2026-03-02 10:50:07   Epoch[03](1/2): current batch loss = 9.45616150, average epoch loss = 9.45616150
+2026-03-02 10:50:24   Epoch[03](2/2): current batch loss = 5.41337252, average epoch loss = 7.43476701
+2026-03-02 10:50:24   epoch 03 time: 0:00:34
+2026-03-02 10:50:24   Learning rate: 8.20e-06
+2026-03-02 10:50:24   ===== Evaluating Sequence: Urban =====
+2026-03-02 10:50:31   Extracted 955 database features in 6.73s
+2026-03-02 10:51:37   Extracted 13810 query features in 66.57s
+2026-03-02 10:51:37   FAISS search completed in 0.24s
+2026-03-02 10:51:38   Recalls: 62.91817523533672,79.09485879797248,81.73062997827661,83.35988414192614
+2026-03-02 10:51:39   Recalls for Urban: R@1: 62.9, R@5: 79.1, R@10: 81.7, R@20: 83.4
+2026-03-02 10:51:39   ================================================
+2026-03-02 10:51:40   Start 2-stage training epoch: 04
+2026-03-02 10:51:57   Epoch[04](1/2): current batch loss = 7.10402870, average epoch loss = 7.10402870
+2026-03-02 10:52:15   Epoch[04](2/2): current batch loss = 5.38630724, average epoch loss = 6.24516797
+2026-03-02 10:52:15   epoch 04 time: 0:00:35
+2026-03-02 10:52:15   
+Traceback (most recent call last):
+  File "/home/jwkim/workspace/THR2RGB_Cross_Place_Recognition/train_wandb_2stage.py", line 309, in <module>
+    scheduler.step()
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/optim/lr_scheduler.py", line 712, in step
+    scheduler.step(0)
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/optim/lr_scheduler.py", line 159, in step
+    values = self._get_closed_form_lr()
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/optim/lr_scheduler.py", line 876, in _get_closed_form_lr
+    return [self.eta_min + (base_lr - self.eta_min) *
+  File "/home/jwkim/.local/lib/python3.10/site-packages/torch/optim/lr_scheduler.py", line 877, in <listcomp>
+    (1 + math.cos(math.pi * self.last_epoch / self.T_max)) / 2
+ZeroDivisionError: float division by zero
+
